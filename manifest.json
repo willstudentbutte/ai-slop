@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Sora Explore - Unique Views",
+  "version": "0.4.0",
+  "description": "Overlays unique view counts on Sora Explore videos.",
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": ["https://sora.chatgpt.com/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://sora.chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "host_permissions": ["https://sora.chatgpt.com/*"]
+}
