@@ -1,0 +1,8 @@
+﻿Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Sora Explore - Unique Views
+Upstream-Contact: William Cruttenden <william@cruttenden.dev>
+Source: https://github.com/williamcruttenden/sora-unique-views
+
+Files: *
+Copyright: 2025 William Cruttenden
+License: Polyform-Noncommercial-1.0.0
