@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Sora Explore - Unique Views",
-  "version": "0.4.0",
-  "description": "Overlays unique view counts on Sora Explore videos.",
+  "version": "0.6.0",
+  "description": "Overlays unique views and like rate (likes ÷ unique) on Sora Explore videos.",
   "icons": {
     "16": "icons/16.png",
     "48": "icons/48.png",
@@ -28,5 +28,9 @@
       "run_at": "document_start"
     }
   ],
-  "host_permissions": ["https://sora.chatgpt.com/*"]
+  "host_permissions": ["https://sora.chatgpt.com/*"],
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  }
 }
