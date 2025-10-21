@@ -22,7 +22,7 @@ Shows unique view counts right on Sora Explore, profile grids, and post pages.
 This project is licensed under the Polyform Noncommercial License 1.0.0 (see [LICENSE](./LICENSE)).
 
 - ✅ You may use, modify, and share for **noncommercial** purposes.
-- 🚫 **Commercial** use requires a separate paid license (see [LICENSE-COMMERCIAL](./LICENSE-COMMERCIAL); contact william@cruttenden.dev).
+- 🚫 **Commercial** use requires a separate paid license (see [LICENSE-COMMERCIAL](./LICENSE-COMMERCIAL); contact will@cruttenden.com).
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 
