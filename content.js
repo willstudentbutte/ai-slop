@@ -12,3 +12,52 @@
   s.onload = () => s.remove();
   (document.head || document.documentElement).appendChild(s);
 })();
+
+// Listen for metrics snapshots posted from the injected script and persist to storage.
+(function () {
+  const PENDING = [];
+  let flushTimer = null;
+
+  function scheduleFlush() {
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, 750);
+  }
+
+  function onMessage(ev) {
+    if (ev?.source !== window) return;
+    const d = ev?.data;
+    if (!d || d.__sora_uv__ !== true || d.type !== 'metrics_batch' || !Array.isArray(d.items)) return;
+    for (const it of d.items) PENDING.push(it);
+    scheduleFlush();
+  }
+
+  async function flush() {
+    flushTimer = null;
+    if (!PENDING.length) return;
+    const items = PENDING.splice(0, PENDING.length);
+    try {
+      const { metrics = { users: {} } } = await chrome.storage.local.get('metrics');
+      for (const snap of items) {
+        const userKey = snap.userKey || snap.pageUserKey || 'unknown';
+        const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {} });
+        const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
+        if (!post.url && snap.url) post.url = snap.url;
+        if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
+
+        const s = { t: snap.ts || Date.now(), uv: snap.uv ?? null, likes: snap.likes ?? null, views: snap.views ?? null };
+        const last = post.snapshots[post.snapshots.length - 1];
+        const same = last && last.uv === s.uv && last.likes === s.likes && last.views === s.views;
+        if (!same) {
+          post.snapshots.push(s);
+          if (post.snapshots.length > 300) post.snapshots.splice(0, post.snapshots.length - 300);
+        }
+        post.lastSeen = Date.now();
+      }
+      await chrome.storage.local.set({ metrics });
+    } catch (e) {
+      // swallow errors
+    }
+  }
+
+  window.addEventListener('message', onMessage);
+})();

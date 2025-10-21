@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sora Metrics Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Sora Metrics</div>
+    <div class="actions">
+      <div class="user-picker">
+        <input id="search" type="search" placeholder="Type to find user…" autocomplete="off" />
+        <div id="suggestions" class="suggestions"></div>
+      </div>
+      <select id="userSelect" title="All users"></select>
+      <button id="refresh">Refresh</button>
+      <button id="export">Export CSV</button>
+      <button id="resetZoom" title="Reset zoom to fit">Reset Zoom</button>
+      <button id="showAll" title="Show all posts">Show All</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <h3>Posts</h3>
+      <div id="posts" class="posts"></div>
+    </aside>
+    <section class="content">
+      <div class="chart-wrap">
+        <canvas id="chart" width="900" height="540"></canvas>
+        <div id="tooltip" class="tooltip"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <div class="help">Y: Like rate (%) • X: Unique viewers • Drag to zoom • Hover to focus series • Click point to open post • Toggle visibility in the left list</div>
+    </section>
+  </main>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
