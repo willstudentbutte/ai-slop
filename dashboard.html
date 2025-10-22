@@ -18,13 +18,16 @@
       <button id="refresh">Refresh</button>
       <button id="export">Export CSV</button>
       <button id="resetZoom" title="Reset zoom to fit">Reset Zoom</button>
-      <button id="showAll" title="Show all posts">Show All</button>
     </div>
   </header>
 
   <main class="layout">
     <aside class="sidebar">
       <h3>Posts</h3>
+      <div class="list-actions">
+        <button id="showAll" title="Show all posts">Show All</button>
+        <button id="hideAll" title="Hide all posts">Hide All</button>
+      </div>
       <div id="posts" class="posts"></div>
     </aside>
     <section class="content">
@@ -32,7 +35,7 @@
         <canvas id="chart" width="900" height="540"></canvas>
         <div id="tooltip" class="tooltip"></div>
       </div>
-      <div class="legend" id="legend"></div>
+      
       <div class="help">Y: Like rate (%) • X: Unique viewers • Drag to zoom • Hover to focus series • Click point to open post • Toggle visibility in the left list</div>
     </section>
   </main>
