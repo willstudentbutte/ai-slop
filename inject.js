@@ -432,6 +432,10 @@
       const uv = getUniqueViews(it);
       const likes = getLikes(it);
       const tv = getTotalViews(it);
+      const cm = getComments(it);
+      const rx = getRemixes(it);
+      const sh = getShares(it);
+      const dl = getDownloads(it);
       const p = it?.post || it || {};
       const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const ageMin = minutesSince(created_at);
