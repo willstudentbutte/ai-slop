@@ -45,6 +45,14 @@
 
   // ---------- helpers ----------
   const minutesSince = (epochSec)=>!epochSec?Infinity:Math.max(0, (Date.now()/1000-epochSec)/60);
+  const likeRate = (likes, unique, views) => {
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return null;
+    const u = Number(unique);
+    const v = Number(views);
+    const denom = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(v) && v > 0) ? v : null);
+    return denom ? fmtPct(l, denom) : null;
+  };
   const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
@@ -241,8 +249,10 @@
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
+      const likes = idToLikes.get(id);
+      const totalViews = idToViews.get(id);
       const meta = idToMeta.get(id);
-      addBadge(card, uv, meta);
+      addBadge(card, uv, likes, totalViews, meta);
     }
     applyFilter();
   }
@@ -347,7 +357,10 @@
     const sid = currentSIdFromURL();
     if (!sid) return;
     const uv = idToUnique.get(sid);
-    if (uv == null) return;
+    const likes = idToLikes.get(sid);
+    const totalViews = idToViews.get(sid);
+    const rate = likeRate(likes, uv, totalViews);
+    if (uv == null && !rate) return;
     const el = ensureDetailBadge();
     const meta = idToMeta.get(sid);
 
