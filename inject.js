@@ -30,6 +30,14 @@
   // ==== Helpers ====
   const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
   const minutesSince = (epochSec)=>!epochSec?Infinity:Math.max(0, (Date.now()/1000-epochSec)/60);
+  const likeRate = (likes, unique, views) => {
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return null;
+    const u = Number(unique);
+    const v = Number(views);
+    const denom = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(v) && v > 0) ? v : null);
+    return denom ? fmtPct(l, denom) : null;
+  };
   const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
@@ -192,11 +200,16 @@
     return badge;
   }
 
-  function addBadge(card, views, meta) {
-    if (views == null && !meta) return;
+  function addBadge(card, uniqueViews, likes, totalViews, meta) {
+    const rate = likeRate(likes, uniqueViews, totalViews);
+    if (uniqueViews == null && !meta && !rate) return;
     const badge = ensureBadge(card);
     const parts = [];
-    if (views != null) parts.push(`Unique: ${fmt(views)}`);
+    if (uniqueViews != null) {
+      parts.push(rate ? `Unique: ${fmt(uniqueViews)} • ${rate}` : `Unique: ${fmt(uniqueViews)}`);
+    } else if (rate) {
+      parts.push(`Like rate: ${rate}`);
+    }
     if (meta) {
       const ageStr = Number.isFinite(meta.ageMin) ? `${Math.round(meta.ageMin)}m` : '';
       const velStr = meta.velPerHour ? `↑ ${fmt(meta.velPerHour)}/h` : '';
@@ -206,9 +219,18 @@
     badge.textContent = parts.join('  —  ');
     badge.style.background = meta?.remixNow ? 'rgba(255,69,0,0.85)' : 'rgba(0,0,0,0.72)';
     const ageRounded = meta && Number.isFinite(meta.ageMin) ? Math.round(meta.ageMin) : '∞';
-    badge.title = meta
-      ? `Score: ${meta.score}\nVelocity: ${meta.velPerHour || 0}/h\nAge: ${ageRounded} min${meta.remixNow ? '\nRemix now ✅' : ''}`
-      : '';
+    const tooltipLines = [];
+    if (uniqueViews != null) tooltipLines.push(`Unique: ${fmt(uniqueViews)}`);
+    if (likes != null) tooltipLines.push(`Likes: ${fmt(likes)}`);
+    if (totalViews != null) tooltipLines.push(`Views: ${fmt(totalViews)}`);
+    if (rate) tooltipLines.push(`Like rate: ${rate}`);
+    if (meta) {
+      tooltipLines.push(`Score: ${meta.score}`);
+      tooltipLines.push(`Velocity: ${meta.velPerHour || 0}/h`);
+      tooltipLines.push(`Age: ${ageRounded} min`);
+      if (meta.remixNow) tooltipLines.push('Remix now ✅');
+    }
+    badge.title = tooltipLines.join('\n');
   }
 
   function renderBadges() {
@@ -217,8 +239,10 @@
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
+      const likes = idToLikes.get(id);
+      const totalViews = idToViews.get(id);
       const meta = idToMeta.get(id);
-      addBadge(card, uv, meta);
+      addBadge(card, uv, likes, totalViews, meta);
     }
     applyFilter();
     resortGrid();
@@ -342,11 +366,18 @@
     const sid = currentSIdFromURL();
     if (!sid) return;
     const uv = idToUnique.get(sid);
-    if (uv == null) return;
+    const likes = idToLikes.get(sid);
+    const totalViews = idToViews.get(sid);
+    const rate = likeRate(likes, uv, totalViews);
+    if (uv == null && !rate) return;
     const el = ensureDetailBadge();
     const meta = idToMeta.get(sid);
     const parts = [];
-    if (uv != null) parts.push(`Unique: ${fmt(uv)}`);
+    if (uv != null) {
+      parts.push(rate ? `Unique: ${fmt(uv)} • ${rate}` : `Unique: ${fmt(uv)}`);
+    } else if (rate) {
+      parts.push(`Like rate: ${rate}`);
+    }
     if (meta) {
       const ageStr = Number.isFinite(meta.ageMin) ? `${Math.round(meta.ageMin)}m` : '';
       const velStr = meta.velPerHour ? `↑ ${fmt(meta.velPerHour)}/h` : '';
@@ -356,9 +387,18 @@
     el.textContent = parts.join('  —  ');
     el.style.background = meta?.remixNow ? 'rgba(255,69,0,0.85)' : 'rgba(0,0,0,0.75)';
     const ageRounded = meta && Number.isFinite(meta.ageMin) ? Math.round(meta.ageMin) : '∞';
-    el.title = meta
-      ? `Score: ${meta.score}\nVelocity: ${meta.velPerHour || 0}/h\nAge: ${ageRounded} min${meta.remixNow ? '\nRemix now ✅' : ''}`
-      : '';
+    const tooltipLines = [];
+    if (uv != null) tooltipLines.push(`Unique: ${fmt(uv)}`);
+    if (likes != null) tooltipLines.push(`Likes: ${fmt(likes)}`);
+    if (totalViews != null) tooltipLines.push(`Views: ${fmt(totalViews)}`);
+    if (rate) tooltipLines.push(`Like rate: ${rate}`);
+    if (meta) {
+      tooltipLines.push(`Score: ${meta.score}`);
+      tooltipLines.push(`Velocity: ${meta.velPerHour || 0}/h`);
+      tooltipLines.push(`Age: ${ageRounded} min`);
+      if (meta.remixNow) tooltipLines.push('Remix now ✅');
+    }
+    el.title = tooltipLines.join('\n');
   }
 
   // ---------- observers ----------
