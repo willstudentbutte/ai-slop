@@ -249,15 +249,10 @@
     });
 
     const prefs = getPrefs();
-
-    const sortBtn = document.createElement('button');
-    stylBtn(sortBtn);
-    sortBtn.textContent = prefs.sortHot ? 'Sort: Hot' : 'Sort: Default';
-    sortBtn.onclick = ()=>{
-      const p=getPrefs(); p.sortHot=!p.sortHot; setPrefs(p);
-      sortBtn.textContent = p.sortHot ? 'Sort: Hot' : 'Sort: Default';
-      resortGrid();
-    };
+    if (prefs.sortHot) {
+      delete prefs.sortHot;
+      setPrefs(prefs);
+    }
 
     const filterBtn = document.createElement('button');
     stylBtn(filterBtn);
@@ -268,7 +263,6 @@
       applyFilter();
     };
 
-    bar.appendChild(sortBtn);
     bar.appendChild(filterBtn);
     document.documentElement.appendChild(bar);
     controlBar = bar;
