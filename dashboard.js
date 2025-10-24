@@ -24,6 +24,26 @@
     return String(n);
   }
 
+  // Fixed-two-decimal formatter with K/M suffixes
+  function fmt2(n){
+    const v = Number(n);
+    if (!isFinite(v)) return '-';
+    if (v >= 1e6) return (v/1e6).toFixed(2)+'M';
+    if (v >= 1e3) return (v/1e3).toFixed(2)+'K';
+    return v.toFixed(2);
+  }
+
+  function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
+  function interactionsOfSnap(s){
+    if (!s) return 0;
+    const likes = num(s.likes);
+    const comments = num(s.comments ?? s.reply_count); // prefer non-recursive
+    const remixes = num(s.remixes ?? s.remix_count);
+    const shares = num(s.shares ?? s.share_count);
+    const downloads = num(s.downloads ?? s.download_count);
+    return likes + comments + remixes + shares + downloads;
+  }
+
   function likeRate(likes, uv){
     const a = Number(likes), b = Number(uv);
     if (!isFinite(a) || !isFinite(b) || b <= 0) return null;
@@ -155,6 +175,25 @@
       return a.pidBI < b.pidBI ? 1 : -1; // descending: bigger id => newer first
     });
     const posts = withTs.concat(noTs);
+
+    // Update metric cards (sum of latest values for visible posts)
+    try{
+      const viewsEl = $('#viewsTotal');
+      const likesEl = $('#likesTotal');
+      const interEl = $('#interactionsTotal');
+      let totalViews = 0, totalLikes = 0, totalInteractions = 0;
+      const current = visibleSet ? Array.from(visibleSet) : [];
+      for (const pid of current){
+        const post = user.posts?.[pid];
+        const last = latestSnapshot(post?.snapshots);
+        totalViews += num(last?.views);
+        totalLikes += num(last?.likes);
+        totalInteractions += interactionsOfSnap(last);
+      }
+      if (viewsEl) viewsEl.textContent = fmt2(totalViews);
+      if (likesEl) likesEl.textContent = fmt2(totalLikes);
+      if (interEl) interEl.textContent = fmt2(totalInteractions);
+    } catch {}
 
     for (let i=0;i<posts.length;i++){
       const p = posts[i];
