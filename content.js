@@ -44,9 +44,19 @@
         if (!post.url && snap.url) post.url = snap.url;
         if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
 
-        const s = { t: snap.ts || Date.now(), uv: snap.uv ?? null, likes: snap.likes ?? null, views: snap.views ?? null };
+        const s = {
+          t: snap.ts || Date.now(),
+          uv: snap.uv ?? null,
+          likes: snap.likes ?? null,
+          views: snap.views ?? null,
+          comments: snap.comments ?? null,
+          remixes: snap.remixes ?? null,
+          shares: snap.shares ?? null,
+          downloads: snap.downloads ?? null,
+        };
         const last = post.snapshots[post.snapshots.length - 1];
-        const same = last && last.uv === s.uv && last.likes === s.likes && last.views === s.views;
+        const same = last && last.uv === s.uv && last.likes === s.likes && last.views === s.views &&
+          last.comments === s.comments && last.remixes === s.remixes && last.shares === s.shares && last.downloads === s.downloads;
         if (!same) {
           post.snapshots.push(s);
           if (post.snapshots.length > 300) post.snapshots.splice(0, post.snapshots.length - 300);

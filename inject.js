@@ -95,6 +95,67 @@
     return null;
   };
 
+  const getComments = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.reply_count,
+        p?.comments_count,
+        p?.comment_count,
+        p?.stats?.reply_count,
+        p?.statistics?.reply_count,
+      ];
+      for (const v of cands) if (Number.isFinite(Number(v))) return Number(v);
+    } catch {}
+    return null;
+  };
+
+  const getRemixes = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.recursive_remix_count,
+        p?.remix_count,
+        p?.remixes_count,
+        p?.remixes,
+        p?.stats?.remix_count,
+        p?.statistics?.remix_count,
+      ];
+      for (const v of cands) if (Number.isFinite(Number(v))) return Number(v);
+    } catch {}
+    return null;
+  };
+
+  const getShares = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.share_count,
+        p?.shares_count,
+        p?.shares,
+        p?.stats?.share_count,
+        p?.statistics?.share_count,
+      ];
+      for (const v of cands) if (Number.isFinite(Number(v))) return Number(v);
+    } catch {}
+    return null;
+  };
+
+  const getDownloads = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.download_count,
+        p?.downloads_count,
+        p?.downloads,
+        p?.stats?.download_count,
+        p?.statistics?.download_count,
+      ];
+      for (const v of cands) if (Number.isFinite(Number(v))) return Number(v);
+    } catch {}
+    return null;
+  };
+
   const getThumbnail = (item) => {
     try {
       const p = item?.post ?? item;
@@ -457,15 +518,18 @@
       const uv = getUniqueViews(it);
       const likes = getLikes(it);
       const tv = getTotalViews(it);
+      const cm = getComments(it);
+      const rx = getRemixes(it);
+      const sh = getShares(it);
+      const dl = getDownloads(it);
       const p = it?.post || it || {};
-      const remixes = Number(p?.remix_count ?? p?.remixes ?? p?.remixCount ?? p?.total_remix_count ?? 0) || 0;
       const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const th = getThumbnail(it);
       if (!id) continue;
       if (uv != null) {
         idToUnique.set(id, uv);
         const velPerHour = updateVelocity(id, uv);
-        const meta = calcHotness({ likes: likes ?? 0, remixes, views: uv, created_at, velPerHour });
+        const meta = calcHotness({ likes: likes ?? 0, remixes: rx ?? 0, views: uv, created_at, velPerHour });
         idToMeta.set(id, meta);
         lastScores.push(meta.score); if (lastScores.length > 200) lastScores.shift();
       }
@@ -476,7 +540,7 @@
       const pageUserKey = pf?.userKey || null;
       const pageUserHandle = pf?.userHandle || null;
       const absUrl = `${location.origin}/p/${id}`;
-      batch.push({ postId: id, uv, likes, views: tv, remixes, created_at, thumb: th, url: absUrl, pageUserKey, pageUserHandle, ...meta, ts: Date.now() });
+      batch.push({ postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, created_at, thumb: th, url: absUrl, pageUserKey, pageUserHandle, ...meta, ts: Date.now() });
     }
     if (batch.length) try { window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*'); } catch {}
     renderBadges();
