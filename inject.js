@@ -19,6 +19,17 @@
     const digits = p < 10 ? 1 : 0;
     return p.toFixed(digits) + '%';
   };
+  // ==== Hotness config ====
+  const HALF_LIFE_MIN = 120;          // freshness decay half-life in minutes
+  const VEL_UNIT = 60;                // velocity window factor: /min * 60 = per hour
+  const REMIX_MIN_LIKES = 50;         // remix flag min likes
+  const REMIX_MAX_AGE_MIN = 90;       // remix flag max age
+  const BASE_REMIX_SCORE_THRESH = 80; // fallback threshold for "Remix now"
+  const PREF_KEY = 'SORA_UV_PREFS_V1';// localStorage key for UI prefs
+
+  // ==== Helpers ====
+  const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
+  const minutesSince = (epochSec)=>!epochSec?Infinity:Math.max(0, (Date.now()/1000-epochSec)/60);
   const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
@@ -121,9 +132,41 @@
   const idToUnique = new Map();
   const idToLikes  = new Map();
   const idToViews  = new Map();
+  // Hotness state
+  const idToMeta  = new Map(); // id -> { score, ageMin, velPerHour, remixNow }
+  const idLastObs = new Map(); // id -> { uv, t } for velocity calc
+  let controlBar = null;       // UI node for sort/filter
+  const lastScores = [];       // rolling score distribution for dynamic threshold
 
-  function addBadge(card, unique, likes, views) {
-    if (unique == null) return;
+  function updateVelocity(id, uv) {
+    const now = Date.now();
+    const prev = idLastObs.get(id);
+    idLastObs.set(id, { uv, t: now });
+    if (!prev || uv == null || prev.uv == null) return 0;
+    const dtMin = (now - prev.t) / 60000;
+    if (dtMin <= 0.2) return 0; // throttle jitter
+    const d = uv - prev.uv;
+    return Math.max(0, Math.round((d / dtMin) * VEL_UNIT)); // views/hour
+  }
+
+  function dynamicRemixThreshold() {
+    if (lastScores.length < 20) return BASE_REMIX_SCORE_THRESH;
+    const sorted = [...lastScores].sort((a,b)=>a-b);
+    const p75 = sorted[Math.floor(0.75*(sorted.length-1))];
+    return Math.max(BASE_REMIX_SCORE_THRESH, Math.min(5000, Math.round(p75)));
+  }
+
+  function calcHotness({ likes=0, remixes=0, views=0, created_at=null, velPerHour=0 }) {
+    const ageMin = minutesSince(created_at);
+    const decay = Math.pow(2, -ageMin / HALF_LIFE_MIN); // freshness decay
+    const momentum = (likes + 2*remixes) * (1 + Math.log10((views||0)+1)); // engagement × log(views)
+    const velBonus = 1 + clamp(velPerHour / 2000, 0, 2); // bonus for fast movers
+    const score = Math.round(momentum * velBonus * decay);
+    const remixNow = (likes >= REMIX_MIN_LIKES && ageMin <= REMIX_MAX_AGE_MIN) || (score >= dynamicRemixThreshold());
+    return { score, ageMin, velPerHour, remixNow };
+  }
+
+  function ensureBadge(card) {
     let badge = card.querySelector('.sora-uv-badge');
     if (!badge) {
       if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
@@ -138,7 +181,7 @@
         lineHeight: '1',
         fontWeight: '600',
         borderRadius: '8px',
-        background: 'rgba(0,0,0,0.7)',
+        background: 'rgba(0,0,0,0.72)',
         color: '#fff',
         zIndex: 9999,
         pointerEvents: 'none',
@@ -146,35 +189,127 @@
       });
       card.appendChild(badge);
     }
-    // Prefer unique viewers as denominator; fallback to total views
-    const denom = (unique != null && unique > 0) ? unique : ((views != null && views > 0) ? views : null);
-    const rate = (likes != null && denom != null) ? fmtPct(likes, denom) : null;
+    return badge;
+  }
 
-    if (rate != null) {
-      badge.textContent = `Unique: ${fmt(unique)} • ${rate}`;
-    } else if (likes != null && views != null) {
-      // Fallback: show raw likes/views if we can't compute rate for some reason
-      badge.textContent = `Unique: ${fmt(unique)} • ${fmt(likes)}/${fmt(views)}`;
-    } else if (likes != null) {
-      badge.textContent = `Unique: ${fmt(unique)} • ${fmt(likes)} likes`;
-    } else if (views != null) {
-      badge.textContent = `Unique: ${fmt(unique)} • ${fmt(views)} views`;
-    } else {
-      badge.textContent = `Unique: ${fmt(unique)}`;
+  function addBadge(card, views, meta) {
+    if (views == null && !meta) return;
+    const badge = ensureBadge(card);
+    const parts = [];
+    if (views != null) parts.push(`Unique: ${fmt(views)}`);
+    if (meta) {
+      const ageStr = Number.isFinite(meta.ageMin) ? `${Math.round(meta.ageMin)}m` : '';
+      const velStr = meta.velPerHour ? `↑ ${fmt(meta.velPerHour)}/h` : '';
+      const scoreStr = `🔥 ${meta.score}`;
+      parts.push([scoreStr, velStr, ageStr].filter(Boolean).join(' • '));
     }
-    // Helpful tooltip with raw counts if available
-    const parts = [`Unique: ${fmt(unique)}`];
-    if (likes != null) parts.push(`Likes: ${fmt(likes)}`);
-    if (views != null) parts.push(`Views: ${fmt(views)}`);
-    badge.title = parts.join(' | ');
+    badge.textContent = parts.join('  —  ');
+    badge.style.background = meta?.remixNow ? 'rgba(255,69,0,0.85)' : 'rgba(0,0,0,0.72)';
+    const ageRounded = meta && Number.isFinite(meta.ageMin) ? Math.round(meta.ageMin) : '∞';
+    badge.title = meta
+      ? `Score: ${meta.score}\nVelocity: ${meta.velPerHour || 0}/h\nAge: ${ageRounded} min${meta.remixNow ? '\nRemix now ✅' : ''}`
+      : '';
   }
 
   function renderBadges() {
+    ensureControlBar();
     for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
-      if (uv != null) addBadge(card, uv, idToLikes.get(id), idToViews.get(id));
+      const meta = idToMeta.get(id);
+      addBadge(card, uv, meta);
+    }
+    applyFilter();
+    resortGrid();
+  }
+
+  function getPrefs(){ try{return JSON.parse(localStorage.getItem(PREF_KEY)||'{}')}catch{return{}} }
+  function setPrefs(p){ localStorage.setItem(PREF_KEY, JSON.stringify(p)); }
+
+  function stylBtn(b){
+    Object.assign(b.style,{
+      background:'rgba(255,255,255,0.12)', color:'#fff',
+      border:'1px solid rgba(255,255,255,0.2)', borderRadius:'8px',
+      padding:'4px 8px', cursor:'pointer'
+    });
+    b.onmouseenter=()=>b.style.background='rgba(255,255,255,0.2)';
+    b.onmouseleave=()=>b.style.background='rgba(255,255,255,0.12)';
+  }
+
+  function ensureControlBar(){
+    if (controlBar && document.contains(controlBar)) return controlBar;
+    const bar = document.createElement('div');
+    bar.className='sora-uv-controls';
+    Object.assign(bar.style,{
+      position:'fixed', top:'12px', right:'12px', zIndex:999999,
+      display:'flex', gap:'8px', padding:'6px 8px', borderRadius:'10px',
+      background:'rgba(0,0,0,0.55)', color:'#fff', fontSize:'12px',
+      alignItems:'center', backdropFilter:'blur(2px)', userSelect:'none'
+    });
+
+    const prefs = getPrefs();
+
+    const sortBtn = document.createElement('button');
+    stylBtn(sortBtn);
+    sortBtn.textContent = prefs.sortHot ? 'Sort: Hot' : 'Sort: Default';
+    sortBtn.onclick = ()=>{
+      const p=getPrefs(); p.sortHot=!p.sortHot; setPrefs(p);
+      sortBtn.textContent = p.sortHot ? 'Sort: Hot' : 'Sort: Default';
+      resortGrid();
+    };
+
+    const filterBtn = document.createElement('button');
+    stylBtn(filterBtn);
+    filterBtn.textContent = prefs.filterRemix ? 'Filter: Remix-now' : 'Filter: All';
+    filterBtn.onclick = ()=>{
+      const p=getPrefs(); p.filterRemix=!p.filterRemix; setPrefs(p);
+      filterBtn.textContent = p.filterRemix ? 'Filter: Remix-now' : 'Filter: All';
+      applyFilter();
+    };
+
+    bar.appendChild(sortBtn);
+    bar.appendChild(filterBtn);
+    document.documentElement.appendChild(bar);
+    controlBar = bar;
+    return bar;
+  }
+
+  function gridContainer(){
+    const anchors = Array.from(document.querySelectorAll('a[href^="/p/s_"]'));
+    if (!anchors.length) return null;
+    let parent = anchors[0].parentElement;
+    while (parent && parent!==document.body){
+      const count = parent.querySelectorAll('a[href^="/p/s_"]').length;
+      if (count===anchors.length) return parent;
+      parent = parent.parentElement;
+    }
+    return document.body;
+  }
+
+  function resortGrid(){
+    const prefs = getPrefs();
+    if (!prefs.sortHot) return;
+    const container = gridContainer();
+    if (!container) return;
+    const cards = selectAllCards().map(card=>{
+      const id = extractIdFromCard(card);
+      const meta = idToMeta.get(id);
+      return { card, score: meta?.score ?? -1 };
+    });
+    const scored = cards.filter(x=>x.score>=0).length;
+    if (scored < Math.max(6, Math.floor(cards.length*0.5))) return; // wait until enough data
+    cards.sort((a,b)=>b.score-a.score);
+    for (const {card} of cards) container.appendChild(card);
+  }
+
+  function applyFilter(){
+    const prefs = getPrefs();
+    const onlyRemix = !!prefs.filterRemix;
+    for (const card of selectAllCards()){
+      const id = extractIdFromCard(card);
+      const meta = idToMeta.get(id);
+      card.style.display = (!onlyRemix || !!meta?.remixNow) ? '' : 'none';
     }
   }
 
@@ -215,26 +350,21 @@
     const uv = idToUnique.get(sid);
     if (uv == null) return;
     const el = ensureDetailBadge();
-    const likes = idToLikes.get(sid);
-    const views = idToViews.get(sid);
-    // Prefer unique viewers as denominator; fallback to total views
-    const denom = (uv != null && uv > 0) ? uv : ((views != null && views > 0) ? views : null);
-    const rate = (likes != null && denom != null) ? fmtPct(likes, denom) : null;
-    if (rate != null) {
-      el.textContent = `Unique: ${fmt(uv)} • ${rate}`;
-    } else if (likes != null && views != null) {
-      el.textContent = `Unique: ${fmt(uv)} • ${fmt(likes)}/${fmt(views)}`;
-    } else if (likes != null) {
-      el.textContent = `Unique: ${fmt(uv)} • ${fmt(likes)} likes`;
-    } else if (views != null) {
-      el.textContent = `Unique: ${fmt(uv)} • ${fmt(views)} views`;
-    } else {
-      el.textContent = `Unique: ${fmt(uv)}`;
+    const meta = idToMeta.get(sid);
+    const parts = [];
+    if (uv != null) parts.push(`Unique: ${fmt(uv)}`);
+    if (meta) {
+      const ageStr = Number.isFinite(meta.ageMin) ? `${Math.round(meta.ageMin)}m` : '';
+      const velStr = meta.velPerHour ? `↑ ${fmt(meta.velPerHour)}/h` : '';
+      const scoreStr = `🔥 ${meta.score}`;
+      parts.push([scoreStr, velStr, ageStr].filter(Boolean).join(' • '));
     }
-    const titleParts = [`Unique: ${fmt(uv)}`];
-    if (likes != null) titleParts.push(`Likes: ${fmt(likes)}`);
-    if (views != null) titleParts.push(`Views: ${fmt(views)}`);
-    el.title = titleParts.join(' | ');
+    el.textContent = parts.join('  —  ');
+    el.style.background = meta?.remixNow ? 'rgba(255,69,0,0.85)' : 'rgba(0,0,0,0.75)';
+    const ageRounded = meta && Number.isFinite(meta.ageMin) ? Math.round(meta.ageMin) : '∞';
+    el.title = meta
+      ? `Score: ${meta.score}\nVelocity: ${meta.velPerHour || 0}/h\nAge: ${ageRounded} min${meta.remixNow ? '\nRemix now ✅' : ''}`
+      : '';
   }
 
   // ---------- observers ----------
@@ -291,19 +421,28 @@
     for (const it of items) {
       const id = getItemId(it);
       const uv = getUniqueViews(it);
-      const lk = getLikes(it);
+      const likes = getLikes(it);
       const tv = getTotalViews(it);
+      const p = it?.post || it || {};
+      const remixes = Number(p?.remix_count ?? p?.remixes ?? p?.remixCount ?? p?.total_remix_count ?? 0) || 0;
+      const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const th = getThumbnail(it);
       if (!id) continue;
-      if (uv != null) idToUnique.set(id, uv);
-      if (lk != null) idToLikes.set(id, lk);
+      if (uv != null) {
+        idToUnique.set(id, uv);
+        const velPerHour = updateVelocity(id, uv);
+        const meta = calcHotness({ likes: likes ?? 0, remixes, views: uv, created_at, velPerHour });
+        idToMeta.set(id, meta);
+        lastScores.push(meta.score); if (lastScores.length > 200) lastScores.shift();
+      }
+      if (likes != null) idToLikes.set(id, likes);
       if (tv != null) idToViews.set(id, tv);
       const meta = extractUserMeta(it) || {};
       const pf = pageFallbackUser();
       const pageUserKey = pf?.userKey || null;
       const pageUserHandle = pf?.userHandle || null;
       const absUrl = `${location.origin}/p/${id}`;
-      batch.push({ postId: id, uv, likes: lk, views: tv, thumb: th, url: absUrl, pageUserKey, pageUserHandle, ...meta, ts: Date.now() });
+      batch.push({ postId: id, uv, likes, views: tv, remixes, created_at, thumb: th, url: absUrl, pageUserKey, pageUserHandle, ...meta, ts: Date.now() });
     }
     if (batch.length) try { window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*'); } catch {}
     renderBadges();
