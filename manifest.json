@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sora Explore - Unique Views",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Overlays unique views and like rate (likes ÷ unique) on Sora Explore videos.",
   "icons": {
     "16": "icons/16.png",

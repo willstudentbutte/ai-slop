@@ -18,13 +18,16 @@
       <button id="refresh">Refresh</button>
       <button id="export">Export CSV</button>
       <button id="resetZoom" title="Reset zoom to fit">Reset Zoom</button>
-      <button id="showAll" title="Show all posts">Show All</button>
     </div>
   </header>
 
   <main class="layout">
     <aside class="sidebar">
       <h3>Posts</h3>
+      <div class="list-actions">
+        <button id="showAll" title="Show all posts">Show All</button>
+        <button id="hideAll" title="Hide all posts">Hide All</button>
+      </div>
       <div id="posts" class="posts"></div>
     </aside>
     <section class="content">
@@ -32,8 +35,42 @@
         <canvas id="chart" width="900" height="540"></canvas>
         <div id="tooltip" class="tooltip"></div>
       </div>
-      <div class="legend" id="legend"></div>
+      <div id="viewsSummary" class="metric-card" title="Sum of latest views for visible posts">
+        <span class="label">Total views</span>
+        <span id="viewsTotal" class="value">0</span>
+      </div>
+      <div id="likesSummary" class="metric-card" title="Sum of latest likes for visible posts">
+        <span class="label">Total likes</span>
+        <span id="likesTotal" class="value">0.00</span>
+      </div>
+      <div id="repliesSummary" class="metric-card" title="Sum of latest replies for visible posts (non-recursive)">
+        <span class="label">Total replies</span>
+        <span id="repliesTotal" class="value">0.00</span>
+      </div>
+      <div id="remixesSummary" class="metric-card" title="Sum of latest remixes for visible posts (recursive if available)">
+        <span class="label">Total remixes</span>
+        <span id="remixesTotal" class="value">0.00</span>
+      </div>
+      <div id="interactionsSummary" class="metric-card" title="Sum of latest interactions (likes + comments + remixes + shares/downloads) for visible posts">
+        <span class="label">Total interactions</span>
+        <span id="interactionsTotal" class="value">0.00</span>
+      </div>
+      <div class="chart-wrap" style="margin-top:10px">
+        <canvas id="viewsChart" width="900" height="540"></canvas>
+        <div id="viewsTooltip" class="tooltip"></div>
+      </div>
+      <div id="followersSummary" class="metric-card" title="Latest follower count for the selected user">
+        <span class="label">Total followers</span>
+        <span id="followersTotal" class="value">0</span>
+      </div>
+      <div class="chart-wrap" style="margin-top:10px">
+        <canvas id="followersChart" width="900" height="540"></canvas>
+        <div id="followersTooltip" class="tooltip"></div>
+      </div>
+      
       <div class="help">Y: Like rate (%) • X: Unique viewers • Drag to zoom • Hover to focus series • Click point to open post • Toggle visibility in the left list</div>
+      <div class="help">Below: Cumulative Views by Time • Y: Views • X: Time • Drag to zoom • Hover to focus series • Click point to open post</div>
+      <div class="help">Below: Cumulative Followers by Time • Y: Followers • X: Time • Drag to zoom</div>
     </section>
   </main>
 
