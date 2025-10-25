@@ -536,11 +536,42 @@
       if (likes != null) idToLikes.set(id, likes);
       if (tv != null) idToViews.set(id, tv);
       const meta = extractUserMeta(it) || {};
+      // Try to extract follower count; prioritize the item's main profile
+      let followers = null;
+      try {
+        // Strong preference: the top-level item profile
+        const primary = it?.profile;
+        const primFC = primary?.follower_count ?? primary?.followers_count ?? (primary?.followers && primary.followers.count);
+        if (Number.isFinite(Number(primFC))) followers = Number(primFC);
+        // Fallbacks: post.profile and other attached profiles
+        if (followers == null) {
+          const wantHandle = (meta.userHandle || '').toLowerCase();
+          const wantId = (meta.userId || '').toString();
+          const candidates = [];
+          if (it?.post?.profile) candidates.push(it.post.profile);
+          if (Array.isArray(it?.cameo_profiles)) candidates.push(...it.cameo_profiles);
+          if (Array.isArray(it?.post?.cameo_profiles)) candidates.push(...it.post.cameo_profiles);
+          let best = null;
+          for (const u of candidates){
+            if (!u) continue;
+            const uname = (u.username || u.handle || u.user_name || '').toLowerCase();
+            const uid = (u.user_id || u.id || '').toString();
+            const fc = u.follower_count ?? u.followers_count ?? (u.followers && u.followers.count) ?? null;
+            if (!Number.isFinite(Number(fc))) continue;
+            const val = Number(fc);
+            if ((wantHandle && uname === wantHandle) || (wantId && uid && uid === wantId)) { best = val; break; }
+            if (best == null) best = val;
+          }
+          if (best != null) followers = best;
+        }
+      } catch {}
       const pf = pageFallbackUser();
       const pageUserKey = pf?.userKey || null;
       const pageUserHandle = pf?.userHandle || null;
       const absUrl = `${location.origin}/p/${id}`;
-      batch.push({ postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, created_at, thumb: th, url: absUrl, pageUserKey, pageUserHandle, ...meta, ts: Date.now() });
+      const payload = { postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, created_at, thumb: th, url: absUrl, pageUserKey, pageUserHandle, ...meta, ts: Date.now(), followers };
+      try { console.debug('[SoraMetrics] payload', { postId:id, userKey: payload.userKey || pageUserKey || 'unknown', followers }); } catch {}
+      batch.push(payload);
     }
     if (batch.length) try { window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*'); } catch {}
     renderBadges();
@@ -554,7 +585,8 @@
       const directId = p?.user_id || p?.author_id || p?.owner_id || p?.creator_id || item?.user_id || item?.author_id;
       let candidates = [
         p?.user, p?.author, p?.creator, p?.owner, p?.profile, p?.channel, p?.actor,
-        item?.user, item?.author, item?.creator, item?.owner, item?.profile, item?.channel, item?.actor
+        item?.user, item?.author, item?.creator, item?.owner, item?.profile, item?.channel, item?.actor,
+        item?.post?.profile
       ].filter(Boolean);
       let handle = directHandle || null;
       let id = directId || null;
@@ -569,6 +601,7 @@
         if (pf) return pf;
       }
       const userKey = (handle || id || '').toString().toLowerCase() || 'unknown';
+      try { console.debug('[SoraMetrics] extractUserMeta', { userKey, handle, id }); } catch {}
       return { userHandle: handle || null, userId: id || null, userKey };
     } catch {}
     return null;
