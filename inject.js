@@ -174,6 +174,12 @@
     return m ? m[1] : null;
   }
 
+  // Try to infer the profile handle from the current URL when on a profile page
+  function currentProfileHandleFromURL() {
+    const m = location.pathname.match(/^\/profile\/(?:username\/)?([^\/?#]+)/i);
+    return m ? m[1] : null;
+  }
+
   // ---------- DOM mapping ----------
   const extractIdFromCard = (el) => {
     const link = el.querySelector('a[href^="/p/s_"]');
@@ -427,10 +433,10 @@
     history.replaceState = function() { const r = _replace.apply(this, arguments); fire(); return r; };
     window.addEventListener('popstate', fire);
   })();
-  function onRouteChange() { renderBadges(); renderDetailBadge(); bootstrapIfNeeded(); }
+  function onRouteChange() { renderBadges(); renderDetailBadge(); }
 
   // ---------- network interception ----------
-  const FEED_RE = /\/backend\/project_y\/(feed|profile_feed)/;
+  const FEED_RE = /\/backend\/project_y\/(feed|profile_feed|profile\/)/;
   function installFetchSniffer() {
     const origFetch = window.fetch;
     window.fetch = async function(input, init) {
@@ -512,11 +518,55 @@
     } catch {}
     return null;
   };
+  const getFollowerCount = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        item?.profile?.follower_count, item?.user?.follower_count, item?.author?.follower_count,
+        p?.author?.follower_count, p?.owner?.follower_count,
+        item?.owner_profile?.follower_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+
+  // Try to extract the post owner's identity (handle/id) from the item
+  function getOwner(item){
+    try {
+      const p = item?.post ?? item;
+      const prof = item?.profile || item?.user || item?.author || p?.author || p?.owner || null;
+      let handle = prof?.handle || prof?.username || prof?.name || null;
+      let id = prof?.id || prof?.user_id || prof?._id || null;
+      if (!handle) {
+        // some feeds put it deeper
+        handle = p?.profile?.handle || p?.user?.username || null;
+      }
+      return { handle: (typeof handle === 'string' && handle) ? handle : null, id: id ?? null };
+    } catch { return { handle:null, id:null }; }
+  }
 
   // Build minimal meta (age only) and store counters used for coloring/emojis
   function processFeedJson(json) {
     const items = json?.items || json?.data?.items || [];
+    const pageHandle = isProfile() ? currentProfileHandleFromURL() : null;
+    const pageUserHandle = pageHandle || null;
+    const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
     const batch = [];
+
+    // If this is a profile object (not an items list), capture followers directly
+    try {
+      const profFollowers = Number(json?.follower_count);
+      const profHandle = json?.username || json?.handle || pageUserHandle || null;
+      const profId = json?.user_id || json?.id || null;
+      if (Number.isFinite(profFollowers) && profHandle) {
+        const userKey = `h:${String(profHandle).toLowerCase()}`;
+        batch.push({ followers: profFollowers, ts: Date.now(), userHandle: profHandle, userId: profId, userKey, pageUserHandle, pageUserKey });
+      }
+    } catch {}
     for (const it of items) {
       const id = getItemId(it);
       if (!id) continue;
@@ -543,36 +593,22 @@
       idToMeta.set(id, { ageMin });
 
       const absUrl = `${location.origin}/p/${id}`;
-      batch.push({ postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, created_at, ageMin, thumb: th, url: absUrl, ts: Date.now() });
+      const owner = getOwner(it);
+      const userHandle = owner.handle || pageUserHandle || null;
+      const userId = owner.id || null;
+      const userKey = userHandle ? `h:${userHandle.toLowerCase()}` : (userId != null ? `id:${userId}` : pageUserKey);
+      const followers = getFollowerCount(it);
+      batch.push({ postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, followers, created_at, ageMin, thumb: th, url: absUrl, ts: Date.now(), userHandle, userId, userKey, pageUserHandle, pageUserKey });
     }
     if (batch.length) try { window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*'); } catch {}
     renderBadges();
     renderDetailBadge();
   }
 
-  // ---------- optional bootstrap ----------
-  async function bootstrapIfNeeded() {
-    try {
-      if (isExplore()) await prefetchPaged('/backend/project_y/feed?limit=16&cut=nf2_top', 2);
-      if (isProfile()) await prefetchPaged('/backend/project_y/profile_feed/me?limit=15&cut=nf2', 2);
-    } catch {}
-  }
-  async function prefetchPaged(baseUrl, pages = 1) {
-    let url = baseUrl;
-    for (let i = 0; i < pages; i++) {
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) break;
-      const json = await res.json();
-      processFeedJson(json);
-      const cursor = json?.cursor || json?.data?.cursor;
-      if (!cursor) break;
-      const sep = url.includes('?') ? '&' : '?';
-      url = `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}`;
-    }
-  }
+  // (bootstrap removed to avoid hitting authed endpoints and causing 401s)
 
   // ---------- boot ----------
-  function init(){ installFetchSniffer(); startObservers(); onRouteChange(); bootstrapIfNeeded(); }
+  function init(){ installFetchSniffer(); startObservers(); onRouteChange(); }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init, { once: true });
   } else { init(); }
