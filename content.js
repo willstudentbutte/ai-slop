@@ -39,7 +39,8 @@
       const { metrics = { users: {} } } = await chrome.storage.local.get('metrics');
       for (const snap of items) {
         const userKey = snap.userKey || snap.pageUserKey || 'unknown';
-        const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {} });
+        const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [] });
+        if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
         const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
         if (!post.url && snap.url) post.url = snap.url;
         if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
@@ -62,6 +63,21 @@
           if (post.snapshots.length > 300) post.snapshots.splice(0, post.snapshots.length - 300);
         }
         post.lastSeen = Date.now();
+
+        // Capture follower history at the user level when available
+        if (snap.followers != null) {
+          const fCount = Number(snap.followers);
+          if (Number.isFinite(fCount)) {
+            const arr = userEntry.followers;
+            const t = snap.ts || Date.now();
+            const lastF = arr[arr.length - 1];
+            if (!lastF || lastF.count !== fCount) {
+              arr.push({ t, count: fCount });
+              if (arr.length > 500) arr.splice(0, arr.length - 500);
+              try { console.debug('[SoraMetrics] followers persisted', { userKey, count: fCount, t }); } catch {}
+            }
+          }
+        }
       }
       await chrome.storage.local.set({ metrics });
     } catch (e) {
