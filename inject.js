@@ -249,10 +249,8 @@
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
-      const likes = idToLikes.get(id);
-      const totalViews = idToViews.get(id);
       const meta = idToMeta.get(id);
-      addBadge(card, uv, likes, totalViews, meta);
+      addBadge(card, uv, meta);
     }
     applyFilter();
   }
@@ -421,6 +419,65 @@
     };
   }
 
+  // Additional metric extractors (optional fields)
+  const getComments = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.comment_count, p?.comments_count, p?.comments,
+        p?.reply_count, p?.replies?.count,
+        p?.stats?.comment_count, p?.statistics?.comment_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+  const getRemixes = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.remix_count, p?.remixes,
+        p?.stats?.remix_count, p?.statistics?.remix_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+  const getShares = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.share_count, p?.shares,
+        p?.stats?.share_count, p?.statistics?.share_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+  const getDownloads = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.download_count, p?.downloads,
+        p?.stats?.download_count, p?.statistics?.download_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+
   // Build minimal meta (age only) and store counters used for coloring/emojis
   function processFeedJson(json) {
     const items = json?.items || json?.data?.items || [];
@@ -447,7 +504,7 @@
       idToMeta.set(id, { ageMin });
 
       const absUrl = `${location.origin}/p/${id}`;
-      batch.push({ postId: id, uv, likes, views: tv, created_at, ageMin, thumb: th, url: absUrl, ts: Date.now() });
+      batch.push({ postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, created_at, ageMin, thumb: th, url: absUrl, ts: Date.now() });
     }
     if (batch.length) try { window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*'); } catch {}
     renderBadges();
