@@ -24,6 +24,34 @@
     return String(n);
   }
 
+  // Fixed-two-decimal formatter with K/M suffixes
+  function fmt2(n){
+    const v = Number(n);
+    if (!isFinite(v)) return '-';
+    if (v >= 1e6) return (v/1e6).toFixed(2)+'M';
+    if (v >= 1e3) return (v/1e3).toFixed(2)+'K';
+    return v.toFixed(2);
+  }
+  // Fixed-zero-decimal formatter with K/M suffixes
+  function fmt0(n){
+    const v = Number(n);
+    if (!isFinite(v)) return '-';
+    if (v >= 1e6) return (v/1e6).toFixed(0)+'M';
+    if (v >= 1e3) return (v/1e3).toFixed(0)+'K';
+    return Math.round(v).toString();
+  }
+
+  function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
+  function interactionsOfSnap(s){
+    if (!s) return 0;
+    const likes = num(s.likes);
+    const comments = num(s.comments ?? s.reply_count); // prefer non-recursive
+    const remixes = num(s.remixes ?? s.remix_count);
+    const shares = num(s.shares ?? s.share_count);
+    const downloads = num(s.downloads ?? s.download_count);
+    return likes + comments + remixes + shares + downloads;
+  }
+
   function likeRate(likes, uv){
     const a = Number(likes), b = Number(uv);
     if (!isFinite(a) || !isFinite(b) || b <= 0) return null;
@@ -155,6 +183,31 @@
       return a.pidBI < b.pidBI ? 1 : -1; // descending: bigger id => newer first
     });
     const posts = withTs.concat(noTs);
+
+    // Update metric cards (sum of latest values for visible posts)
+    try{
+      const viewsEl = $('#viewsTotal');
+      const likesEl = $('#likesTotal');
+      const repliesEl = $('#repliesTotal');
+      const remixesEl = $('#remixesTotal');
+      const interEl = $('#interactionsTotal');
+      let totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
+      const current = visibleSet ? Array.from(visibleSet) : [];
+      for (const pid of current){
+        const post = user.posts?.[pid];
+        const last = latestSnapshot(post?.snapshots);
+        totalViews += num(last?.views);
+        totalLikes += num(last?.likes);
+        totalReplies += num(last?.comments); // non-recursive
+        totalRemixes += num(last?.remixes);  // recursive if captured
+        totalInteractions += interactionsOfSnap(last);
+      }
+      if (viewsEl) viewsEl.textContent = fmt2(totalViews);
+      if (likesEl) likesEl.textContent = fmt2(totalLikes);
+      if (repliesEl) repliesEl.textContent = fmt0(totalReplies);
+      if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
+      if (interEl) interEl.textContent = fmt2(totalInteractions);
+    } catch {}
 
     for (let i=0;i<posts.length;i++){
       const p = posts[i];
@@ -409,7 +462,9 @@
     function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
     function setHoverSeries(pid){ state.hoverSeries = pid || null; draw(); }
     function onHover(cb){ hoverCb = cb; }
-    return { setData, resetZoom, setHoverSeries, onHover };
+    function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
   function makeTimeChart(canvas){
@@ -533,7 +588,44 @@
     function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
     function setHoverSeries(pid){ state.hoverSeries=pid||null; draw(); }
     function onHover(cb){ hoverCb=cb; }
-    return { setData, resetZoom, setHoverSeries, onHover };
+    function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
+  }
+
+  // Followers time chart (single-series, Y-axis = Followers)
+  function makeFollowersChart(canvas){
+    const ctx = canvas.getContext('2d');
+    const DPR = Math.max(1, window.devicePixelRatio||1);
+    let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
+    const M = { left:58, top:20, right:30, bottom:40 };
+    function resize(){ W=canvas.clientWidth||canvas.width; H=canvas.clientHeight||canvas.height; canvas.width=Math.floor(W*DPR); canvas.height=Math.floor(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0); draw(); }
+    const state = { series:[], x:[0,1], y:[0,1], zoomX:null, zoomY:null, hover:null };
+    function setData(series){ state.series = series; const xs=[], ys=[]; for (const s of series){ for (const p of s.points){ xs.push(p.x); ys.push(p.y); } } state.x=extent(xs,d=>d); state.y=extent(ys,d=>d); draw(); }
+    function mapX(x){ const [a,b]=(state.zoomX||state.x); return M.left + ((x-a)/(b-a||1))*(W-(M.left+M.right)); }
+    function mapY(y){ const [a,b]=(state.zoomY||state.y); return H - M.bottom - ((y-a)/(b-a||1))*(H-(M.top+M.bottom)); }
+    function clampToPlot(px,py){ const x=Math.max(M.left,Math.min(W-M.right,px)); const y=Math.max(M.top,Math.min(H-M.bottom,py)); return [x,y]; }
+    function grid(){ ctx.strokeStyle='#25303b'; ctx.lineWidth=1; ctx.setLineDash([4,4]); for (let i=0;i<6;i++){ const x=M.left+i*(W-(M.left+M.right))/5; ctx.beginPath(); ctx.moveTo(x,M.top); ctx.lineTo(x,H-M.bottom); ctx.stroke(); } for (let i=0;i<6;i++){ const y=M.top+i*(H-(M.top+M.bottom))/5; ctx.beginPath(); ctx.moveTo(M.left,y); ctx.lineTo(W-M.right,y); ctx.stroke(); } ctx.setLineDash([]); }
+    function fmtDate(t){ try { const d=new Date(t); return d.toLocaleDateString(undefined,{month:'short',day:'2-digit'}); } catch { return String(t); } }
+    function axes(){ const xDomain=state.zoomX||state.x; const yDomain=state.zoomY||state.y; ctx.strokeStyle='#607080'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(M.left,M.top); ctx.lineTo(M.left,H-M.bottom); ctx.lineTo(W-M.right,H-M.bottom); ctx.stroke(); ctx.fillStyle='#a7b0ba'; ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Arial'; const xticks=5, yticks=5; for (let i=0;i<=xticks;i++){ const x=M.left+i*(W-(M.left+M.right))/xticks; const v=Math.round(xDomain[0]+i*(xDomain[1]-xDomain[0])/xticks); ctx.fillText(fmtDate(v), x-24, H-(M.bottom-18)); } for (let i=0;i<=yticks;i++){ const y=H-M.bottom - i*(H-(M.top+M.bottom))/yticks; const v=yDomain[0]+i*(yDomain[1]-yDomain[0])/yticks; ctx.fillText(fmt2(v), 10, y+4); } ctx.fillStyle='#e8eaed'; ctx.font='bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial'; ctx.fillText('Time', W/2-20, H-6); ctx.save(); ctx.translate(12,H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Followers',0,0); ctx.restore(); }
+    function drawSeries(){ const s=state.series[0]; if (!s) return; ctx.strokeStyle=s.color||'#ffd166'; ctx.lineWidth=1.6; ctx.beginPath(); const pts=[...s.points].sort((a,b)=>a.t-b.t); for (let i=0;i<pts.length;i++){ const p=pts[i]; const x=mapX(p.x), y=mapY(p.y); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); } ctx.stroke(); for (const p of pts){ const x=mapX(p.x), y=mapY(p.y); ctx.fillStyle=s.color||'#ffd166'; ctx.beginPath(); ctx.arc(x,y,2.4,0,Math.PI*2); ctx.fill(); }
+    }
+    function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); }
+    const tooltip = $('#followersTooltip');
+    function nearest(mx,my){ const s=state.series[0]; if (!s) return null; let best=null,bd=Infinity; for (const p of s.points){ const x=mapX(p.x), y=mapY(p.y); if (x<M.left||x>W-M.right||y<M.top||y>H-M.bottom) continue; const d=Math.hypot(mx-x,my-y); if (d<bd && d<16){ bd=d; best={ x:p.x, y:p.y, t:p.t, color:s.color }; } } return best; }
+    function showTooltip(h,cx,cy){ if (!h){ tooltip.style.display='none'; return; } tooltip.style.display='block'; tooltip.style.left=(cx+12)+'px'; tooltip.style.top=(cy+12)+'px'; tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>Followers</strong></div>`+`<div>${fmtDate(h.x)} • Followers: ${fmt2(h.y)}</div>`; }
+    let drag=null; canvas.addEventListener('mousemove',(e)=>{ const rect=canvas.getBoundingClientRect(); const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); return; } const h=nearest(mx,my); state.hover=h; draw(); showTooltip(h,e.clientX,e.clientY); });
+    canvas.addEventListener('mouseleave', ()=>{ state.hover=null; draw(); showTooltip(null); });
+    canvas.addEventListener('mousedown',(e)=>{ const rect=canvas.getBoundingClientRect(); let x0=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y0=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; drag={x0,y0,x1:null,y1:null}; });
+    window.addEventListener('mouseup',(e)=>{ if (!drag) return; const rect=canvas.getBoundingClientRect(); let x1=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y1=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; const [cx0,cy0]=clampToPlot(drag.x0,drag.y0); const [cx1,cy1]=clampToPlot(x1,y1); drag.x1=cx1; drag.y1=cy1; const minW=10,minH=10; const w=Math.abs(cx1-cx0), h=Math.abs(cy1-cy0); if (w>minW && h>minH){ const [X0,X1]=[cx0,cx1].sort((a,b)=>a-b); const [Y0,Y1]=[cy0,cy1].sort((a,b)=>a-b); const invMapX=(px)=>{ const [a,b]=(state.zoomX||state.x); return a + ((px-M.left)/(W-(M.left+M.right)))*(b-a); }; const invMapY=(py)=>{ const [a,b]=(state.zoomY||state.y); return a + (((H-M.bottom)-py)/(H-(M.top+M.bottom)))*(b-a); }; state.zoomX=[invMapX(X0),invMapX(X1)]; state.zoomY=[invMapY(Y1),invMapY(Y0)]; } drag=null; draw(); showTooltip(null); });
+    function drawDragRect(d){ if (!d||d.x1==null||d.y1==null) return; ctx.save(); ctx.strokeStyle='#7dc4ff'; ctx.fillStyle='#7dc4ff22'; ctx.lineWidth=1; ctx.setLineDash([4,3]); const x0=Math.max(M.left,Math.min(W-M.right,d.x0)); const y0=Math.max(M.top,Math.min(H-M.bottom,d.y0)); const x1=Math.max(M.left,Math.min(W-M.right,d.x1)); const y1=Math.max(M.top,Math.min(H-M.bottom,d.y1)); const x=Math.min(x0,x1), y=Math.min(y0,y1), w=Math.abs(x1-x0), h=Math.abs(y1-y0); ctx.strokeRect(x,y,w,h); ctx.fillRect(x,y,w,h); ctx.restore(); }
+    canvas.addEventListener('dblclick', ()=>{ state.zoomX=null; state.zoomY=null; draw(); });
+    window.addEventListener('resize', resize);
+    resize();
+    function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
+    function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
+    return { setData, resetZoom, getZoom, setZoom };
   }
 
   // Legend removed — left list serves as legend
@@ -563,6 +655,10 @@
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     const chart = makeChart($('#chart'));
     const viewsChart = makeTimeChart($('#viewsChart'));
+    const followersChart = makeFollowersChart($('#followersChart'));
+    // Load persisted zoom states
+    let zoomStates = {};
+    try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
     const visibleSet = new Set();
     let visibilityByUser = {};
     try {
@@ -616,6 +712,30 @@
           const color=colorFor(pid); if (pts.length) out.push({ id: pid, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
+      // Update Total Followers card
+      try {
+        const fEl = $('#followersTotal');
+        if (fEl){
+          const arr = Array.isArray(user.followers) ? user.followers : [];
+          const last = arr[arr.length - 1];
+          fEl.textContent = last ? fmt2(last.count) : '0.00';
+        }
+      } catch {}
+      // Followers chart: use user-level follower history when available
+      const fSeries = (function(){
+        const arr = Array.isArray(user.followers) ? user.followers : [];
+        const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+        const color = '#ffd166';
+        return pts.length ? [{ id: 'followers', color, points: pts }] : [];
+      })();
+      followersChart.setData(fSeries);
+      // Restore any saved zoom for this user
+      try {
+        const z = zoomStates[currentUserKey] || {};
+        if (z.scatter) chart.setZoom(z.scatter);
+        if (z.views) viewsChart.setZoom(z.views);
+        if (z.followers) followersChart.setZoom(z.followers);
+      } catch {}
       // Sync chart hover back to list
       chart.onHover((pid)=>{
         const wrap = $('#posts');
@@ -644,6 +764,40 @@
           // Fit to visible
           chart.resetZoom();
           chart.setData(computeSeriesForUser(user, [], colorFor).filter(s=>visibleSet.has(s.id)).map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) })));
+          // Refresh the cumulative views time series to reflect current visibility
+          const vSeries = (function(){
+            const out=[]; for (const [vpid,p] of Object.entries(user.posts||{})){
+              if (!visibleSet.has(vpid)) continue; const pts=[];
+              for (const s of (p.snapshots||[])){
+                const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
+              }
+              const color=colorFor(vpid); if (pts.length) out.push({ id: vpid, color, points: pts, url: absUrl(p.url, vpid) });
+            }
+            return out; })();
+          viewsChart.setData(vSeries);
+          // Update metric cards to reflect current visibility
+          try{
+            const viewsEl = $('#viewsTotal');
+            const likesEl = $('#likesTotal');
+            const repliesEl = $('#repliesTotal');
+            const remixesEl = $('#remixesTotal');
+            const interEl = $('#interactionsTotal');
+            let totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
+            for (const vpid of Array.from(visibleSet)){
+              const post = user.posts?.[vpid];
+              const last = latestSnapshot(post?.snapshots);
+              totalViews += num(last?.views);
+              totalLikes += num(last?.likes);
+              totalReplies += num(last?.comments);
+              totalRemixes += num(last?.remixes);
+              totalInteractions += interactionsOfSnap(last);
+            }
+            if (viewsEl) viewsEl.textContent = fmt2(totalViews);
+            if (likesEl) likesEl.textContent = fmt2(totalLikes);
+            if (repliesEl) repliesEl.textContent = fmt0(totalReplies);
+            if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
+            if (interEl) interEl.textContent = fmt2(totalInteractions);
+          } catch {}
           persistVisibility();
         });
       });
@@ -675,11 +829,35 @@
     });
     document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker')) $('#suggestions').style.display='none'; });
 
-    $('#refresh').addEventListener('click', async ()=>{ metrics = await loadMetrics(); const prev = currentUserKey; const def = buildUserOptions(metrics); if (!metrics.users[prev]) currentUserKey = def; $('#userSelect').value = currentUserKey || ''; try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {} refreshUserUI(); });
+    $('#refresh').addEventListener('click', async ()=>{
+      // capture zoom states
+      const zScatter = chart.getZoom();
+      const zViews = viewsChart.getZoom();
+      const zFollowers = followersChart.getZoom();
+      metrics = await loadMetrics();
+      const prev = currentUserKey; const def = buildUserOptions(metrics);
+      if (!metrics.users[prev]) currentUserKey = def;
+      $('#userSelect').value = currentUserKey || '';
+      try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+      refreshUserUI();
+      // restore zoom states
+      try { if (zScatter) chart.setZoom(zScatter); } catch {}
+      try { if (zViews) viewsChart.setZoom(zViews); } catch {}
+      try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
+    });
     $('#export').addEventListener('click', ()=>{ const u=metrics.users[currentUserKey]; if (u) exportCSV(u); });
-    $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); refreshUserUI(); });
-    $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); refreshUserUI(); persistVisibility(); });
-    $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
+    // Persist zoom on full page reload/navigation
+    function persistZoom(){
+      const z = zoomStates[currentUserKey] || (zoomStates[currentUserKey] = {});
+      z.scatter = chart.getZoom();
+      z.views = viewsChart.getZoom();
+      z.followers = followersChart.getZoom();
+      try { chrome.storage.local.set({ zoomStates }); } catch {}
+    }
+    window.addEventListener('beforeunload', persistZoom);
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI(); });
+      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI(); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
 
     refreshUserUI();
   }

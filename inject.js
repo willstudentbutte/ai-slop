@@ -45,6 +45,27 @@
 
   // ---------- helpers ----------
   const minutesSince = (epochSec)=>!epochSec?Infinity:Math.max(0, (Date.now()/1000-epochSec)/60);
+  const fmtPct = (num, denom, digits = 1) => {
+    const n = Number(num), d = Number(denom);
+    if (!Number.isFinite(n) || !Number.isFinite(d) || d <= 0) return null;
+    return ((n / d) * 100).toFixed(digits) + '%';
+  };
+  const likeRate = (likes, unique, views) => {
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return null;
+    const u = Number(unique);
+    const v = Number(views);
+    const denom = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(v) && v > 0) ? v : null);
+    return denom ? fmtPct(l, denom) : null;
+  };
+  const interactionRate = (likes, comments, remixes, shares, downloads, unique) => {
+    const sum = [likes, comments, remixes, shares, downloads]
+      .map(x => Number(x))
+      .reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
+    const u = Number(unique);
+    const denom = (Number.isFinite(u) && u > 0) ? u : null;
+    return denom ? fmtPct(sum, denom) : null;
+  };
   const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
@@ -167,6 +188,10 @@
   const idToUnique = new Map();
   const idToLikes  = new Map();
   const idToViews  = new Map();
+  const idToComments = new Map();
+  const idToRemixes  = new Map();
+  const idToShares   = new Map();
+  const idToDownloads= new Map();
   const idToMeta   = new Map(); // id -> { ageMin }
   let controlBar   = null;
 
@@ -223,8 +248,17 @@
     const viewsStr = views != null ? `${fmt(views)} views` : null;
     const ageStr = Number.isFinite(meta?.ageMin) ? fmtAgeMin(meta.ageMin) : null;
     const emoji = badgeEmojiFor(id, meta);
+    const ir = interactionRate(
+      idToLikes.get(id),
+      idToComments.get(id),
+      idToRemixes.get(id),
+      idToShares.get(id),
+      idToDownloads.get(id),
+      idToUnique.get(id)
+    );
+    const irStr = ir ? `${ir} IR` : null;
 
-    const textParts = [viewsStr, ageStr, emoji].filter(Boolean);
+    const textParts = [viewsStr, irStr, ageStr, emoji].filter(Boolean);
     badge.textContent = textParts.join(' • ');
 
     const bg = badgeBgFor(id, meta);
@@ -347,14 +381,26 @@
     const sid = currentSIdFromURL();
     if (!sid) return;
     const uv = idToUnique.get(sid);
-    if (uv == null) return;
+    const likes = idToLikes.get(sid);
+    const totalViews = idToViews.get(sid);
+    const rate = likeRate(likes, uv, totalViews);
+    const ir = interactionRate(
+      likes,
+      idToComments.get(sid),
+      idToRemixes.get(sid),
+      idToShares.get(sid),
+      idToDownloads.get(sid),
+      uv
+    );
+    if (uv == null && !rate && !ir) return;
     const el = ensureDetailBadge();
     const meta = idToMeta.get(sid);
 
     const viewsStr = uv != null ? `${fmt(uv)} views` : null;
     const ageStr = Number.isFinite(meta?.ageMin) ? fmtAgeMin(meta.ageMin) : null;
     const emoji = badgeEmojiFor(sid, meta);
-    el.textContent = [viewsStr, ageStr, emoji].filter(Boolean).join(' • ');
+    const irStr = ir ? `${ir} IR` : null;
+    el.textContent = [viewsStr, irStr, ageStr, emoji].filter(Boolean).join(' • ');
 
     const bg = badgeBgFor(sid, meta);
     el.style.background = bg || 'rgba(0,0,0,0.75)';
@@ -408,6 +454,65 @@
     };
   }
 
+  // Additional metric extractors (optional fields)
+  const getComments = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.comment_count, p?.comments_count, p?.comments,
+        p?.reply_count, p?.replies?.count,
+        p?.stats?.comment_count, p?.statistics?.comment_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+  const getRemixes = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.remix_count, p?.remixes,
+        p?.stats?.remix_count, p?.statistics?.remix_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+  const getShares = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.share_count, p?.shares,
+        p?.stats?.share_count, p?.statistics?.share_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+  const getDownloads = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.download_count, p?.downloads,
+        p?.stats?.download_count, p?.statistics?.download_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    } catch {}
+    return null;
+  };
+
   // Build minimal meta (age only) and store counters used for coloring/emojis
   function processFeedJson(json) {
     const items = json?.items || json?.data?.items || [];
@@ -419,6 +524,10 @@
       const uv = getUniqueViews(it);
       const likes = getLikes(it);
       const tv = getTotalViews(it);
+      const cm = getComments(it);
+      const rx = getRemixes(it);
+      const sh = getShares(it);
+      const dl = getDownloads(it);
       const p = it?.post || it || {};
       const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const ageMin = minutesSince(created_at);
@@ -427,10 +536,14 @@
       if (uv != null) idToUnique.set(id, uv);
       if (likes != null) idToLikes.set(id, likes);
       if (tv != null) idToViews.set(id, tv);
+      if (cm != null) idToComments.set(id, cm);
+      if (rx != null) idToRemixes.set(id, rx);
+      if (sh != null) idToShares.set(id, sh);
+      if (dl != null) idToDownloads.set(id, dl);
       idToMeta.set(id, { ageMin });
 
       const absUrl = `${location.origin}/p/${id}`;
-      batch.push({ postId: id, uv, likes, views: tv, created_at, ageMin, thumb: th, url: absUrl, ts: Date.now() });
+      batch.push({ postId: id, uv, likes, views: tv, comments: cm, remixes: rx, shares: sh, downloads: dl, created_at, ageMin, thumb: th, url: absUrl, ts: Date.now() });
     }
     if (batch.length) try { window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*'); } catch {}
     renderBadges();
