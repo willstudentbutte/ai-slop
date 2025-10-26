@@ -45,6 +45,7 @@
           const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
           if (!post.url && snap.url) post.url = snap.url;
           if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
+          if (!post.post_time && snap.created_at) post.post_time = snap.created_at; // Map creation time so dashboard can sort posts
 
           const s = {
             t: snap.ts || Date.now(),
