@@ -57,6 +57,13 @@
     if (!isFinite(a) || !isFinite(b) || b <= 0) return null;
     return (a / b) * 100;
   }
+  function interactionRate(snap){
+    if (!snap) return null;
+    const uv = Number(snap.uv);
+    if (!isFinite(uv) || uv <= 0) return null;
+    const inter = interactionsOfSnap(snap);
+    return (inter / uv) * 100;
+  }
 
   // Get latest snapshot by timestamp; fallback to last array entry
   function latestSnapshot(snaps){
@@ -169,7 +176,7 @@
       const first = p.snapshots?.[0] || {};
       const rawPT = p?.post_time ?? p?.postTime ?? p?.post?.post_time ?? p?.post?.postTime ?? p?.meta?.post_time ?? null;
       const postTime = getPostTimeStrict(p) || 0;
-      const rate = likeRate(last.likes, last.uv);
+      const rate = interactionRate(last);
       const bi = pidBigInt(pid);
       if (DBG_SORT){
         try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
@@ -221,7 +228,7 @@
         <div class="thumb" style="${thumbStyle}"></div>
         <div class="meta">
           <div class="id"><a href="${p.url}" target="_blank" rel="noopener">${p.pid}</a></div>
-          <div class="stats">Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • Rate ${p.rate==null?'-':p.rate.toFixed(1)+'%'}</div>
+          <div class="stats">Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}</div>
         </div>
         <div class="toggle" data-pid="${p.pid}">Hide</div>
       `;
@@ -251,7 +258,7 @@
       const [pid, p] = entries[i];
       const pts = [];
       for (const s of (p.snapshots||[])){
-        const r = likeRate(s.likes, s.uv);
+        const r = interactionRate(s);
         if (s.uv != null && r != null) pts.push({ x:s.uv, y:r, t:s.t });
       }
       const color = typeof colorFor === 'function' ? colorFor(pid) : COLORS[i % COLORS.length];
@@ -339,7 +346,7 @@
       // labels
       ctx.fillStyle = '#e8eaed'; ctx.font = 'bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial';
       ctx.fillText('Unique viewers', W/2-50, H-6);
-      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Like rate (%)', 0,0); ctx.restore();
+      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Interaction rate (%)', 0,0); ctx.restore();
     }
 
     function drawSeries(){
@@ -394,7 +401,7 @@
       tooltip.style.left = (clientX + 12) + 'px';
       tooltip.style.top  = (clientY + 12) + 'px';
       tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>
-      <div>Unique: ${fmt(h.x)} • Rate: ${h.y.toFixed(1)}%</div>`;
+      <div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
     }
 
     // Zoom drag state
@@ -631,10 +638,10 @@
   // Legend removed — left list serves as legend
 
   function exportCSV(user){
-    const lines = ['post_id,timestamp,unique,likes,views,like_rate'];
+    const lines = ['post_id,timestamp,unique,likes,views,interaction_rate'];
     for (const [pid,p] of Object.entries(user.posts||{})){
       for (const s of (p.snapshots||[])){
-        const rate = likeRate(s.likes, s.uv);
+        const rate = interactionRate(s);
         lines.push([pid, s.t, s.uv??'', s.likes??'', s.views??'', rate==null?'':rate.toFixed(4)].join(','));
       }
     }
