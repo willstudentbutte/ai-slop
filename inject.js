@@ -8,7 +8,9 @@
  * - Badge color is based on time since posting (all posts >25 likes): red (<1h) → yellow (18h) in 18 gradient steps from RED (hot) to YELLOW (warm).
  * - If age is within ±15m of a whole day (1d, 2d, 3d…), the badge turns green with a 📝 icon indicating a good time to POST to achieve those likes.
  * - Corner button cycles a time filter: All, <3h, <6h, <12h, <15h, <18h to focus only on Hot posts in the Top feed.
- * - Badge text looks like: “30.2K views • 14h 36m • 🔥/🔥🔥/🔥🔥🔥” with more flames for hotter posts.
+ * - Badge text looks like: “30.2K views • 14h 36m • 🔥/🔥🔥/🔥🔥🔥” with more flames for hotter posts. Super-hot mode shows on posts with >50 likes in less than an hour.
+ * - Use "Gather" mode on your profile to auto-scroll and refresh the page as often as every 1-2 minutes or as slow as every 15-17 minutes to auto-populate your dashboard
+ *
  */
 
 (function () {
@@ -16,8 +18,8 @@
 
   // ---------- formatting ----------
   const fmt = (n) => (n >= 1e6 ? (n/1e6).toFixed(n%1e6?1:0)+'M'
-                    : n >= 1e3 ? (n/1e3).toFixed(n%1e3?1:0)+'K'
-                    : String(n));
+                      : n >= 1e3 ? (n/1e3).toFixed(n%1e3?1:0)+'K'
+                      : String(n));
 
   function fmtAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return '∞';
@@ -70,16 +72,19 @@
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
   const isPost    = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
+  
+  // [NEW] Linear interpolation helper function
+  const lerp = (a, b, t) => a + (b - a) * t;
 
   // Red (0h) → Yellow (18h), 18 steps, saturated.
   function colorForAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return null;
     const hHours = ageMin / 60;
     if (hHours < 0 || hHours >= 18) return null;
-    const idx = Math.floor(hHours);                 // 0..17
-    const t = idx / 17;                             // 0..1
-    const h = 0 + (50 * t);                         // hue: 0→50
-    const l = 42 - (12 * t);                        // lightness: 42%→30%
+    const idx = Math.floor(hHours);              // 0..17
+    const t = idx / 17;                          // 0..1
+    const h = 0 + (50 * t);                      // hue: 0→50
+    const l = 42 - (12 * t);                     // lightness: 42%→30%
     return `hsla(${h.toFixed(1)}, 100%, ${l.toFixed(1)}%, 0.92)`;
   }
 
@@ -200,6 +205,11 @@
   const idToDownloads= new Map();
   const idToMeta   = new Map(); // id -> { ageMin }
   let controlBar   = null;
+  
+  // Timers for gathering
+  let gatherScrollIntervalId = null;
+  let gatherRefreshTimeoutId = null;
+
 
   // ---------- badge UI ----------
   function ensureBadge(card) {
@@ -228,28 +238,48 @@
     return badge;
   }
 
+  // [MODIFIED] Function
   function badgeBgFor(id, meta) {
     if (!meta) return null;
     const ageMin = meta.ageMin;
+    const likes = idToLikes.get(id) ?? 0; // Get likes
+
+    // [NEW] Super-hot state
+    if (likes >= 50 && Number.isFinite(ageMin) && ageMin < 60) {
+      return colorForAgeMin(0); // Hottest red
+    }
+
     if (isNearWholeDay(ageMin)) return greenEmblemColor();
-    const likes = idToLikes.get(id) ?? 0;
-    if (likes > 25) return colorForAgeMin(ageMin);
+    if (likes > 25) return colorForAgeMin(ageMin); // Relies on 'likes' from above
     return null;
   }
 
+  // [MODIFIED] Function
   function badgeEmojiFor(id, meta) {
     if (!meta) return '';
     const ageMin = meta.ageMin;
+    const likes = idToLikes.get(id) ?? 0; // Get likes
+
+    // [NEW] Super-hot state
+    if (likes >= 50 && Number.isFinite(ageMin) && ageMin < 60) {
+      return '🔥🔥🔥🔥🔥';
+    }
+
     if (isNearWholeDay(ageMin)) return '📝';
-    const likes = idToLikes.get(id) ?? 0;
-    if (likes > 25) return fireForAge(ageMin);
+    if (likes > 25) return fireForAge(ageMin); // Relies on 'likes' from above
     return '';
   }
 
+  // [MODIFIED] Function
   function addBadge(card, views, meta) {
     if (views == null && !meta) return;
     const badge = ensureBadge(card);
     const id = extractIdFromCard(card);
+
+    // [NEW] Check for super-hot state
+    const likes = idToLikes.get(id) ?? 0;
+    const ageMin = meta?.ageMin;
+    const isSuperHot = likes >= 50 && Number.isFinite(ageMin) && ageMin < 60;
 
     const viewsStr = views != null ? `${fmt(views)} views` : null;
     const ageStr = Number.isFinite(meta?.ageMin) ? fmtAgeMin(meta.ageMin) : null;
@@ -270,6 +300,13 @@
     const bg = badgeBgFor(id, meta);
     badge.style.background = bg || 'rgba(0,0,0,0.72)';
 
+    // [NEW] Add/remove shadow glow
+    if (isSuperHot) {
+      badge.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+    } else {
+      badge.style.boxShadow = 'none'; // IMPORTANT: reset it
+    }
+
     const note = isNearWholeDay(meta?.ageMin) ? 'Green day mark ✅' : (bg ? 'Hot ✅' : '');
     const ageLabel = ageStr || '∞';
     badge.title = meta ? `Age: ${ageLabel}${note ? `\n${note}` : ''}` : '';
@@ -287,7 +324,110 @@
     applyFilter();
   }
 
-  // ---------- control bar ----------
+  // ---------- [MODIFIED] Gathering Functions ----------
+  
+  function startGathering() {
+    // Stop any existing timers just in case
+    stopGathering(false); // Pass false to avoid clearing prefs
+
+    console.log('Sora UV: Starting gathering...');
+    
+    // 1. Get speed settings from slider
+    const prefs = getPrefs();
+    const t = (prefs.gatherSpeed || 50) / 100; // Slider value 0.0 to 1.0
+
+    let scrollMinMs, scrollMaxMs, refreshMinMs, refreshMaxMs, scrollAmountMin, scrollAmountMax;
+
+    // These are the 3 key points for interpolation
+    // Point 1 (t=0, Turtle): 13-15m refresh / 1.5-2.0s scroll / 150-250px amount
+    const speedSlow = { sMin: 1500, sMax: 2000, rMin: 13*60*1000, rMax: 15*60*1000, aMin: 150, aMax: 250 };
+    // Point 2 (t=0.5, Default): 4-7m refresh / 0.75-1.25s scroll / 200-300px amount
+    const speedMid = { sMin: 750, sMax: 1250, rMin: 4*60*1000, rMax: 7*60*1000, aMin: 200, aMax: 300 };
+    // Point 3 (t=1, Rabbit): 1-2m refresh / 0.25-0.75s scroll / 250-350px amount
+    const speedFast = { sMin: 250, sMax: 750, rMin: 1*60*1000, rMax: 2*60*1000, aMin: 250, aMax: 350 };
+
+    if (t <= 0.5) {
+      // Interpolate between Slow and Mid
+      const localT = t / 0.5; // Remap t from [0, 0.5] to [0, 1]
+      scrollMinMs = lerp(speedSlow.sMin, speedMid.sMin, localT);
+      scrollMaxMs = lerp(speedSlow.sMax, speedMid.sMax, localT);
+      refreshMinMs = lerp(speedSlow.rMin, speedMid.rMin, localT);
+      refreshMaxMs = lerp(speedSlow.rMax, speedMid.rMax, localT);
+      scrollAmountMin = lerp(speedSlow.aMin, speedMid.aMin, localT);
+      scrollAmountMax = lerp(speedSlow.aMax, speedMid.aMax, localT);
+    } else {
+      // Interpolate between Mid and Fast
+      const localT = (t - 0.5) / 0.5; // Remap t from [0.5, 1] to [0, 1]
+      scrollMinMs = lerp(speedMid.sMin, speedFast.sMin, localT);
+      scrollMaxMs = lerp(speedMid.sMax, speedFast.sMax, localT);
+      refreshMinMs = lerp(speedMid.rMin, speedFast.rMin, localT);
+      refreshMaxMs = lerp(speedMid.rMax, speedFast.rMax, localT);
+      scrollAmountMin = lerp(speedMid.aMin, speedFast.aMin, localT);
+      scrollAmountMax = lerp(speedMid.aMax, speedFast.aMax, localT);
+    }
+
+    // 2. Recursive scroll function
+    function randomScroll() {
+      // 2a. Perform scroll action
+      if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) {
+           const scrollAmount = Math.random() * (scrollAmountMax - scrollAmountMin) + scrollAmountMin;
+           window.scrollBy(0, scrollAmount);
+      } else {
+           console.log('Sora UV: Reached bottom, waiting for refresh.');
+      }
+      
+      // 2b. Calculate next random delay
+      const delay = Math.random() * (scrollMaxMs - scrollMinMs) + scrollMinMs;
+      
+      // 2c. Schedule next scroll
+      gatherScrollIntervalId = setTimeout(randomScroll, delay); 
+    }
+
+    // Start the scroll loop
+    randomScroll();
+
+    // 3. Set refresh timer
+    const now = Date.now();
+    let refreshDelay;
+
+    if (prefs.refreshDeadline && prefs.refreshDeadline > now) {
+      refreshDelay = prefs.refreshDeadline - now;
+      console.log(`Sora UV: Resuming refresh timer. ${Math.round(refreshDelay/1000)}s remaining.`);
+    } else {
+      refreshDelay = Math.random() * (refreshMaxMs - refreshMinMs) + refreshMinMs;
+      const newDeadline = now + refreshDelay;
+      prefs.refreshDeadline = newDeadline;
+      setPrefs(prefs);
+      console.log(`Sora UV: New refresh timer set for ${Math.round(refreshDelay/1000)}s.`);
+    }
+
+    gatherRefreshTimeoutId = setTimeout(() => {
+      console.log('Sora UV: Refreshing page...');
+      location.reload();
+    }, refreshDelay);
+  }
+
+  function stopGathering(clearPrefs = true) {
+    console.log('Sora UV: Stopping gathering.');
+
+    if (gatherScrollIntervalId) {
+      clearTimeout(gatherScrollIntervalId);
+      gatherScrollIntervalId = null;
+    }
+    if (gatherRefreshTimeoutId) {
+      clearTimeout(gatherRefreshTimeoutId);
+      gatherRefreshTimeoutId = null;
+    }
+
+    if (clearPrefs) {
+      const prefs = getPrefs();
+      delete prefs.refreshDeadline;
+      // We keep gatherSpeed, but clear the deadline
+      setPrefs(prefs);
+    }
+  }
+
+  // ---------- [MODIFIED] control bar ----------
   function getPrefs(){ try{return JSON.parse(localStorage.getItem(PREF_KEY)||'{}')}catch{return{}} }
   function setPrefs(p){ localStorage.setItem(PREF_KEY, JSON.stringify(p)); }
   function stylBtn(b){
@@ -296,27 +436,43 @@
       border:'1px solid rgba(255,255,255,0.2)', borderRadius:'8px',
       padding:'4px 8px', cursor:'pointer'
     });
-    b.onmouseenter=()=>b.style.background='rgba(255,255,255,0.2)';
-    b.onmouseleave=()=>b.style.background='rgba(255,255,255,0.12)';
+    b.onmouseenter=()=> {
+      if (b.dataset.gathering === 'true' || b.disabled) return;
+      b.style.background='rgba(255,255,255,0.2)';
+    };
+    b.onmouseleave=()=> {
+       if (b.dataset.gathering === 'true' || b.disabled) return;
+       b.style.background='rgba(255,255,255,0.12)';
+    };
   }
 
   function ensureControlBar(){
     if (controlBar && document.contains(controlBar)) return controlBar;
+    
+    // --- Create Control Bar ---
     const bar = document.createElement('div');
     bar.className='sora-uv-controls';
     Object.assign(bar.style,{
       position:'fixed', top:'12px', right:'12px', zIndex:999999,
       display:'flex', gap:'8px', padding:'6px 8px', borderRadius:'10px',
       background:'rgba(0,0,0,0.55)', color:'#fff', fontSize:'12px',
-      alignItems:'center', backdropFilter:'blur(2px)', userSelect:'none'
+      alignItems:'center', backdropFilter:'blur(2px)', userSelect:'none',
+      flexDirection: 'column' // [NEW] Stack controls vertically
     });
+    
+    // [NEW] Create a container for the buttons
+    const buttonContainer = document.createElement('div');
+    buttonContainer.style.display = 'flex';
+    buttonContainer.style.gap = '8px';
 
-    const prefs = getPrefs();
-    if (typeof prefs.filterIndex !== 'number') {
-      prefs.filterIndex = 0; // start at “Filter” (no limit)
-      setPrefs(prefs);
-    }
+    // --- Initialize Prefs ---
+    let prefs = getPrefs();
+    if (typeof prefs.filterIndex !== 'number') prefs.filterIndex = 0;
+    if (typeof prefs.isGathering !== 'boolean') prefs.isGathering = false;
+    if (typeof prefs.gatherSpeed !== 'string') prefs.gatherSpeed = '50'; // Slider val is string
+    setPrefs(prefs); 
 
+    // --- Filter Button ---
     const filterBtn = document.createElement('button');
     stylBtn(filterBtn);
     const setLabel = () => filterBtn.textContent = FILTER_LABELS[prefs.filterIndex];
@@ -330,26 +486,131 @@
       setLabel();
       applyFilter();
     };
+    buttonContainer.appendChild(filterBtn); // Add to button container
 
-    bar.appendChild(filterBtn);
+    // --- Gather Button ---
+    const gatherBtn = document.createElement('button');
+    gatherBtn.dataset.gathering = 'false';
+    stylBtn(gatherBtn);
+    buttonContainer.appendChild(gatherBtn); // Add to button container
+    
+    bar.appendChild(buttonContainer); // Add button container to main bar
+
+    // --- [NEW] Gather Speed Slider ---
+    const sliderContainer = document.createElement('div');
+    sliderContainer.className = 'sora-uv-slider-container';
+    Object.assign(sliderContainer.style, {
+        display: 'none', // Hidden by default
+        width: '100%',
+        alignItems: 'center',
+        gap: '5px',
+    });
+    
+    const emojiTurtle = document.createElement('span');
+    emojiTurtle.textContent = '🐢';
+    
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '100';
+    slider.step = '1';
+    slider.value = prefs.gatherSpeed;
+    slider.style.flexGrow = '1';
+    
+    const emojiRabbit = document.createElement('span');
+    emojiRabbit.textContent = '🐇';
+
+    sliderContainer.appendChild(emojiTurtle);
+    sliderContainer.appendChild(slider);
+    sliderContainer.appendChild(emojiRabbit);
+    bar.appendChild(sliderContainer); // Add slider container to main bar
+
+    // --- [NEW] Slider Event Listeners ---
+    const onSliderChange = () => {
+        let p = getPrefs();
+        p.gatherSpeed = slider.value;
+        setPrefs(p);
+        // Restart gathering to apply new speed
+        if (p.isGathering) {
+            startGathering();
+        }
+    };
+    slider.addEventListener('input', onSliderChange); // 'input' is more fluid than 'change'
+
+    // --- State Update Function ---
+    function updateGatherState() {
+      const p = getPrefs();
+      if (p.isGathering) {
+        gatherBtn.textContent = 'Gathering...';
+        gatherBtn.style.background = 'hsla(120, 60%, 30%, 0.9)';
+        gatherBtn.dataset.gathering = 'true';
+        filterBtn.disabled = true; 
+        filterBtn.style.opacity = '0.5';
+        filterBtn.style.cursor = 'not-allowed';
+        sliderContainer.style.display = 'flex'; // [NEW] Show slider
+        startGathering();
+      } else {
+        gatherBtn.textContent = 'Gather';
+        gatherBtn.style.background = 'rgba(255,255,255,0.12)';
+        gatherBtn.dataset.gathering = 'false';
+        filterBtn.disabled = false;
+        filterBtn.style.opacity = '1';
+        filterBtn.style.cursor = 'pointer';
+        sliderContainer.style.display = 'none'; // [NEW] Hide slider
+        stopGathering(true);
+      }
+    }
+
+    gatherBtn.onclick = () => {
+      let p = getPrefs();
+      p.isGathering = !p.isGathering; // Toggle state
+      setPrefs(p);
+      updateGatherState(); // Apply the new state
+      
+      if (p.isGathering) {
+          p = getPrefs();
+          p.filterIndex = 0;
+          setPrefs(p);
+          prefs.filterIndex = 0;
+          setLabel();
+          applyFilter();
+      }
+    };
+    
+    // --- Init ---
     document.documentElement.appendChild(bar);
     controlBar = bar;
+    
+    updateGatherState(); // Run on load
+
     return bar;
   }
 
-  // ---------- filtering (cycles through thresholds) ----------
+  // ---------- [MODIFIED] filtering (cycles through thresholds) ----------
   function applyFilter(){
     const prefs = getPrefs();
+    
+    if (prefs.isGathering) {
+        if (prefs.filterIndex !== 0) {
+             prefs.filterIndex = 0;
+             setPrefs(prefs);
+             const filterBtn = controlBar?.querySelector('button');
+             if(filterBtn) filterBtn.textContent = FILTER_LABELS[0];
+        }
+    }
+
     const idx = typeof prefs.filterIndex === 'number' ? prefs.filterIndex : 0;
-    const limitMin = FILTER_STEPS_MIN[idx]; // null => show all
+    const limitMin = FILTER_STEPS_MIN[idx]; 
 
     for (const card of selectAllCards()){
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
-      if (limitMin == null) { // “Filter” = show everything
+      
+      if (limitMin == null || prefs.isGathering) {
         card.style.display = '';
         continue;
       }
+      
       const show = Number.isFinite(meta?.ageMin) && meta.ageMin <= limitMin;
       card.style.display = show ? '' : 'none';
     }
@@ -379,6 +640,8 @@
     detailBadgeEl = el;
     return el;
   }
+  
+  // [MODIFIED] Function
   function renderDetailBadge() {
     if (!isPost()) {
       if (detailBadgeEl) { detailBadgeEl.remove(); detailBadgeEl = null; }
@@ -402,6 +665,10 @@
     const el = ensureDetailBadge();
     const meta = idToMeta.get(sid);
 
+    // [NEW] Check for super-hot state
+    const ageMin = meta?.ageMin;
+    const isSuperHot = (likes ?? 0) >= 50 && Number.isFinite(ageMin) && ageMin < 60;
+
     const viewsStr = uv != null ? `${fmt(uv)} views` : null;
     const ageStr = Number.isFinite(meta?.ageMin) ? fmtAgeMin(meta.ageMin) : null;
     const emoji = badgeEmojiFor(sid, meta);
@@ -410,6 +677,13 @@
 
     const bg = badgeBgFor(sid, meta);
     el.style.background = bg || 'rgba(0,0,0,0.75)';
+
+    // [NEW] Add/remove shadow glow
+    if (isSuperHot) {
+      el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+    } else {
+      el.style.boxShadow = 'none'; // IMPORTANT: reset it
+    }
 
     const note = isNearWholeDay(meta?.ageMin) ? 'Green day mark ✅' : (bg ? 'Hot ✅' : '');
     const ageLabel = ageStr || '∞';
