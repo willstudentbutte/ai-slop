@@ -48,8 +48,6 @@ button:hover{background:#10171f}
 .posts.is-hovering .post{filter:grayscale(100%);opacity:0.4}
 .posts.is-hovering .post.hover{filter:none;opacity:1}
 
-.section-title{margin:10px 0 4px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.02em}
-
 @media (max-width: 900px){
   .layout{grid-template-columns: 1fr}
   .sidebar{order:2}
