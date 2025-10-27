@@ -54,10 +54,8 @@
     if (!s) return 0;
     const likes = num(s.likes);
     const comments = num(s.comments ?? s.reply_count); // non-recursive
-    // Exclude remixes from interaction rate everywhere
-    const shares = num(s.shares ?? s.share_count);
-    const downloads = num(s.downloads ?? s.download_count);
-    return likes + comments + shares + downloads;
+    // Exclude remixes, shares, and downloads
+    return likes + comments;
   }
 
   function likeRate(likes, uv){
@@ -208,7 +206,7 @@
   }
 
   // Remove posts that are missing data for the selected user.
-  // Definition: no snapshots OR every snapshot lacks all known metrics (uv, views, likes, comments, remixes, shares, downloads).
+  // Definition: no snapshots OR every snapshot lacks all known metrics (uv, views, likes, comments, remixes).
   async function pruneEmptyPostsForUser(metrics, userKey){
     try {
       const user = metrics?.users?.[userKey];
@@ -218,7 +216,7 @@
       const keys = Object.keys(user.posts);
       const hasAnyMetric = (s)=>{
         if (!s) return false;
-        const fields = ['uv','views','likes','comments','remix_count','shares','downloads'];
+        const fields = ['uv','views','likes','comments','remix_count'];
         for (const k of fields){ if (s[k] != null && isFinite(Number(s[k]))) return true; }
         return false;
       };

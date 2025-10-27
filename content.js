@@ -63,13 +63,11 @@
             // Store direct remixes; map both names for backward/forward compat
             remixes: snap.remix_count ?? snap.remixes ?? null,
             remix_count: snap.remix_count ?? snap.remixes ?? null,
-            shares: snap.shares ?? null,
-            downloads: snap.downloads ?? null,
+            // shares/downloads removed
           };
           const last = post.snapshots[post.snapshots.length - 1];
           const same = last && last.uv === s.uv && last.likes === s.likes && last.views === s.views &&
-            last.comments === s.comments && last.remix_count === s.remix_count &&
-            last.shares === s.shares && last.downloads === s.downloads;
+            last.comments === s.comments && last.remix_count === s.remix_count;
           if (!same) {
             post.snapshots.push(s);
           }
