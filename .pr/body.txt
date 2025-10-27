@@ -1,0 +1,12 @@
+Fix misattributed posts, remove empty posts, and align owner parsing.
+
+Changes
+- Owner parsing: prefer post.shared_by (id) + profile.username (handle) per me.json.
+- Persist ownerKey/ownerHandle/ownerId on posts as snapshots arrive.
+- Reconcile (selected user only): move away on explicit mismatch; infer current user when owner is missing; reclaim from 'unknown'.
+- Prune empty posts for selected user (no snapshots or all-null metrics).
+- Hide noisy sorting logs; add reconciliation/pruning logs.
+
+Notes
+- Scoped to the selected user to keep refresh fast.
+- Emits concise [Dashboard] logs for traceability.
