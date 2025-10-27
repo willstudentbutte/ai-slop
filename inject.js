@@ -291,21 +291,17 @@
   function getOwner(item) {
     try {
       const p = item?.post ?? item;
-      const prof = item?.profile || item?.user || item?.author || p?.author || p?.owner || null;
-      let handle = prof?.handle || prof?.username || prof?.name || null;
-      let id = prof?.id || prof?.user_id || prof?._id || null;
-      if (!handle) {
-        handle = p?.profile?.handle || p?.user?.username || null;
-      }
+      const prof = item?.profile || item?.owner_profile || item?.user || item?.author || p?.author || p?.owner || p?.profile || null;
+      // Prefer canonical numeric-ish/user id from post.shared_by when available
+      let id = p?.shared_by || prof?.user_id || prof?.id || prof?._id || null;
+      // Prefer "username" for handle when present
+      let handle = prof?.username || prof?.handle || prof?.name || null;
       return {
         handle: (typeof handle === 'string' && handle) ? handle : null,
-        id: id ?? null
+        id: (typeof id === 'string' && id) ? id : null
       };
     } catch {
-      return {
-        handle: null,
-        id: null
-      };
+      return { handle: null, id: null };
     }
   }
 
@@ -970,9 +966,9 @@
     const batch = [];
 
     try {
-      const profFollowers = Number(json?.follower_count);
-      const profHandle = json?.username || json?.handle || pageUserHandle || null;
-      const profId = json?.user_id || json?.id || null;
+      const profFollowers = Number(json?.follower_count ?? json?.profile?.follower_count);
+      const profHandle = json?.username || json?.handle || json?.profile?.username || pageUserHandle || null;
+      const profId = json?.user_id || json?.id || json?.profile?.user_id || null;
       if (Number.isFinite(profFollowers) && profHandle) {
         const userKey = `h:${String(profHandle).toLowerCase()}`;
         batch.push({
