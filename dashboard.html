@@ -36,28 +36,49 @@
         <div id="tooltip" class="tooltip"></div>
       </div>
       <div id="viewsSummary" class="metric-card" title="Sum of latest views for visible posts">
-        <span class="label">Total views</span>
+        <span class="label">Views</span>
         <span id="viewsTotal" class="value">0</span>
       </div>
       <div id="likesSummary" class="metric-card" title="Sum of latest likes for visible posts">
-        <span class="label">Total likes</span>
+        <span class="label">Likes</span>
         <span id="likesTotal" class="value">0.00</span>
       </div>
       <div id="repliesSummary" class="metric-card" title="Sum of latest replies for visible posts (non-recursive)">
-        <span class="label">Total replies</span>
+        <span class="label">Replies</span>
         <span id="repliesTotal" class="value">0.00</span>
       </div>
       <div id="remixesSummary" class="metric-card" title="Sum of latest remixes for visible posts (recursive if available)">
-        <span class="label">Total remixes</span>
+        <span class="label">Remixes</span>
         <span id="remixesTotal" class="value">0.00</span>
       </div>
       <div id="interactionsSummary" class="metric-card" title="Sum of latest interactions (likes + comments + remixes + shares/downloads) for visible posts">
-        <span class="label">Total interactions</span>
+        <span class="label">Interactions</span>
         <span id="interactionsTotal" class="value">0.00</span>
       </div>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="viewsChart" width="900" height="540"></canvas>
         <div id="viewsTooltip" class="tooltip"></div>
+      </div>
+      <h3 class="section-title">All Posts (unfiltered)</h3>
+      <div id="allViewsSummary" class="metric-card" title="Sum of latest views across all posts (ignores visibility)">
+        <span class="label">Total views</span>
+        <span id="allViewsTotal" class="value">0</span>
+      </div>
+      <div id="allLikesSummary" class="metric-card" title="Sum of latest likes across all posts (ignores visibility)">
+        <span class="label">Total likes</span>
+        <span id="allLikesTotal" class="value">0.00</span>
+      </div>
+      <div id="allRepliesSummary" class="metric-card" title="Sum of latest replies across all posts (ignores visibility)">
+        <span class="label">Total replies</span>
+        <span id="allRepliesTotal" class="value">0.00</span>
+      </div>
+      <div id="allRemixesSummary" class="metric-card" title="Sum of latest remixes across all posts (ignores visibility)">
+        <span class="label">Total remixes</span>
+        <span id="allRemixesTotal" class="value">0.00</span>
+      </div>
+      <div id="allInteractionsSummary" class="metric-card" title="Sum of latest interactions across all posts (ignores visibility)">
+        <span class="label">Total interactions</span>
+        <span id="allInteractionsTotal" class="value">0.00</span>
       </div>
       <div id="followersSummary" class="metric-card" title="Latest follower count for the selected user">
         <span class="label">Total followers</span>
@@ -66,6 +87,10 @@
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="followersChart" width="900" height="540"></canvas>
         <div id="followersTooltip" class="tooltip"></div>
+      </div>
+      <div class="chart-wrap" style="margin-top:10px">
+        <canvas id="allViewsChart" width="900" height="540"></canvas>
+        <div id="allViewsTooltip" class="tooltip"></div>
       </div>
       
       <div class="help">Y: Interaction rate (%) • X: Unique viewers • Drag to zoom • Hover to focus series • Click point to open post • Toggle visibility in the left list</div>

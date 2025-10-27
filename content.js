@@ -43,6 +43,10 @@
         if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
         if (snap.postId) {
           const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
+          // Persist owner attribution on the post to allow dashboard integrity checks
+          if (!post.ownerKey && (snap.userKey || snap.pageUserKey)) post.ownerKey = snap.userKey || snap.pageUserKey;
+          if (!post.ownerHandle && (snap.userHandle || snap.pageUserHandle)) post.ownerHandle = snap.userHandle || snap.pageUserHandle;
+          if (!post.ownerId && snap.userId != null) post.ownerId = snap.userId;
           if (!post.url && snap.url) post.url = snap.url;
           if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
           if (!post.post_time && snap.created_at) post.post_time = snap.created_at; // Map creation time so dashboard can sort posts
@@ -53,16 +57,18 @@
             likes: snap.likes ?? null,
             views: snap.views ?? null,
             comments: snap.comments ?? null,
-            remixes: snap.remixes ?? null,
+            // Store direct remixes; map both names for backward/forward compat
+            remixes: snap.remix_count ?? snap.remixes ?? null,
+            remix_count: snap.remix_count ?? snap.remixes ?? null,
             shares: snap.shares ?? null,
             downloads: snap.downloads ?? null,
           };
           const last = post.snapshots[post.snapshots.length - 1];
           const same = last && last.uv === s.uv && last.likes === s.likes && last.views === s.views &&
-            last.comments === s.comments && last.remixes === s.remixes && last.shares === s.shares && last.downloads === s.downloads;
+            last.comments === s.comments && (last.remix_count ?? last.remixes) === (s.remix_count ?? s.remixes) &&
+            last.shares === s.shares && last.downloads === s.downloads;
           if (!same) {
             post.snapshots.push(s);
-            if (post.snapshots.length > 300) post.snapshots.splice(0, post.snapshots.length - 300);
           }
           post.lastSeen = Date.now();
         }
@@ -76,7 +82,6 @@
             const lastF = arr[arr.length - 1];
             if (!lastF || lastF.count !== fCount) {
               arr.push({ t, count: fCount });
-              if (arr.length > 500) arr.splice(0, arr.length - 500);
               try { console.debug('[SoraMetrics] followers persisted', { userKey, count: fCount, t }); } catch {}
             }
           }
