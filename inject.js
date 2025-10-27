@@ -100,7 +100,8 @@
   };
 
   const interactionRate = (likes, comments, remixes, shares, downloads, unique) => {
-    const sum = [likes, comments, remixes, shares, downloads]
+    // Exclude remixes from interaction rate everywhere
+    const sum = [likes, comments, shares, downloads]
       .map(x => Number(x))
       .reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
     const u = Number(unique);
@@ -1037,6 +1038,9 @@
         userHandle,
         userId,
         userKey,
+        // relationship fields for direct remix derivation
+        parent_post_id: p?.parent_post_id ?? null,
+        root_post_id: p?.root_post_id ?? null,
         pageUserHandle,
         pageUserKey
       });
