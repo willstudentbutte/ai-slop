@@ -33,8 +33,6 @@
   const idToViews = new Map();
   const idToComments = new Map();
   const idToRemixes = new Map();
-  const idToShares = new Map();
-  const idToDownloads = new Map();
   const idToMeta = new Map();
 
   let controlBar = null;
@@ -99,13 +97,13 @@
     return denom ? fmtPct(l, denom) : null;
   };
 
-  const interactionRate = (likes, comments, remixes, shares, downloads, unique) => {
-    const sum = [likes, comments, remixes, shares, downloads]
-      .map(x => Number(x))
-      .reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
+  const interactionRate = (likes, comments, unique) => {
+    // Interactions exclude remixes, shares, and downloads
+    const l = Number(likes);
+    const c = Number(comments);
     const u = Number(unique);
-    const denom = (Number.isFinite(u) && u > 0) ? u : null;
-    return denom ? fmtPct(sum, denom) : null;
+    const sum = (Number.isFinite(l) && l > 0 ? l : 0) + (Number.isFinite(c) && c > 0 ? c : 0);
+    return (Number.isFinite(u) && u > 0) ? fmtPct(sum, u) : null;
   };
 
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -243,35 +241,7 @@
     return null;
   };
 
-  const getShares = (item) => {
-    try {
-      const p = item?.post ?? item;
-      const cands = [
-        p?.share_count, p?.shares,
-        p?.stats?.share_count, p?.statistics?.share_count,
-      ];
-      for (const v of cands) {
-        const n = Number(v);
-        if (Number.isFinite(n)) return n;
-      }
-    } catch {}
-    return null;
-  };
-
-  const getDownloads = (item) => {
-    try {
-      const p = item?.post ?? item;
-      const cands = [
-        p?.download_count, p?.downloads,
-        p?.stats?.download_count, p?.statistics?.download_count,
-      ];
-      for (const v of cands) {
-        const n = Number(v);
-        if (Number.isFinite(n)) return n;
-      }
-    } catch {}
-    return null;
-  };
+  // shares/downloads not used
 
   const getFollowerCount = (item) => {
     try {
@@ -399,14 +369,7 @@
     const viewsStr = views != null ? `${fmt(views)} views` : null;
     const ageStr = Number.isFinite(meta?.ageMin) ? fmtAgeMin(meta.ageMin) : null;
     const emoji = badgeEmojiFor(id, meta);
-    const ir = interactionRate(
-      idToLikes.get(id),
-      idToComments.get(id),
-      idToRemixes.get(id),
-      idToShares.get(id),
-      idToDownloads.get(id),
-      idToUnique.get(id)
-    );
+    const ir = interactionRate(idToLikes.get(id), idToComments.get(id), idToUnique.get(id));
     const irStr = ir ? `${ir} IR` : null;
 
     const textParts = [viewsStr, irStr, ageStr, emoji].filter(Boolean);
@@ -477,14 +440,7 @@
     const likes = idToLikes.get(sid);
     const totalViews = idToViews.get(sid);
     const rate = likeRate(likes, uv, totalViews);
-    const ir = interactionRate(
-      likes,
-      idToComments.get(sid),
-      idToRemixes.get(sid),
-      idToShares.get(sid),
-      idToDownloads.get(sid),
-      uv
-    );
+    const ir = interactionRate(likes, idToComments.get(sid), uv);
     if (uv == null && !rate && !ir) return;
 
     const el = ensureDetailBadge();
@@ -993,8 +949,7 @@
       const tv = getTotalViews(it);
       const cm = getComments(it);
       const rx = getRemixes(it);
-      const sh = getShares(it);
-      const dl = getDownloads(it);
+      // shares/downloads not captured
       const p = it?.post || it || {};
       const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const ageMin = minutesSince(created_at);
@@ -1005,8 +960,7 @@
       if (tv != null) idToViews.set(id, tv);
       if (cm != null) idToComments.set(id, cm);
       if (rx != null) idToRemixes.set(id, rx);
-      if (sh != null) idToShares.set(id, sh);
-      if (dl != null) idToDownloads.set(id, dl);
+      // no shares/downloads maps
       idToMeta.set(id, {
         ageMin
       });
@@ -1026,8 +980,7 @@
         comments: cm,
         remixes: rx,            // kept for backward compatibility in storage/UI
         remix_count: rx,        // explicit direct remix count
-        shares: sh,
-        downloads: dl,
+        // shares/downloads omitted
         followers,
         created_at,
         ageMin,
@@ -1037,6 +990,9 @@
         userHandle,
         userId,
         userKey,
+        // relationship fields for direct remix derivation
+        parent_post_id: p?.parent_post_id ?? null,
+        root_post_id: p?.root_post_id ?? null,
         pageUserHandle,
         pageUserKey
       });
