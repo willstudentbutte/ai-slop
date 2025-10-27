@@ -40,6 +40,14 @@
     if (v >= 1e3) return (v/1e3).toFixed(0)+'K';
     return Math.round(v).toString();
   }
+  // For counts where we want 2 decimals with K/M, but no decimals below 1K
+  function fmtK2OrInt(n){
+    const v = Number(n);
+    if (!isFinite(v)) return '-';
+    if (Math.abs(v) >= 1e6) return (v/1e6).toFixed(2)+'M';
+    if (Math.abs(v) >= 1e3) return (v/1e3).toFixed(2)+'K';
+    return Math.round(v).toString();
+  }
 
   function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
   function interactionsOfSnap(s){
@@ -354,7 +362,7 @@
       }
       if (viewsEl) viewsEl.textContent = fmt2(totalViews);
       if (likesEl) likesEl.textContent = fmt2(totalLikes);
-      if (repliesEl) repliesEl.textContent = fmt0(totalReplies);
+      if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
       if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
       if (interEl) interEl.textContent = fmt2(totalInteractions);
     } catch {}
@@ -392,6 +400,21 @@
       $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
       if (opts.onHover) opts.onHover(null);
     });
+  }
+
+  function computeTotalsForUser(user){
+    const res = { views:0, likes:0, replies:0, remixes:0, interactions:0 };
+    if (!user || !user.posts) return res;
+    for (const p of Object.values(user.posts)){
+      const last = latestSnapshot(p?.snapshots);
+      if (!last) continue;
+      res.views += num(last?.views);
+      res.likes += num(last?.likes);
+      res.replies += num(last?.comments);
+      res.remixes += num(last?.remixes);
+      res.interactions += interactionsOfSnap(last);
+    }
+    return res;
   }
 
   function computeSeriesForUser(user, selectedPIDs, colorFor){
@@ -541,10 +564,17 @@
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      tooltip.style.left = (clientX + 12) + 'px';
-      tooltip.style.top  = (clientY + 12) + 'px';
       tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>
       <div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+      const width = tooltip.offsetWidth || 0;
+      let left = clientX + 12;
+      if (left + width > vw - 8){
+        left = clientX - 12 - width;
+        if (left < 8) left = 8;
+      }
+      tooltip.style.left = left + 'px';
+      tooltip.style.top  = (clientY + 12) + 'px';
     }
 
     // Zoom drag state
@@ -617,7 +647,7 @@
     return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
-  function makeTimeChart(canvas){
+  function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip'){
     const ctx = canvas.getContext('2d');
     const DPR = Math.max(1, window.devicePixelRatio||1);
     let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
@@ -655,15 +685,30 @@
       ctx.setLineDash([]);
     }
     function fmtDate(t){ try { const d=new Date(t); return d.toLocaleDateString(undefined,{month:'short',day:'2-digit'}); } catch { return String(t); } }
+    function fmtDateTime(t){
+      try {
+        const d = new Date(t);
+        const ds = d.toLocaleDateString(undefined,{month:'short',day:'2-digit'});
+        const ts = d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+        return ds+" "+ts;
+      } catch { return String(t); }
+    }
     function axes(){
       const xDomain = state.zoomX || state.x;
       const yDomain = state.zoomY || state.y;
       ctx.strokeStyle = '#607080'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(M.left,M.top); ctx.lineTo(M.left,H-M.bottom); ctx.lineTo(W-M.right,H-M.bottom); ctx.stroke();
       ctx.fillStyle = '#a7b0ba'; ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
       const xticks=5, yticks=5;
+      const tickVals = [];
+      for (let i=0;i<=xticks;i++) tickVals.push(Math.round(xDomain[0] + i*(xDomain[1]-xDomain[0])/xticks));
+      const dayKeys = tickVals.map(t=>{ try{ const d=new Date(t); return d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate(); } catch { return String(t);} });
+      const counts = new Map(); dayKeys.forEach(k=>counts.set(k,(counts.get(k)||0)+1));
+      const hasDupDays = Array.from(counts.values()).some(c=>c>1);
       for (let i=0;i<=xticks;i++){
-        const x = M.left + i*(W-(M.left+M.right))/xticks; const v = Math.round(xDomain[0] + i*(xDomain[1]-xDomain[0])/xticks);
-        ctx.fillText(fmtDate(v), x-24, H - (M.bottom - 18));
+        const x = M.left + i*(W-(M.left+M.right))/xticks; const v = tickVals[i];
+        const label = hasDupDays ? fmtDateTime(v) : fmtDate(v);
+        const off = hasDupDays ? 36 : 24;
+        ctx.fillText(label, x-off, H - (M.bottom - 18));
       }
       for (let i=0;i<=yticks;i++){
         const y = H - M.bottom - i*(H-(M.top+M.bottom))/yticks; const v = yDomain[0] + i*(yDomain[1]-yDomain[0])/yticks;
@@ -688,12 +733,21 @@
       }
       return best;
     }
-    const tooltip = $('#viewsTooltip');
+    const tooltip = $(tooltipSelector);
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
-      tooltip.style.display='block'; tooltip.style.left=(clientX+12)+'px'; tooltip.style.top=(clientY+12)+'px';
+      tooltip.style.display='block';
       tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>`+
-        `<div>${fmtDate(h.x)} • Views: ${fmt(h.y)}</div>`;
+        `<div>${fmtDateTime(h.x)} • Views: ${fmt(h.y)}</div>`;
+      const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+      const width = tooltip.offsetWidth || 0;
+      let left = clientX + 12;
+      if (left + width > vw - 8){
+        left = clientX - 12 - width;
+        if (left < 8) left = 8;
+      }
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = (clientY + 12) + 'px';
     }
     let drag=null;
     canvas.addEventListener('mousemove',(e)=>{
@@ -757,13 +811,41 @@
     function clampToPlot(px,py){ const x=Math.max(M.left,Math.min(W-M.right,px)); const y=Math.max(M.top,Math.min(H-M.bottom,py)); return [x,y]; }
     function grid(){ ctx.strokeStyle='#25303b'; ctx.lineWidth=1; ctx.setLineDash([4,4]); for (let i=0;i<6;i++){ const x=M.left+i*(W-(M.left+M.right))/5; ctx.beginPath(); ctx.moveTo(x,M.top); ctx.lineTo(x,H-M.bottom); ctx.stroke(); } for (let i=0;i<6;i++){ const y=M.top+i*(H-(M.top+M.bottom))/5; ctx.beginPath(); ctx.moveTo(M.left,y); ctx.lineTo(W-M.right,y); ctx.stroke(); } ctx.setLineDash([]); }
     function fmtDate(t){ try { const d=new Date(t); return d.toLocaleDateString(undefined,{month:'short',day:'2-digit'}); } catch { return String(t); } }
-    function axes(){ const xDomain=state.zoomX||state.x; const yDomain=state.zoomY||state.y; ctx.strokeStyle='#607080'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(M.left,M.top); ctx.lineTo(M.left,H-M.bottom); ctx.lineTo(W-M.right,H-M.bottom); ctx.stroke(); ctx.fillStyle='#a7b0ba'; ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Arial'; const xticks=5, yticks=5; for (let i=0;i<=xticks;i++){ const x=M.left+i*(W-(M.left+M.right))/xticks; const v=Math.round(xDomain[0]+i*(xDomain[1]-xDomain[0])/xticks); ctx.fillText(fmtDate(v), x-24, H-(M.bottom-18)); } for (let i=0;i<=yticks;i++){ const y=H-M.bottom - i*(H-(M.top+M.bottom))/yticks; const v=yDomain[0]+i*(yDomain[1]-yDomain[0])/yticks; ctx.fillText(fmt2(v), 10, y+4); } ctx.fillStyle='#e8eaed'; ctx.font='bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial'; ctx.fillText('Time', W/2-20, H-6); ctx.save(); ctx.translate(12,H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Followers',0,0); ctx.restore(); }
+    function fmtDateTime(t){ try { const d=new Date(t); const ds=d.toLocaleDateString(undefined,{month:'short',day:'2-digit'}); const ts=d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'}); return ds+" "+ts; } catch { return String(t);} }
+    function axes(){
+      const xDomain=state.zoomX||state.x; const yDomain=state.zoomY||state.y;
+      ctx.strokeStyle='#607080'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(M.left,M.top); ctx.lineTo(M.left,H-M.bottom); ctx.lineTo(W-M.right,H-M.bottom); ctx.stroke();
+      ctx.fillStyle='#a7b0ba'; ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      const xticks=5, yticks=5;
+      const tickVals=[]; for (let i=0;i<=xticks;i++){ tickVals.push(Math.round(xDomain[0]+i*(xDomain[1]-xDomain[0])/xticks)); }
+      const dayKeys = tickVals.map(t=>{ try{ const d=new Date(t); return d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate(); } catch { return String(t);} });
+      const counts = new Map(); dayKeys.forEach(k=>counts.set(k,(counts.get(k)||0)+1));
+      const hasDupDays = Array.from(counts.values()).some(c=>c>1);
+      for (let i=0;i<=xticks;i++){
+        const x=M.left+i*(W-(M.left+M.right))/xticks; const v=tickVals[i]; const label = hasDupDays ? fmtDateTime(v) : fmtDate(v); const off = hasDupDays ? 36 : 24; ctx.fillText(label, x-off, H-(M.bottom-18));
+      }
+      for (let i=0;i<=yticks;i++){ const y=H-M.bottom - i*(H-(M.top+M.bottom))/yticks; const v=yDomain[0]+i*(yDomain[1]-yDomain[0])/yticks; ctx.fillText(fmt2(v), 10, y+4); }
+      ctx.fillStyle='#e8eaed'; ctx.font='bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial'; ctx.fillText('Time', W/2-20, H-6); ctx.save(); ctx.translate(12,H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Followers',0,0); ctx.restore();
+    }
     function drawSeries(){ const s=state.series[0]; if (!s) return; ctx.strokeStyle=s.color||'#ffd166'; ctx.lineWidth=1.6; ctx.beginPath(); const pts=[...s.points].sort((a,b)=>a.t-b.t); for (let i=0;i<pts.length;i++){ const p=pts[i]; const x=mapX(p.x), y=mapY(p.y); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); } ctx.stroke(); for (const p of pts){ const x=mapX(p.x), y=mapY(p.y); ctx.fillStyle=s.color||'#ffd166'; ctx.beginPath(); ctx.arc(x,y,2.4,0,Math.PI*2); ctx.fill(); }
     }
     function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); }
     const tooltip = $('#followersTooltip');
     function nearest(mx,my){ const s=state.series[0]; if (!s) return null; let best=null,bd=Infinity; for (const p of s.points){ const x=mapX(p.x), y=mapY(p.y); if (x<M.left||x>W-M.right||y<M.top||y>H-M.bottom) continue; const d=Math.hypot(mx-x,my-y); if (d<bd && d<16){ bd=d; best={ x:p.x, y:p.y, t:p.t, color:s.color }; } } return best; }
-    function showTooltip(h,cx,cy){ if (!h){ tooltip.style.display='none'; return; } tooltip.style.display='block'; tooltip.style.left=(cx+12)+'px'; tooltip.style.top=(cy+12)+'px'; tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>Followers</strong></div>`+`<div>${fmtDate(h.x)} • Followers: ${fmt2(h.y)}</div>`; }
+    function showTooltip(h,cx,cy){
+      if (!h){ tooltip.style.display='none'; return; }
+      tooltip.style.display='block';
+      tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>Followers</strong></div>`+`<div>${fmtDateTime(h.x)} • Followers: ${fmt2(h.y)}</div>`;
+      const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+      const width = tooltip.offsetWidth || 0;
+      let left = cx + 12;
+      if (left + width > vw - 8){
+        left = cx - 12 - width;
+        if (left < 8) left = 8;
+      }
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = (cy + 12) + 'px';
+    }
     let drag=null; canvas.addEventListener('mousemove',(e)=>{ const rect=canvas.getBoundingClientRect(); const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); return; } const h=nearest(mx,my); state.hover=h; draw(); showTooltip(h,e.clientX,e.clientY); });
     canvas.addEventListener('mouseleave', ()=>{ state.hover=null; draw(); showTooltip(null); });
     canvas.addEventListener('mousedown',(e)=>{ const rect=canvas.getBoundingClientRect(); let x0=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y0=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; drag={x0,y0,x1:null,y1:null}; });
@@ -804,8 +886,9 @@
     } catch {}
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     const chart = makeChart($('#chart'));
-    const viewsChart = makeTimeChart($('#viewsChart'));
+    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip');
     const followersChart = makeFollowersChart($('#followersChart'));
+    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip');
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
@@ -856,6 +939,15 @@
         }
       }
       buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); } });
+      // Update unfiltered totals cards
+      try {
+        const t = computeTotalsForUser(user);
+        const allViewsEl = $('#allViewsTotal'); if (allViewsEl) allViewsEl.textContent = fmt2(t.views);
+        const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(t.likes);
+        const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(t.replies);
+        const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(t.remixes);
+        const allInterEl = $('#allInteractionsTotal'); if (allInterEl) allInterEl.textContent = fmt2(t.interactions);
+      } catch {}
       const series = computeSeriesForUser(user, [], colorFor)
         .filter(s=>visibleSet.has(s.id))
         .map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) }));
@@ -867,13 +959,41 @@
           const color=colorFor(pid); if (pts.length) out.push({ id: pid, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
+      // All posts cumulative views (unfiltered): aggregate across all posts
+      try {
+        const pts = (function(){
+          const events = [];
+          for (const [pid, p] of Object.entries(user.posts||{})){
+            for (const s of (p.snapshots||[])){
+              const t = Number(s.t), v = Number(s.views);
+              if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+            }
+          }
+          events.sort((a,b)=> a.t - b.t);
+          const latest = new Map();
+          let total = 0;
+          const out = [];
+          for (const e of events){
+            const prev = latest.get(e.pid) || 0;
+            if (e.v !== prev){
+              latest.set(e.pid, e.v);
+              total += (e.v - prev);
+              out.push({ x: e.t, y: total, t: e.t });
+            }
+          }
+          return out;
+        })();
+        const color = '#7dc4ff';
+        const series = pts.length ? [{ id: 'all_posts', color, points: pts }] : [];
+        allViewsChart.setData(series);
+      } catch {}
       // Update Total Followers card
       try {
         const fEl = $('#followersTotal');
         if (fEl){
           const arr = Array.isArray(user.followers) ? user.followers : [];
           const last = arr[arr.length - 1];
-          fEl.textContent = last ? fmt2(last.count) : '0.00';
+          fEl.textContent = last ? fmtK2OrInt(last.count) : '0';
         }
       } catch {}
       // Followers chart: use user-level follower history when available
@@ -890,6 +1010,7 @@
         if (z.scatter) chart.setZoom(z.scatter);
         if (z.views) viewsChart.setZoom(z.views);
         if (z.followers) followersChart.setZoom(z.followers);
+        if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
       } catch {}
       // Sync chart hover back to list
       chart.onHover((pid)=>{
@@ -949,7 +1070,7 @@
             }
             if (viewsEl) viewsEl.textContent = fmt2(totalViews);
             if (likesEl) likesEl.textContent = fmt2(totalLikes);
-            if (repliesEl) repliesEl.textContent = fmt0(totalReplies);
+            if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
             if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
             if (interEl) interEl.textContent = fmt2(totalInteractions);
           } catch {}
@@ -989,6 +1110,7 @@
       const zScatter = chart.getZoom();
       const zViews = viewsChart.getZoom();
       const zFollowers = followersChart.getZoom();
+      const zViewsAll = allViewsChart.getZoom();
       metrics = await loadMetrics();
       const prev = currentUserKey; const def = buildUserOptions(metrics);
       if (!metrics.users[prev]) currentUserKey = def;
@@ -999,6 +1121,7 @@
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
       try { if (zViews) viewsChart.setZoom(zViews); } catch {}
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
+      try { if (zViewsAll) allViewsChart.setZoom(zViewsAll); } catch {}
     });
     $('#export').addEventListener('click', ()=>{ const u=metrics.users[currentUserKey]; if (u) exportCSV(u); });
     // Persist zoom on full page reload/navigation
@@ -1007,10 +1130,11 @@
       z.scatter = chart.getZoom();
       z.views = viewsChart.getZoom();
       z.followers = followersChart.getZoom();
+      z.viewsAll = allViewsChart.getZoom();
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI(); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); refreshUserUI(); });
       $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI(); persistVisibility(); });
       $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
 
