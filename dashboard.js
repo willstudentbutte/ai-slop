@@ -116,7 +116,150 @@
     }
     return 0; // unknown -> sort to bottom
   }
-  const DBG_SORT = true;
+  const DBG_SORT = false; // hide noisy sorting logs by default
+
+  // Reconcile posts for the selected user:
+  // - If a post has an ownerKey different from this user, move it to that owner user bucket.
+  // - If ownerKey is missing but ownerId exists, derive key as id:<ownerId> and move there.
+  // - If both ownerKey and ownerId are missing, move the post to the 'unknown' user bucket.
+  async function pruneMismatchedPostsForUser(metrics, userKey){
+    try {
+      const user = metrics?.users?.[userKey];
+      if (!user || !user.posts) return { moved: [], kept: 0 };
+      const moved = [];
+      const keep = {};
+      const keys = Object.keys(user.posts);
+      const total = keys.length;
+      // Helpers to compare against this user's canonical identity
+      const curHandle = (user.handle || (userKey.startsWith('h:') ? userKey.slice(2) : '') || '').toLowerCase();
+      const curId = (user.id || (userKey.startsWith('id:') ? userKey.slice(3) : '') || '').toString();
+      for (const pid of keys){
+        const p = user.posts[pid];
+        const ownerKey = (p && p.ownerKey) ? String(p.ownerKey) : null;
+        const ownerId = (p && p.ownerId) ? String(p.ownerId) : null;
+        const ownerHandle = (p && p.ownerHandle) ? String(p.ownerHandle).toLowerCase() : null;
+        let targetKey = null;
+        if (ownerKey && ownerKey !== userKey){
+          targetKey = ownerKey;
+        } else if (ownerId && curId && ownerId !== curId){
+          // Explicit id mismatch → move to owner id bucket
+          targetKey = `id:${ownerId}`;
+        } else if (ownerHandle && curHandle && ownerHandle !== curHandle){
+          // Explicit handle mismatch → move to owner handle bucket
+          targetKey = `h:${ownerHandle}`;
+        }
+
+        if (targetKey && targetKey !== userKey){
+          // Ensure target user bucket exists
+          if (!metrics.users[targetKey]){
+            const guessedHandle = targetKey.startsWith('h:') ? targetKey.slice(2) : (p.ownerHandle || null);
+            const guessedId = targetKey.startsWith('id:') ? targetKey.slice(3) : (p.ownerId || null);
+            metrics.users[targetKey] = { handle: guessedHandle, id: guessedId, posts: {}, followers: [] };
+          }
+          // Optionally normalize the ownerKey on the post
+          if (!p.ownerKey && targetKey !== 'unknown') p.ownerKey = targetKey;
+          metrics.users[targetKey].posts[pid] = p;
+          moved.push({ pid, from: userKey, to: targetKey, ownerKey: ownerKey || null, ownerId: ownerId || null, ownerHandle: p.ownerHandle || null });
+          // do not include in keep
+        } else {
+          // If owner info absent, infer owner as current user instead of moving to unknown
+          if (!ownerKey && !ownerId && !p.ownerHandle){
+            p.ownerKey = userKey;
+            if (!p.ownerHandle && curHandle) p.ownerHandle = curHandle;
+            if (!p.ownerId && curId) p.ownerId = curId;
+          }
+          keep[pid] = p; // stay under current user
+        }
+      }
+      if (moved.length){
+        metrics.users[userKey].posts = keep;
+        try { console.info('[Dashboard] reconciled posts', { userKey, total, moved: moved.length }); } catch {}
+        // Log each moved item for traceability
+        try { moved.forEach(it=> console.info('[Dashboard] moved post', it)); } catch {}
+        await chrome.storage.local.set({ metrics });
+      } else {
+        try { console.info('[Dashboard] no mismatched or owner-missing posts found', { userKey, total }); } catch {}
+      }
+      return { moved, kept: Object.keys(metrics.users[userKey].posts).length };
+    } catch (e) {
+      try { console.warn('[Dashboard] pruneMismatchedPostsForUser failed', e); } catch {}
+      return { moved: [], kept: 0 };
+    }
+  }
+
+  // Remove posts that are missing data for the selected user.
+  // Definition: no snapshots OR every snapshot lacks all known metrics (uv, views, likes, comments, remixes, shares, downloads).
+  async function pruneEmptyPostsForUser(metrics, userKey){
+    try {
+      const user = metrics?.users?.[userKey];
+      if (!user || !user.posts) return { removed: [] };
+      const removed = [];
+      const keep = {};
+      const keys = Object.keys(user.posts);
+      const hasAnyMetric = (s)=>{
+        if (!s) return false;
+        const fields = ['uv','views','likes','comments','remixes','shares','downloads'];
+        for (const k of fields){ if (s[k] != null && isFinite(Number(s[k]))) return true; }
+        return false;
+      };
+      for (const pid of keys){
+        const p = user.posts[pid];
+        const snaps = Array.isArray(p?.snapshots) ? p.snapshots : [];
+        const valid = snaps.length > 0 && snaps.some(hasAnyMetric);
+        if (!valid){
+          removed.push(pid);
+        } else {
+          keep[pid] = p;
+        }
+      }
+      if (removed.length){
+        metrics.users[userKey].posts = keep;
+        try { console.info('[Dashboard] pruned empty posts', { userKey, removedCount: removed.length, removed }); } catch {}
+        await chrome.storage.local.set({ metrics });
+      }
+      return { removed };
+    } catch(e){
+      try { console.warn('[Dashboard] pruneEmptyPostsForUser failed', e); } catch {}
+      return { removed: [] };
+    }
+  }
+  // Try to reclaim posts from the 'unknown' bucket that clearly belong to the selected user.
+  async function reclaimFromUnknownForUser(metrics, userKey){
+    try {
+      const user = metrics?.users?.[userKey];
+      const unk = metrics?.users?.unknown;
+      if (!user || !unk || !unk.posts) return { moved: 0 };
+      const curHandle = (user.handle || (userKey.startsWith('h:') ? userKey.slice(2) : '') || '').toLowerCase();
+      const curId = (user.id || (userKey.startsWith('id:') ? userKey.slice(3) : '') || '').toString();
+      let moved = 0;
+      for (const [pid, p] of Object.entries(unk.posts)){
+        const oKey = p.ownerKey ? String(p.ownerKey) : null;
+        const oId = p.ownerId ? String(p.ownerId) : null;
+        const oHandle = p.ownerHandle ? String(p.ownerHandle).toLowerCase() : null;
+        const matchByKey = oKey && oKey === userKey;
+        const matchById = oId && curId && oId === curId;
+        const matchByHandle = oHandle && curHandle && oHandle === curHandle;
+        if (matchByKey || matchById || matchByHandle){
+          if (!metrics.users[userKey].posts) metrics.users[userKey].posts = {};
+          metrics.users[userKey].posts[pid] = p;
+          // Normalize
+          if (!p.ownerKey) p.ownerKey = userKey;
+          if (!p.ownerHandle && curHandle) p.ownerHandle = curHandle;
+          if (!p.ownerId && curId) p.ownerId = curId;
+          delete unk.posts[pid];
+          moved++;
+        }
+      }
+      if (moved){
+        try { console.info('[Dashboard] reclaimed posts from unknown', { userKey, moved }); } catch {}
+        await chrome.storage.local.set({ metrics });
+      }
+      return { moved };
+    } catch(e){
+      try { console.warn('[Dashboard] reclaimFromUnknown failed', e); } catch {}
+      return { moved: 0 };
+    }
+  }
 
   // Fallback: derive a comparable numeric from the post ID (assumes hex-like GUID after 's_')
   function pidBigInt(pid){
@@ -678,12 +821,17 @@
       try { chrome.storage.local.set({ visibilityByUser }); } catch {}
     }
 
-    function refreshUserUI(opts={}){
+    async function refreshUserUI(opts={}){
       const { preserveEmpty=false } = opts;
       const user = metrics.users[currentUserKey];
       if (!user){
         buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
       }
+      // Integrity check: remove posts incorrectly attributed to this user
+      // Reconcile ownership (selected user only), then reclaim, then remove empty posts
+      await pruneMismatchedPostsForUser(metrics, currentUserKey);
+      await reclaimFromUnknownForUser(metrics, currentUserKey);
+      await pruneEmptyPostsForUser(metrics, currentUserKey);
       const colorFor = makeColorMap(user);
       if (visibleSet.size === 0 && !preserveEmpty){
         // Restore from saved state (including empty) or default to last 20 most recent posts when no saved state

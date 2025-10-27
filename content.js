@@ -43,6 +43,10 @@
         if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
         if (snap.postId) {
           const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
+          // Persist owner attribution on the post to allow dashboard integrity checks
+          if (!post.ownerKey && (snap.userKey || snap.pageUserKey)) post.ownerKey = snap.userKey || snap.pageUserKey;
+          if (!post.ownerHandle && (snap.userHandle || snap.pageUserHandle)) post.ownerHandle = snap.userHandle || snap.pageUserHandle;
+          if (!post.ownerId && snap.userId != null) post.ownerId = snap.userId;
           if (!post.url && snap.url) post.url = snap.url;
           if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
           if (!post.post_time && snap.created_at) post.post_time = snap.created_at; // Map creation time so dashboard can sort posts
