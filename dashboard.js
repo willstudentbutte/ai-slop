@@ -53,12 +53,11 @@
   function interactionsOfSnap(s){
     if (!s) return 0;
     const likes = num(s.likes);
-    const comments = num(s.comments ?? s.reply_count); // prefer non-recursive
-    // Use direct remix count; prefer remix_count if present
-    const remixes = num(s.remix_count ?? s.remixes);
+    const comments = num(s.comments ?? s.reply_count); // non-recursive
+    // Exclude remixes from interaction rate everywhere
     const shares = num(s.shares ?? s.share_count);
     const downloads = num(s.downloads ?? s.download_count);
-    return likes + comments + remixes + shares + downloads;
+    return likes + comments + shares + downloads;
   }
 
   function likeRate(likes, uv){
@@ -87,6 +86,18 @@
     }
     if (sawT && best) return best;
     return snaps[snaps.length - 1] || null;
+  }
+
+  // Find latest available remix count (from whichever field) for a post
+  function latestRemixCountForPost(post){
+    try {
+      const snaps = Array.isArray(post?.snapshots) ? post.snapshots : [];
+      for (let i = snaps.length - 1; i >= 0; i--){
+        const v = Number(snaps[i]?.remix_count ?? snaps[i]?.remixes);
+        if (isFinite(v)) return v;
+      }
+    } catch {}
+    return 0;
   }
 
   // Timestamp helpers
@@ -207,7 +218,7 @@
       const keys = Object.keys(user.posts);
       const hasAnyMetric = (s)=>{
         if (!s) return false;
-        const fields = ['uv','views','likes','comments','remix_count','remixes','shares','downloads'];
+        const fields = ['uv','views','likes','comments','remix_count','shares','downloads'];
         for (const k of fields){ if (s[k] != null && isFinite(Number(s[k]))) return true; }
         return false;
       };
@@ -284,6 +295,7 @@
     return metrics;
   }
 
+
   function buildUserOptions(metrics){
     const sel = $('#userSelect');
     sel.innerHTML = '';
@@ -358,8 +370,7 @@
         totalViews += num(last?.views);
         totalLikes += num(last?.likes);
         totalReplies += num(last?.comments); // non-recursive
-        // use direct remix count if available
-        totalRemixes += num(last?.remix_count ?? last?.remixes);
+        totalRemixes += num(latestRemixCountForPost(post));
         totalInteractions += interactionsOfSnap(last);
       }
       if (viewsEl) viewsEl.textContent = fmt2(totalViews);
@@ -407,13 +418,13 @@
   function computeTotalsForUser(user){
     const res = { views:0, likes:0, replies:0, remixes:0, interactions:0 };
     if (!user || !user.posts) return res;
-    for (const p of Object.values(user.posts)){
+    for (const [pid, p] of Object.entries(user.posts)){
       const last = latestSnapshot(p?.snapshots);
       if (!last) continue;
       res.views += num(last?.views);
       res.likes += num(last?.likes);
       res.replies += num(last?.comments);
-      res.remixes += num(last?.remix_count ?? last?.remixes);
+      res.remixes += num(latestRemixCountForPost(p));
       res.interactions += interactionsOfSnap(last);
     }
     return res;
@@ -912,6 +923,7 @@
       if (!user){
         buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
       }
+      // No precompute needed for IR; use latest available remix count only for cards
       // Integrity check: remove posts incorrectly attributed to this user
       // Reconcile ownership (selected user only), then reclaim, then remove empty posts
       await pruneMismatchedPostsForUser(metrics, currentUserKey);
@@ -1067,7 +1079,7 @@
               totalViews += num(last?.views);
               totalLikes += num(last?.likes);
               totalReplies += num(last?.comments);
-              totalRemixes += num(last?.remix_count ?? last?.remixes);
+              totalRemixes += num(latestRemixCountForPost(post));
               totalInteractions += interactionsOfSnap(last);
             }
             if (viewsEl) viewsEl.textContent = fmt2(totalViews);

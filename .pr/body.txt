@@ -1,12 +1,17 @@
-Fix misattributed posts, remove empty posts, and align owner parsing.
+Stabilize ownership, clean data, and extend dashboard UI.
 
-Changes
-- Owner parsing: prefer post.shared_by (id) + profile.username (handle) per me.json.
-- Persist ownerKey/ownerHandle/ownerId on posts as snapshots arrive.
-- Reconcile (selected user only): move away on explicit mismatch; infer current user when owner is missing; reclaim from 'unknown'.
-- Prune empty posts for selected user (no snapshots or all-null metrics).
-- Hide noisy sorting logs; add reconciliation/pruning logs.
+Highlights
+- Fix misattributed posts: prefer post.shared_by + profile.username (per sources/me.json), persist ownerKey/ownerId/ownerHandle.
+- Reconcile per selected user: move on explicit mismatch; reclaim from unknown; remove empty posts; add concise logs.
+- Replace “Total …” filtered labels with unprefixed labels; add All Posts (unfiltered) totals row (views/likes/replies/remixes/interactions) and move Total followers onto that row.
+- New chart: All Posts cumulative views over time.
+- Time axis: show time-of-day when multiple ticks share a day; tooltips include date+time.
+- Tooltips: edge-aware flipping (pin to left of cursor if near right edge) without drift/wrap.
+- Replies formatting: 2 decimals for K/M; no decimals below 1K.
 
 Notes
-- Scoped to the selected user to keep refresh fast.
-- Emits concise [Dashboard] logs for traceability.
+- Cleanup runs only for the selected user to keep refresh fast.
+- Logs: [Dashboard] reconciled/moved/pruned entries for traceability.
+
+Reviewers
+@willstudentbutte @cameoed
