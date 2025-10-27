@@ -231,7 +231,8 @@
     try {
       const p = item?.post ?? item;
       const cands = [
-        p?.remix_count, p?.remixes,
+        // Use only direct remix count; avoid any recursive aggregates
+        p?.remix_count,
         p?.stats?.remix_count, p?.statistics?.remix_count,
       ];
       for (const v of cands) {
@@ -1023,7 +1024,8 @@
         likes,
         views: tv,
         comments: cm,
-        remixes: rx,
+        remixes: rx,            // kept for backward compatibility in storage/UI
+        remix_count: rx,        // explicit direct remix count
         shares: sh,
         downloads: dl,
         followers,

@@ -54,7 +54,8 @@
     if (!s) return 0;
     const likes = num(s.likes);
     const comments = num(s.comments ?? s.reply_count); // prefer non-recursive
-    const remixes = num(s.remixes ?? s.remix_count);
+    // Use direct remix count; prefer remix_count if present
+    const remixes = num(s.remix_count ?? s.remixes);
     const shares = num(s.shares ?? s.share_count);
     const downloads = num(s.downloads ?? s.download_count);
     return likes + comments + remixes + shares + downloads;
@@ -206,7 +207,7 @@
       const keys = Object.keys(user.posts);
       const hasAnyMetric = (s)=>{
         if (!s) return false;
-        const fields = ['uv','views','likes','comments','remixes','shares','downloads'];
+        const fields = ['uv','views','likes','comments','remix_count','remixes','shares','downloads'];
         for (const k of fields){ if (s[k] != null && isFinite(Number(s[k]))) return true; }
         return false;
       };
@@ -357,7 +358,8 @@
         totalViews += num(last?.views);
         totalLikes += num(last?.likes);
         totalReplies += num(last?.comments); // non-recursive
-        totalRemixes += num(last?.remixes);  // recursive if captured
+        // use direct remix count if available
+        totalRemixes += num(last?.remix_count ?? last?.remixes);
         totalInteractions += interactionsOfSnap(last);
       }
       if (viewsEl) viewsEl.textContent = fmt2(totalViews);
@@ -411,7 +413,7 @@
       res.views += num(last?.views);
       res.likes += num(last?.likes);
       res.replies += num(last?.comments);
-      res.remixes += num(last?.remixes);
+      res.remixes += num(last?.remix_count ?? last?.remixes);
       res.interactions += interactionsOfSnap(last);
     }
     return res;
@@ -1065,7 +1067,7 @@
               totalViews += num(last?.views);
               totalLikes += num(last?.likes);
               totalReplies += num(last?.comments);
-              totalRemixes += num(last?.remixes);
+              totalRemixes += num(last?.remix_count ?? last?.remixes);
               totalInteractions += interactionsOfSnap(last);
             }
             if (viewsEl) viewsEl.textContent = fmt2(totalViews);
