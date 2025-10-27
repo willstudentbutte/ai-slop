@@ -50,6 +50,9 @@
           if (!post.url && snap.url) post.url = snap.url;
           if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
           if (!post.post_time && snap.created_at) post.post_time = snap.created_at; // Map creation time so dashboard can sort posts
+          // Relationship fields for deriving direct remix counts across metrics
+          if (snap.parent_post_id != null) post.parent_post_id = snap.parent_post_id;
+          if (snap.root_post_id != null) post.root_post_id = snap.root_post_id;
 
           const s = {
             t: snap.ts || Date.now(),
@@ -60,13 +63,11 @@
             // Store direct remixes; map both names for backward/forward compat
             remixes: snap.remix_count ?? snap.remixes ?? null,
             remix_count: snap.remix_count ?? snap.remixes ?? null,
-            shares: snap.shares ?? null,
-            downloads: snap.downloads ?? null,
+            // shares/downloads removed
           };
           const last = post.snapshots[post.snapshots.length - 1];
           const same = last && last.uv === s.uv && last.likes === s.likes && last.views === s.views &&
-            last.comments === s.comments && (last.remix_count ?? last.remixes) === (s.remix_count ?? s.remixes) &&
-            last.shares === s.shares && last.downloads === s.downloads;
+            last.comments === s.comments && last.remix_count === s.remix_count;
           if (!same) {
             post.snapshots.push(s);
           }
