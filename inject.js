@@ -11,7 +11,7 @@
  * - Badge text looks like: “30.2K views • 14h 36m • 🔥/🔥🔥/🔥🔥🔥” with more flames for hotter posts.
  * - "Super-hot" state (50+ likes <1h) adds a red glow and 🔥🔥🔥🔥🔥 emoji.
  * - "Gather" mode button (only on /profile/ pages) auto-scrolls and refreshes the page to populate the feed.
- * - Gather mode speed (1 min to 17 min refreshes) is controllable via a slider. Scroll amount is fixed at 50px. Speed translates across tabs.
+ * - Gather mode speed (1 min to 17 min refreshes) is controllable via a slider. Speed translates across tabs.
  */
 
 (function () {
@@ -114,6 +114,11 @@
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
+
+  const isFilterHiddenPage = () => {
+    const path = location.pathname;
+    return path.startsWith('/storyboard') || path.startsWith('/drafts') || path.startsWith('/d/') || path.startsWith('/p/');
+  };
 
   function currentSIdFromURL() {
     const m = location.pathname.match(/^\/p\/(s_[A-Za-z0-9]+)/i);
@@ -474,7 +479,7 @@
     Object.assign(b.style, {
       background: 'rgba(255,255,255,0.12)',
       color: '#fff',
-      border: '1px solid rgba(255,255,255,0.2)',
+      border: '1px solid rgba(255,255,255,0.2)', // This is the original, correct line
       borderRadius: '8px',
       padding: '4px 8px',
       cursor: 'pointer'
@@ -489,6 +494,7 @@
     };
   }
 
+  // == MODIFIED FUNCTION ==
   function ensureControlBar() {
     if (controlBar && document.contains(controlBar)) return controlBar;
 
@@ -516,26 +522,40 @@
     buttonContainer.style.display = 'flex';
     buttonContainer.style.gap = '8px';
 
+    // 1. Handle universal prefs (speed) from localStorage
     let prefs = getPrefs();
-    if (typeof prefs.filterIndex !== 'number') prefs.filterIndex = 0;
-    if (typeof prefs.gatherSpeed !== 'string') prefs.gatherSpeed = '0'; // Default to turtle speed (0)
-    setPrefs(prefs);
+    if (typeof prefs.gatherSpeed !== 'string') {
+        prefs.gatherSpeed = '0'; // Default to turtle speed (0)
+        setPrefs(prefs); // Save back *only* speed
+    }
 
+    // 2. Handle tab-specific state (filter index, gather status) from sessionStorage
     let sessionState = getGatherState();
+    if (typeof sessionState.filterIndex !== 'number') {
+      sessionState.filterIndex = 0; // Default filter index
+    }
     isGatheringActiveThisTab = sessionState.isGathering || false;
+    setGatherState(sessionState); // Save state with default filterIndex if it was missing
 
     const filterBtn = document.createElement('button');
     stylBtn(filterBtn);
-    const setLabel = () => filterBtn.textContent = FILTER_LABELS[prefs.filterIndex];
+    
+    // 3. Update setLabel to read from sessionStorage
+    const setLabel = () => {
+      const s = getGatherState(); // Read from session
+      filterBtn.textContent = FILTER_LABELS[s.filterIndex ?? 0];
+    };
     setLabel();
+
+    // 4. Update filterBtn.onclick to use sessionStorage
     filterBtn.onclick = () => {
-      const p = getPrefs();
-      p.filterIndex = ((p.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
-      setPrefs(p);
-      prefs.filterIndex = p.filterIndex;
+      const s = getGatherState(); // Get current tab state
+      s.filterIndex = ((s.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
+      setGatherState(s); // Save new tab state
       setLabel();
       applyFilter();
     };
+    
     buttonContainer.appendChild(filterBtn);
 
     const gatherBtn = document.createElement('button');
@@ -572,7 +592,7 @@
     slider.min = '0';
     slider.max = '100';
     slider.step = '1';
-    slider.value = prefs.gatherSpeed;
+    slider.value = prefs.gatherSpeed; // Read universal speed from prefs
     slider.style.flexGrow = '1';
     const emojiRabbit = document.createElement('span');
     emojiRabbit.textContent = '🐇';
@@ -633,22 +653,26 @@
       }
     };
 
+    // 5. Update gatherBtn.onclick to reset the filter in sessionStorage
     gatherBtn.onclick = () => {
       isGatheringActiveThisTab = !isGatheringActiveThisTab;
-      let sState = getGatherState();
+      let sState = getGatherState(); // Get current tab state
       sState.isGathering = isGatheringActiveThisTab;
+      
       if (!isGatheringActiveThisTab) {
         delete sState.refreshDeadline;
+      } else {
+        // Reset filter *for this tab* when gathering starts
+        sState.filterIndex = 0;
       }
-      setGatherState(sState);
-      bar.updateGatherState();
+      
+      setGatherState(sState); // Save updated tab state (gathering status + filter reset)
+      bar.updateGatherState(); // Update UI
+
       if (isGatheringActiveThisTab) {
-        let p = getPrefs();
-        p.filterIndex = 0;
-        setPrefs(p);
-        prefs.filterIndex = 0;
-        setLabel();
-        applyFilter();
+        // These actions now happen *after* state is set
+        setLabel(); // setLabel will read the new '0' index from session
+        applyFilter(); // applyFilter will read the new '0' index
       }
     };
 
@@ -659,26 +683,24 @@
 
   // == Filtering Logic ==
 
+  // == MODIFIED FUNCTION ==
   function applyFilter() {
-    const prefs = getPrefs();
-    if (isGatheringActiveThisTab) {
-      if (prefs.filterIndex !== 0) {
-        prefs.filterIndex = 0;
-        setPrefs(prefs);
-        const filterBtn = controlBar?.querySelector('button');
-        if (filterBtn) filterBtn.textContent = FILTER_LABELS[0];
-      }
-    }
-    const idx = typeof prefs.filterIndex === 'number' ? prefs.filterIndex : 0;
+    // Read filter index from tab-specific session state
+    const sessionState = getGatherState();
+    const idx = sessionState.filterIndex ?? 0;
     const limitMin = FILTER_STEPS_MIN[idx];
 
     for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
+      
+      // If no filter is set (null) OR gathering is active, show the card
       if (limitMin == null || isGatheringActiveThisTab) {
         card.style.display = '';
         continue;
       }
+      
+      // This logic now only runs if a filter is set AND gathering is off
       const show = Number.isFinite(meta?.ageMin) && meta.ageMin <= limitMin;
       card.style.display = show ? '' : 'none';
     }
@@ -822,9 +844,24 @@
     }
   }
 
+  // --- 2. MODIFY THIS FUNCTION ---
   function updateControlsVisibility() {
     const bar = ensureControlBar();
     if (!bar) return;
+
+    // --- ADDED LOGIC ---
+    // Check if we are on a hidden page
+    if (isFilterHiddenPage()) {
+      bar.style.display = 'none'; // Hide the entire bar
+      return; // Stop processing
+    } else {
+      // Otherwise, ensure the bar is visible
+      // The default display style is 'flex' from ensureControlBar
+      bar.style.display = 'flex';
+    }
+    // --- END ADDED LOGIC ---
+
+    // Original logic resumes below:
     const gatherBtn = bar.querySelector('.sora-uv-gather-btn');
     const gatherControlsWrapper = bar.querySelector('.sora-uv-gather-controls-wrapper');
     if (!gatherBtn || !gatherControlsWrapper) return;
@@ -846,6 +883,7 @@
       }
     }
   }
+  // --- END MODIFICATION ---
 
   // == Preferences & Storage ==
 
