@@ -16,6 +16,10 @@
     '#7dc4ff','#ff8a7a','#ffd166','#95e06c','#c792ea','#64d3ff','#ffa7c4','#9fd3c7','#f6bd60','#84a59d','#f28482'
   ];
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+  const esc = (s)=> String(s).replace(/[&<>"']/g, (c)=> ESC_MAP[c] || c);
+
+  // (thumbnails are provided by the collector; no auto-rewrite here)
 
   function fmt(n){
     if (n == null || !isFinite(n)) return '-';
@@ -294,6 +298,7 @@
   }
 
 
+
   function buildUserOptions(metrics){
     const sel = $('#userSelect');
     sel.innerHTML = '';
@@ -340,10 +345,13 @@
       const postTime = getPostTimeStrict(p) || 0;
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
+      const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const label = cap || pid; // one-line dynamic via CSS ellipsis
+      const title = cap || pid;
       if (DBG_SORT){
         try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
       }
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, last, first, postTime, pidBI: bi, rate };
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate };
     });
     // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -389,7 +397,7 @@
         <div class="dot" style="background:${color}"></div>
         <div class="thumb" style="${thumbStyle}"></div>
         <div class="meta">
-          <div class="id"><a href="${p.url}" target="_blank" rel="noopener">${p.pid}</a></div>
+          <div class="id"><a href="${p.url}" target="_blank" rel="noopener" title="${esc(p.title)}">${esc(p.label)}</a></div>
           <div class="stats">Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}</div>
         </div>
         <div class="toggle" data-pid="${p.pid}">Hide</div>
@@ -439,7 +447,9 @@
         if (s.uv != null && r != null) pts.push({ x:s.uv, y:r, t:s.t });
       }
       const color = typeof colorFor === 'function' ? colorFor(pid) : COLORS[i % COLORS.length];
-      if (pts.length) series.push({ id: pid, color, points: pts, highlighted: selectedPIDs.includes(pid) });
+      const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const label = cap || pid;
+      if (pts.length) series.push({ id: pid, label, color, points: pts, highlighted: selectedPIDs.includes(pid) });
     }
     return series;
   }
@@ -566,7 +576,7 @@
           // ignore points outside plot
           if (x < M.left || x > W - M.right || y < M.top || y > H - M.bottom) continue;
           const d = Math.hypot(mx-x,my-y);
-          if (d<bd && d<16) { bd=d; best = { pid: s.id, x:p.x, y:p.y, t:p.t, color:s.color, highlighted:s.highlighted, url: s.url }; }
+          if (d<bd && d<16) { bd=d; best = { pid: s.id, label: s.label || s.id, x:p.x, y:p.y, t:p.t, color:s.color, highlighted:s.highlighted, url: s.url }; }
         }
       }
       return best;
@@ -575,8 +585,9 @@
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>
-      <div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+      const body = `<div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = clientX + 12;
@@ -738,7 +749,7 @@
           const d = Math.hypot(mx-x,my-y);
           if (d < bd && d < 16){
             bd = d;
-            best = { pid: s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url };
+            best = { pid: s.id, label: s.label || s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url };
           }
         }
       }
@@ -748,8 +759,9 @@
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>`+
-        `<div>${fmtDateTime(h.x)} • Views: ${fmt(h.y)}</div>`;
+      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+      const body = `<div>${fmtDateTime(h.x)} • Views: ${fmt(h.y)}</div>`;
+      tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = clientX + 12;
@@ -968,7 +980,7 @@
       const vSeries = (function(){
         const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
           if (!visibleSet.has(pid)) continue; const pts=[]; for (const s of (p.snapshots||[])){ const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); }
-          const color=colorFor(pid); if (pts.length) out.push({ id: pid, color, points: pts, url: absUrl(p.url, pid) }); }
+          const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
       // All posts cumulative views (unfiltered): aggregate across all posts
@@ -1059,7 +1071,7 @@
               for (const s of (p.snapshots||[])){
                 const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
               }
-              const color=colorFor(vpid); if (pts.length) out.push({ id: vpid, color, points: pts, url: absUrl(p.url, vpid) });
+              const color=colorFor(vpid); const label=(typeof p?.caption==='string'&&p.caption)?p.caption.trim():vpid; if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
             }
             return out; })();
           viewsChart.setData(vSeries);

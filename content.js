@@ -7,9 +7,10 @@
 
 // Inject inject.js into the page context so we can monkey-patch window.fetch/XHR.
 (() => {
+  try { console.log('[SoraUV] content: start, injecting inject.js'); } catch {}
   const s = document.createElement('script');
   s.src = chrome.runtime.getURL('inject.js');
-  s.onload = () => s.remove();
+  s.onload = () => { try { console.log('[SoraUV] content: inject.js attached'); } catch {} s.remove(); };
   (document.head || document.documentElement).appendChild(s);
 })();
 
@@ -17,6 +18,10 @@
 (function () {
   const PENDING = [];
   let flushTimer = null;
+
+  // Debug toggles
+  const DEBUG = { storage: true, thumbs: true };
+  const dlog = (topic, ...args) => { try { if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args); } catch {} };
 
   function scheduleFlush() {
     if (flushTimer) return;
@@ -37,6 +42,7 @@
     const items = PENDING.splice(0, PENDING.length);
     try {
       const { metrics = { users: {} } } = await chrome.storage.local.get('metrics');
+      dlog('storage', 'flush begin', { count: items.length });
       for (const snap of items) {
         const userKey = snap.userKey || snap.pageUserKey || 'unknown';
         const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [] });
@@ -48,7 +54,25 @@
           if (!post.ownerHandle && (snap.userHandle || snap.pageUserHandle)) post.ownerHandle = snap.userHandle || snap.pageUserHandle;
           if (!post.ownerId && snap.userId != null) post.ownerId = snap.userId;
           if (!post.url && snap.url) post.url = snap.url;
-          if (!post.thumb && snap.thumb) post.thumb = snap.thumb;
+          // Capture/refresh caption
+          if (typeof snap.caption === 'string' && snap.caption) {
+            if (!post.caption) post.caption = snap.caption;
+            else if (post.caption !== snap.caption) post.caption = snap.caption;
+          }
+          // Update thumbnail when a better/different one becomes available
+          if (snap.thumb) {
+            if (!post.thumb) {
+              post.thumb = snap.thumb;
+              dlog('thumbs', 'thumb set', { postId: snap.postId, thumb: post.thumb });
+            } else if (post.thumb !== snap.thumb) {
+              dlog('thumbs', 'thumb update', { postId: snap.postId, old: post.thumb, new: snap.thumb });
+              post.thumb = snap.thumb;
+            } else {
+              dlog('thumbs', 'thumb unchanged', { postId: snap.postId, thumb: post.thumb });
+            }
+          } else {
+            dlog('thumbs', 'thumb missing in snap', { postId: snap.postId });
+          }
           if (!post.post_time && snap.created_at) post.post_time = snap.created_at; // Map creation time so dashboard can sort posts
           // Relationship fields for deriving direct remix counts across metrics
           if (snap.parent_post_id != null) post.parent_post_id = snap.parent_post_id;
@@ -89,6 +113,7 @@
         }
       }
       await chrome.storage.local.set({ metrics });
+      dlog('storage', 'flush end', {});
     } catch (e) {
       // swallow errors
     }
