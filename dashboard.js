@@ -669,7 +669,7 @@
     return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
-function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views'){
+function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views', yFmt = fmt){
     const ctx = canvas.getContext('2d');
     const DPR = Math.max(1, window.devicePixelRatio||1);
     let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
@@ -734,7 +734,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       for (let i=0;i<=yticks;i++){
         const y = H - M.bottom - i*(H-(M.top+M.bottom))/yticks; const v = yDomain[0] + i*(yDomain[1]-yDomain[0])/yticks;
-        ctx.fillText(fmt(Math.round(v)), 10, y+4);
+        ctx.fillText(yFmt(v), 10, y+4);
       }
       ctx.fillStyle = '#e8eaed'; ctx.font = 'bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial';
       ctx.fillText('Time', W/2-20, H-6);
@@ -761,7 +761,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       tooltip.style.display='block';
       const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
       const unit = yAxisLabel || 'Views';
-      const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${fmt(h.y)}</div>`;
+      const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${yFmt(h.y)}</div>`;
       tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
@@ -910,10 +910,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     } catch {}
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     const chart = makeChart($('#chart'));
-    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Views');
+    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Views', fmt);
     const followersChart = makeFollowersChart($('#followersChart'));
-    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Views');
-    const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes');
+    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Views', fmt2);
+    const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
+    const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cameos', fmt2);
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
@@ -973,6 +974,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(t.replies);
         const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(t.remixes);
         const allInterEl = $('#allInteractionsTotal'); if (allInterEl) allInterEl.textContent = fmt2(t.interactions);
+        const allCameosEl = $('#allCameosTotal');
+        if (allCameosEl) {
+          const arr = Array.isArray(user.cameos) ? user.cameos : [];
+          const last = arr[arr.length - 1];
+          allCameosEl.textContent = last ? fmtK2OrInt(last.count) : '0';
+        }
       } catch {}
       const series = computeSeriesForUser(user, [], colorFor)
         .filter(s=>visibleSet.has(s.id))
@@ -1041,6 +1048,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const series = pts.length ? [{ id: 'all_posts', color, points: pts }] : [];
         allViewsChart.setData(series);
       } catch {}
+      // Cameos chart: use user-level cameo count history when available
+      const cSeries = (function(){
+        const arr = Array.isArray(user.cameos) ? user.cameos : [];
+        const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+        const color = '#95e06c';
+        return pts.length ? [{ id: 'cameos', color, points: pts }] : [];
+      })();
+      cameosChart.setData(cSeries);
       // Update Total Followers card
       try {
         const fEl = $('#followersTotal');
@@ -1064,6 +1079,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (z.scatter) chart.setZoom(z.scatter);
         if (z.views) viewsChart.setZoom(z.views);
         if (z.likesAll) allLikesChart.setZoom(z.likesAll);
+        if (z.cameos) cameosChart.setZoom(z.cameos);
         if (z.followers) followersChart.setZoom(z.followers);
         if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
       } catch {}
@@ -1166,6 +1182,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const zScatter = chart.getZoom();
       const zViews = viewsChart.getZoom();
       const zLikesAll = allLikesChart.getZoom();
+      const zCameos = cameosChart.getZoom();
       const zFollowers = followersChart.getZoom();
       const zViewsAll = allViewsChart.getZoom();
       metrics = await loadMetrics();
@@ -1178,6 +1195,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
       try { if (zViews) viewsChart.setZoom(zViews); } catch {}
       try { if (zLikesAll) allLikesChart.setZoom(zLikesAll); } catch {}
+      try { if (zCameos) cameosChart.setZoom(zCameos); } catch {}
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
       try { if (zViewsAll) allViewsChart.setZoom(zViewsAll); } catch {}
     });
@@ -1188,14 +1206,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       z.scatter = chart.getZoom();
       z.views = viewsChart.getZoom();
       z.likesAll = allLikesChart.getZoom();
+      z.cameos = cameosChart.getZoom();
       z.followers = followersChart.getZoom();
       z.viewsAll = allViewsChart.getZoom();
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); refreshUserUI(); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); refreshUserUI(); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI(); });
+      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI(); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
 
     refreshUserUI();
   }
