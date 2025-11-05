@@ -669,7 +669,7 @@
     return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
-  function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip'){
+function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views'){
     const ctx = canvas.getContext('2d');
     const DPR = Math.max(1, window.devicePixelRatio||1);
     let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
@@ -738,7 +738,7 @@
       }
       ctx.fillStyle = '#e8eaed'; ctx.font = 'bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial';
       ctx.fillText('Time', W/2-20, H-6);
-      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Views', 0,0); ctx.restore();
+      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText(yAxisLabel || 'Views', 0,0); ctx.restore();
     }
     function nearest(mx,my){
       let best=null, bd=Infinity;
@@ -760,7 +760,8 @@
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
       const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
-      const body = `<div>${fmtDateTime(h.x)} • Views: ${fmt(h.y)}</div>`;
+      const unit = yAxisLabel || 'Views';
+      const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${fmt(h.y)}</div>`;
       tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
@@ -909,10 +910,10 @@
     } catch {}
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     const chart = makeChart($('#chart'));
-    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip');
+    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Views');
     const followersChart = makeFollowersChart($('#followersChart'));
-    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip');
-    const likesChart = makeTimeChart($('#likesChart'), '#likesTooltip');
+    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Views');
+    const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes');
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
@@ -963,7 +964,7 @@
           }
         }
       }
-      buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); likesChart.setHoverSeries(pid); } });
+      buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); } });
       // Update unfiltered totals cards
       try {
         const t = computeTotalsForUser(user);
@@ -984,16 +985,34 @@
           const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
-      // Time chart: cumulative likes by time
-      const lSeries = (function(){
-        const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
-          if (!visibleSet.has(pid)) continue; const pts=[]; for (const s of (p.snapshots||[])){
-            const t=s.t; const v=s.likes; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
+      // All posts cumulative likes (unfiltered): aggregate across all posts
+      try {
+        const ptsLikes = (function(){
+          const events = [];
+          for (const [pid, p] of Object.entries(user.posts||{})){
+            for (const s of (p.snapshots||[])){
+              const t = Number(s.t), v = Number(s.likes);
+              if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+            }
           }
-          const color=colorFor(pid); const label=(typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) });
-        }
-        return out; })();
-      likesChart.setData(lSeries);
+          events.sort((a,b)=> a.t - b.t);
+          const latest = new Map();
+          let total = 0;
+          const out = [];
+          for (const e of events){
+            const prev = latest.get(e.pid) || 0;
+            if (e.v !== prev){
+              latest.set(e.pid, e.v);
+              total += (e.v - prev);
+              out.push({ x: e.t, y: total, t: e.t });
+            }
+          }
+          return out;
+        })();
+        const colorLikes = '#ff8a7a';
+        const seriesLikes = ptsLikes.length ? [{ id: 'all_posts_likes', color: colorLikes, points: ptsLikes }] : [];
+        allLikesChart.setData(seriesLikes);
+      } catch {}
       // All posts cumulative views (unfiltered): aggregate across all posts
       try {
         const pts = (function(){
@@ -1044,7 +1063,7 @@
         const z = zoomStates[currentUserKey] || {};
         if (z.scatter) chart.setZoom(z.scatter);
         if (z.views) viewsChart.setZoom(z.views);
-        if (z.likes) likesChart.setZoom(z.likes);
+        if (z.likesAll) allLikesChart.setZoom(z.likesAll);
         if (z.followers) followersChart.setZoom(z.followers);
         if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
       } catch {}
@@ -1060,21 +1079,12 @@
           $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
         }
         viewsChart.setHoverSeries(pid);
-        likesChart.setHoverSeries(pid);
       });
       viewsChart.onHover((pid)=>{
         const wrap = $('#posts'); if (!wrap) return;
         if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
         else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
         chart.setHoverSeries(pid);
-        likesChart.setHoverSeries(pid);
-      });
-      likesChart.onHover((pid)=>{
-        const wrap = $('#posts'); if (!wrap) return;
-        if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
-        else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
-        chart.setHoverSeries(pid);
-        viewsChart.setHoverSeries(pid);
       });
       // wire visibility toggles
       $$('#posts .toggle').forEach(btn=>{
@@ -1096,17 +1106,7 @@
             }
             return out; })();
           viewsChart.setData(vSeries);
-          // Refresh likes time series
-          const lSeries = (function(){
-            const out=[]; for (const [vpid,p] of Object.entries(user.posts||{})){
-              if (!visibleSet.has(vpid)) continue; const pts=[];
-              for (const s of (p.snapshots||[])){
-                const t=s.t; const v=s.likes; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
-              }
-              const color=colorFor(vpid); const label=(typeof p?.caption==='string'&&p.caption)?p.caption.trim():vpid; if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
-            }
-            return out; })();
-          likesChart.setData(lSeries);
+          // (likes total chart is unfiltered; no need to refresh here)
           // Update metric cards to reflect current visibility
           try{
             const viewsEl = $('#viewsTotal');
@@ -1165,7 +1165,7 @@
       // capture zoom states
       const zScatter = chart.getZoom();
       const zViews = viewsChart.getZoom();
-      const zLikes = likesChart.getZoom();
+      const zLikesAll = allLikesChart.getZoom();
       const zFollowers = followersChart.getZoom();
       const zViewsAll = allViewsChart.getZoom();
       metrics = await loadMetrics();
@@ -1177,7 +1177,7 @@
       // restore zoom states
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
       try { if (zViews) viewsChart.setZoom(zViews); } catch {}
-      try { if (zLikes) likesChart.setZoom(zLikes); } catch {}
+      try { if (zLikesAll) allLikesChart.setZoom(zLikesAll); } catch {}
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
       try { if (zViewsAll) allViewsChart.setZoom(zViewsAll); } catch {}
     });
@@ -1187,15 +1187,15 @@
       const z = zoomStates[currentUserKey] || (zoomStates[currentUserKey] = {});
       z.scatter = chart.getZoom();
       z.views = viewsChart.getZoom();
-      z.likes = likesChart.getZoom();
+      z.likesAll = allLikesChart.getZoom();
       z.followers = followersChart.getZoom();
       z.viewsAll = allViewsChart.getZoom();
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); likesChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); refreshUserUI(); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); likesChart.resetZoom(); followersChart.resetZoom(); refreshUserUI(); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); likesChart.resetZoom(); followersChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); refreshUserUI(); });
+      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); refreshUserUI(); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
 
     refreshUserUI();
   }
