@@ -17,11 +17,18 @@
 (function () {
   'use strict';
 
+  try { console.log('[SoraUV] inject.js loaded'); } catch {}
+
+  // Debug toggles
+  const DEBUG = { feed: true, thumbs: true };
+  const dlog = (topic, ...args) => { try { if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args); } catch {} };
+
   // == Configuration & Constants ==
 
   const PREF_KEY = 'SORA_UV_PREFS_V1';
   const SESS_KEY = 'SORA_UV_GATHER_STATE_V1';
-  const FEED_RE = /\/backend\/project_y\/(feed|profile_feed|profile\/)/;
+  // Match known endpoints, but keep flexible: project_* or any path that includes feed/profile
+  const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
 
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080];
   const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours'];
@@ -168,16 +175,44 @@
   const getThumbnail = (item) => {
     try {
       const p = item?.post ?? item;
-      const candidates = [
-        p?.thumbnail_url, p?.thumb, p?.cover,
-        p?.image?.url || p?.image,
-        Array.isArray(p?.images) ? p.images[0]?.url : null,
-        p?.media?.thumbnail || p?.media?.cover || p?.media?.poster,
-        Array.isArray(p?.assets) ? p.assets[0]?.thumbnail_url || p.assets[0]?.url : null,
-        p?.preview_image_url, p?.poster?.url,
-      ].filter(Boolean);
-      for (const u of candidates)
-        if (typeof u === 'string' && /^https?:\/\//.test(u)) return u;
+
+      const id = getItemId(item);
+      
+      // 1) STRICT: use attachments.encodings.thumbnail.path like in first attempt
+      const atts = Array.isArray(p?.attachments) ? p.attachments : null;
+      if (atts) {
+        for (const att of atts) {
+          const t = att?.encodings?.thumbnail?.path;
+          if (typeof t === 'string' && /^https?:\/\//.test(t)) {
+            dlog('thumbs', 'picked', { id, source: 'att.encodings.thumbnail', url: t });
+            return t;
+          }
+        }
+      }
+
+      // 2) Fallback: stable preview from API if present
+      if (typeof p?.preview_image_url === 'string' && /^https?:\/\//.test(p.preview_image_url)) {
+        dlog('thumbs', 'picked', { id, source: 'preview_image_url', url: p.preview_image_url });
+        return p.preview_image_url;
+      }
+
+      // 3) Other common fields across variants (pick first valid)
+      const pairs = [
+        ['thumbnail_url', p?.thumbnail_url],
+        ['thumb', p?.thumb],
+        ['cover', p?.cover],
+        ['image.url|image', p?.image?.url || p?.image],
+        ['images[0].url', Array.isArray(p?.images) ? p.images[0]?.url : null],
+        ['media.thumb|cover|poster', p?.media?.thumbnail || p?.media?.cover || p?.media?.poster],
+        ['assets[0].thumb|url', Array.isArray(p?.assets) ? p.assets[0]?.thumbnail_url || p.assets[0]?.url : null],
+        ['poster.url', p?.poster?.url],
+      ];
+      for (const [label, u] of pairs) {
+        if (typeof u === 'string' && /^https?:\/\//.test(u)) {
+          dlog('thumbs', 'picked', { id, source: label, url: u });
+          return u;
+        }
+      }
     } catch {}
     return null;
   };
@@ -928,13 +963,40 @@
 
   // == Network & Data Processing ==
 
+  function looksLikeSoraFeed(json){
+    try {
+      const items = json?.items || json?.data?.items || null;
+      if (!Array.isArray(items) || items.length === 0) return false;
+      let hits = 0;
+      for (let i=0;i<Math.min(items.length, 10); i++){
+        const it = items[i];
+        const p = it?.post || it || {};
+        if (typeof p?.id === 'string' && /^s_[A-Za-z0-9]+$/.test(p.id)) { hits++; continue; }
+        if (typeof p?.preview_image_url === 'string') { hits++; continue; }
+        if (Array.isArray(p?.attachments) && p.attachments.length) { hits++; continue; }
+      }
+      return hits > 0;
+    } catch { return false; }
+  }
+
   function installFetchSniffer() {
+    dlog('feed', 'install fetch sniffer');
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
       const res = await origFetch.apply(this, arguments);
       try {
         const url = typeof input === 'string' ? input : (input?.url || '');
-        if (FEED_RE.test(url)) res.clone().json().then(processFeedJson).catch(() => {});
+        if (FEED_RE.test(url)) {
+          dlog('feed', 'fetch matched', { url });
+          res.clone().json().then((j)=>{ dlog('feed', 'fetch parsed', { url, items: (j?.items||j?.data?.items||[]).length }); processFeedJson(j); }).catch(()=>{});
+        } else if (typeof url === 'string' && url.startsWith(location.origin)) {
+          res.clone().json().then((j)=>{
+            if (looksLikeSoraFeed(j)) {
+              dlog('feed', 'fetch autodetected', { url, items: (j?.items||j?.data?.items||[]).length });
+              processFeedJson(j);
+            }
+          }).catch(()=>{});
+        }
       } catch {}
       return res;
     };
@@ -943,8 +1005,19 @@
       this.addEventListener('load', function () {
         try {
           if (typeof url === 'string' && FEED_RE.test(url)) {
+            dlog('feed', 'xhr matched', { url });
             try {
-              processFeedJson(JSON.parse(this.responseText));
+              const j = JSON.parse(this.responseText);
+              dlog('feed', 'xhr parsed', { url, items: (j?.items||j?.data?.items||[]).length });
+              processFeedJson(j);
+            } catch {}
+          } else if (typeof url === 'string' && url.startsWith(location.origin)) {
+            try {
+              const j = JSON.parse(this.responseText);
+              if (looksLikeSoraFeed(j)) {
+                dlog('feed', 'xhr autodetected', { url, items: (j?.items||j?.data?.items||[]).length });
+                processFeedJson(j);
+              }
             } catch {}
           }
         } catch {}
@@ -959,6 +1032,8 @@
     const pageUserHandle = pageHandle || null;
     const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
     const batch = [];
+
+    dlog('feed', 'processFeedJson', { items: items.length, pageUserHandle });
 
     try {
       const profFollowers = Number(json?.follower_count ?? json?.profile?.follower_count);
@@ -990,8 +1065,14 @@
       // shares/downloads not captured
       const p = it?.post || it || {};
       const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
+      const caption = (typeof p?.caption === 'string' && p.caption) ? p.caption : (typeof p?.text === 'string' && p.text ? p.text : null);
       const ageMin = minutesSince(created_at);
       const th = getThumbnail(it);
+      try {
+        const p = it?.post || it || {};
+        const attCount = Array.isArray(p?.attachments) ? p.attachments.length : 0;
+        dlog('thumbs', 'item', { id, attachments: attCount, preview_image_url: p?.preview_image_url || null, chosen: th });
+      } catch {}
 
       if (uv != null) idToUnique.set(id, uv);
       if (likes != null) idToLikes.set(id, likes);
@@ -1021,6 +1102,7 @@
         // shares/downloads omitted
         followers,
         created_at,
+        caption,
         ageMin,
         thumb: th,
         url: absUrl,
@@ -1037,6 +1119,7 @@
     }
 
     if (batch.length) try {
+      dlog('feed', 'postMessage metrics_batch', { count: batch.length });
       window.postMessage({
         __sora_uv__: true,
         type: 'metrics_batch',
@@ -1095,6 +1178,7 @@
   // == Initialization ==
 
   function init() {
+    dlog('feed', 'init');
     installFetchSniffer();
     startObservers();
     onRouteChange();
