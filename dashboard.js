@@ -16,6 +16,10 @@
     '#7dc4ff','#ff8a7a','#ffd166','#95e06c','#c792ea','#64d3ff','#ffa7c4','#9fd3c7','#f6bd60','#84a59d','#f28482'
   ];
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+  const esc = (s)=> String(s).replace(/[&<>"']/g, (c)=> ESC_MAP[c] || c);
+
+  // (thumbnails are provided by the collector; no auto-rewrite here)
 
   function fmt(n){
     if (n == null || !isFinite(n)) return '-';
@@ -294,6 +298,7 @@
   }
 
 
+
   function buildUserOptions(metrics){
     const sel = $('#userSelect');
     sel.innerHTML = '';
@@ -340,10 +345,13 @@
       const postTime = getPostTimeStrict(p) || 0;
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
+      const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const label = cap || pid; // one-line dynamic via CSS ellipsis
+      const title = cap || pid;
       if (DBG_SORT){
         try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
       }
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, last, first, postTime, pidBI: bi, rate };
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate };
     });
     // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -389,7 +397,7 @@
         <div class="dot" style="background:${color}"></div>
         <div class="thumb" style="${thumbStyle}"></div>
         <div class="meta">
-          <div class="id"><a href="${p.url}" target="_blank" rel="noopener">${p.pid}</a></div>
+          <div class="id"><a href="${p.url}" target="_blank" rel="noopener" title="${esc(p.title)}">${esc(p.label)}</a></div>
           <div class="stats">Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}</div>
         </div>
         <div class="toggle" data-pid="${p.pid}">Hide</div>
@@ -439,7 +447,9 @@
         if (s.uv != null && r != null) pts.push({ x:s.uv, y:r, t:s.t });
       }
       const color = typeof colorFor === 'function' ? colorFor(pid) : COLORS[i % COLORS.length];
-      if (pts.length) series.push({ id: pid, color, points: pts, highlighted: selectedPIDs.includes(pid) });
+      const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const label = cap || pid;
+      if (pts.length) series.push({ id: pid, label, color, points: pts, highlighted: selectedPIDs.includes(pid) });
     }
     return series;
   }
@@ -566,7 +576,7 @@
           // ignore points outside plot
           if (x < M.left || x > W - M.right || y < M.top || y > H - M.bottom) continue;
           const d = Math.hypot(mx-x,my-y);
-          if (d<bd && d<16) { bd=d; best = { pid: s.id, x:p.x, y:p.y, t:p.t, color:s.color, highlighted:s.highlighted, url: s.url }; }
+          if (d<bd && d<16) { bd=d; best = { pid: s.id, label: s.label || s.id, x:p.x, y:p.y, t:p.t, color:s.color, highlighted:s.highlighted, url: s.url }; }
         }
       }
       return best;
@@ -575,8 +585,9 @@
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>
-      <div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+      const body = `<div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = clientX + 12;
@@ -658,7 +669,7 @@
     return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
-  function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip'){
+function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views', yFmt = fmt){
     const ctx = canvas.getContext('2d');
     const DPR = Math.max(1, window.devicePixelRatio||1);
     let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
@@ -723,11 +734,11 @@
       }
       for (let i=0;i<=yticks;i++){
         const y = H - M.bottom - i*(H-(M.top+M.bottom))/yticks; const v = yDomain[0] + i*(yDomain[1]-yDomain[0])/yticks;
-        ctx.fillText(fmt(Math.round(v)), 10, y+4);
+        ctx.fillText(yFmt(v), 10, y+4);
       }
       ctx.fillStyle = '#e8eaed'; ctx.font = 'bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial';
       ctx.fillText('Time', W/2-20, H-6);
-      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Views', 0,0); ctx.restore();
+      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText(yAxisLabel || 'Views', 0,0); ctx.restore();
     }
     function nearest(mx,my){
       let best=null, bd=Infinity;
@@ -738,7 +749,7 @@
           const d = Math.hypot(mx-x,my-y);
           if (d < bd && d < 16){
             bd = d;
-            best = { pid: s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url };
+            best = { pid: s.id, label: s.label || s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url };
           }
         }
       }
@@ -748,8 +759,10 @@
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${h.pid}</strong></div>`+
-        `<div>${fmtDateTime(h.x)} • Views: ${fmt(h.y)}</div>`;
+      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+      const unit = yAxisLabel || 'Views';
+      const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${yFmt(h.y)}</div>`;
+      tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = clientX + 12;
@@ -897,9 +910,11 @@
     } catch {}
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     const chart = makeChart($('#chart'));
-    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip');
+    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Views', fmt);
     const followersChart = makeFollowersChart($('#followersChart'));
-    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip');
+    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Views', fmt2);
+    const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
+    const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cameos', fmt2);
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
@@ -959,6 +974,12 @@
         const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(t.replies);
         const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(t.remixes);
         const allInterEl = $('#allInteractionsTotal'); if (allInterEl) allInterEl.textContent = fmt2(t.interactions);
+        const allCameosEl = $('#allCameosTotal');
+        if (allCameosEl) {
+          const arr = Array.isArray(user.cameos) ? user.cameos : [];
+          const last = arr[arr.length - 1];
+          allCameosEl.textContent = last ? fmtK2OrInt(last.count) : '0';
+        }
       } catch {}
       const series = computeSeriesForUser(user, [], colorFor)
         .filter(s=>visibleSet.has(s.id))
@@ -968,9 +989,37 @@
       const vSeries = (function(){
         const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
           if (!visibleSet.has(pid)) continue; const pts=[]; for (const s of (p.snapshots||[])){ const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); }
-          const color=colorFor(pid); if (pts.length) out.push({ id: pid, color, points: pts, url: absUrl(p.url, pid) }); }
+          const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
+      // All posts cumulative likes (unfiltered): aggregate across all posts
+      try {
+        const ptsLikes = (function(){
+          const events = [];
+          for (const [pid, p] of Object.entries(user.posts||{})){
+            for (const s of (p.snapshots||[])){
+              const t = Number(s.t), v = Number(s.likes);
+              if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+            }
+          }
+          events.sort((a,b)=> a.t - b.t);
+          const latest = new Map();
+          let total = 0;
+          const out = [];
+          for (const e of events){
+            const prev = latest.get(e.pid) || 0;
+            if (e.v !== prev){
+              latest.set(e.pid, e.v);
+              total += (e.v - prev);
+              out.push({ x: e.t, y: total, t: e.t });
+            }
+          }
+          return out;
+        })();
+        const colorLikes = '#ff8a7a';
+        const seriesLikes = ptsLikes.length ? [{ id: 'all_posts_likes', color: colorLikes, points: ptsLikes }] : [];
+        allLikesChart.setData(seriesLikes);
+      } catch {}
       // All posts cumulative views (unfiltered): aggregate across all posts
       try {
         const pts = (function(){
@@ -999,6 +1048,14 @@
         const series = pts.length ? [{ id: 'all_posts', color, points: pts }] : [];
         allViewsChart.setData(series);
       } catch {}
+      // Cameos chart: use user-level cameo count history when available
+      const cSeries = (function(){
+        const arr = Array.isArray(user.cameos) ? user.cameos : [];
+        const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+        const color = '#95e06c';
+        return pts.length ? [{ id: 'cameos', color, points: pts }] : [];
+      })();
+      cameosChart.setData(cSeries);
       // Update Total Followers card
       try {
         const fEl = $('#followersTotal');
@@ -1021,6 +1078,8 @@
         const z = zoomStates[currentUserKey] || {};
         if (z.scatter) chart.setZoom(z.scatter);
         if (z.views) viewsChart.setZoom(z.views);
+        if (z.likesAll) allLikesChart.setZoom(z.likesAll);
+        if (z.cameos) cameosChart.setZoom(z.cameos);
         if (z.followers) followersChart.setZoom(z.followers);
         if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
       } catch {}
@@ -1059,10 +1118,11 @@
               for (const s of (p.snapshots||[])){
                 const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
               }
-              const color=colorFor(vpid); if (pts.length) out.push({ id: vpid, color, points: pts, url: absUrl(p.url, vpid) });
+              const color=colorFor(vpid); const label=(typeof p?.caption==='string'&&p.caption)?p.caption.trim():vpid; if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
             }
             return out; })();
           viewsChart.setData(vSeries);
+          // (likes total chart is unfiltered; no need to refresh here)
           // Update metric cards to reflect current visibility
           try{
             const viewsEl = $('#viewsTotal');
@@ -1121,6 +1181,8 @@
       // capture zoom states
       const zScatter = chart.getZoom();
       const zViews = viewsChart.getZoom();
+      const zLikesAll = allLikesChart.getZoom();
+      const zCameos = cameosChart.getZoom();
       const zFollowers = followersChart.getZoom();
       const zViewsAll = allViewsChart.getZoom();
       metrics = await loadMetrics();
@@ -1132,6 +1194,8 @@
       // restore zoom states
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
       try { if (zViews) viewsChart.setZoom(zViews); } catch {}
+      try { if (zLikesAll) allLikesChart.setZoom(zLikesAll); } catch {}
+      try { if (zCameos) cameosChart.setZoom(zCameos); } catch {}
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
       try { if (zViewsAll) allViewsChart.setZoom(zViewsAll); } catch {}
     });
@@ -1141,14 +1205,16 @@
       const z = zoomStates[currentUserKey] || (zoomStates[currentUserKey] = {});
       z.scatter = chart.getZoom();
       z.views = viewsChart.getZoom();
+      z.likesAll = allLikesChart.getZoom();
+      z.cameos = cameosChart.getZoom();
       z.followers = followersChart.getZoom();
       z.viewsAll = allViewsChart.getZoom();
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); refreshUserUI(); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI(); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI(); });
+      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI(); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
 
     refreshUserUI();
   }

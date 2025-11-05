@@ -29,9 +29,10 @@ button:hover{background:#10171f}
 .post .toggle:hover{background:#111921}
 .post input{margin:0}
 .post .meta{display:flex;flex-direction:column;gap:2px;min-width:0}
-.post .meta .id a{color:var(--fg); text-decoration:none; word-break:break-all}
+.post .meta .id{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;font-size:11px;opacity:.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.post .meta .id a{color:var(--fg); text-decoration:none; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 .post .thumb{width:44px;height:44px;border-radius:6px;background:#0f1317;border:1px solid #1f2a33;background-size:cover;background-position:center}
-.post .meta .id{font-family:ui-monospace, SFMono-Regular, Menlo, monospace;font-size:11px;opacity:.8}
+
 .post .meta .stats{font-size:11px;color:var(--muted)}
 .content{padding:10px;overflow:auto}
 .chart-wrap{border:1px solid #1f2a33;border-radius:8px;background:#0f1317;padding:8px}
