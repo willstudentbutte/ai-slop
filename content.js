@@ -45,7 +45,7 @@
       dlog('storage', 'flush begin', { count: items.length });
       for (const snap of items) {
         const userKey = snap.userKey || snap.pageUserKey || 'unknown';
-        const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [] });
+        const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [], cameos: [] });
         if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
         if (snap.postId) {
           const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
@@ -111,11 +111,29 @@
             }
           }
         }
+        // Capture cameo count (profile-level) if available
+        if (snap.cameo_count != null) {
+          const cCount = Number(snap.cameo_count);
+          if (Number.isFinite(cCount)) {
+            if (!Array.isArray(userEntry.cameos)) userEntry.cameos = [];
+            const arr = userEntry.cameos;
+            const t = snap.ts || Date.now();
+            const lastC = arr[arr.length - 1];
+            if (!lastC || lastC.count !== cCount) {
+              arr.push({ t, count: cCount });
+              try { console.debug('[SoraMetrics] cameos persisted', { userKey, count: cCount, t }); } catch {}
+            }
+          }
+        }
       }
-      await chrome.storage.local.set({ metrics });
-      dlog('storage', 'flush end', {});
+      try {
+        await chrome.storage.local.set({ metrics });
+        dlog('storage', 'flush end', {});
+      } catch (err) {
+        try { console.warn('[SoraMetrics] storage.set failed; enable unlimitedStorage or lower snapshot cap', err); } catch {}
+      }
     } catch (e) {
-      // swallow errors
+      try { console.warn('[SoraMetrics] flush failed', e); } catch {}
     }
   }
 
