@@ -80,6 +80,10 @@
         <span class="label">Total interactions</span>
         <span id="allInteractionsTotal" class="value">0.00</span>
       </div>
+      <div id="allCameosSummary" class="metric-card" title="Profile cameo count (ignores visibility)">
+        <span class="label">Total cameos</span>
+        <span id="allCameosTotal" class="value">0</span>
+      </div>
       <div id="followersSummary" class="metric-card" title="Latest follower count for the selected user">
         <span class="label">Total followers</span>
         <span id="followersTotal" class="value">0</span>
@@ -96,11 +100,16 @@
         <canvas id="allLikesChart" width="900" height="540"></canvas>
         <div id="allLikesTooltip" class="tooltip"></div>
       </div>
+      <div class="chart-wrap" style="margin-top:10px">
+        <canvas id="cameosChart" width="900" height="540"></canvas>
+        <div id="cameosTooltip" class="tooltip"></div>
+      </div>
       
       <div class="help">Y: Interaction rate (%) • X: Unique viewers • Drag to zoom • Hover to focus series • Click point to open post • Toggle visibility in the left list</div>
       <div class="help">Below: Cumulative Views by Time • Y: Views • X: Time • Drag to zoom • Hover to focus series • Click point to open post</div>
       <div class="help">Below: Cumulative Followers by Time • Y: Followers • X: Time • Drag to zoom</div>
       <div class="help">Below: Cumulative Likes by Time • Y: Likes • X: Time • Drag to zoom • Hover to focus series • Click point to open post</div>
+      <div class="help">Below: Cumulative Cameos by Time • Y: Cameos • X: Time • Drag to zoom</div>
     </section>
   </main>
 
