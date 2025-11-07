@@ -29,7 +29,7 @@
     }
   ],
   "host_permissions": ["https://sora.chatgpt.com/*"],
-  "permissions": ["storage"],
+  "permissions": ["storage", "unlimitedStorage"],
   "background": {
     "service_worker": "background.js"
   }
