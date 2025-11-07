@@ -281,6 +281,24 @@
     return null;
   };
 
+  // Cameos (count of cameo profiles or explicit counters if present)
+  const getCameos = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const cands = [
+        p?.cameo_count,
+        p?.stats?.cameo_count, p?.statistics?.cameo_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+      const arr = Array.isArray(p?.cameo_profiles) ? p.cameo_profiles : null;
+      if (arr) return arr.length;
+    } catch {}
+    return null;
+  };
+
   // shares/downloads not used
 
   const getFollowerCount = (item) => {
@@ -1035,21 +1053,32 @@
 
     dlog('feed', 'processFeedJson', { items: items.length, pageUserHandle });
 
+    // Extract profile-level meta (followers, cameo_count) from common locations
     try {
-      const profFollowers = Number(json?.follower_count ?? json?.profile?.follower_count);
-      const profHandle = json?.username || json?.handle || json?.profile?.username || pageUserHandle || null;
-      const profId = json?.user_id || json?.id || json?.profile?.user_id || null;
-      if (Number.isFinite(profFollowers) && profHandle) {
+      const findProfile = (root) => {
+        if (!root || typeof root !== 'object') return null;
+        const direct = root.profile || root.data?.profile || root.owner_profile || null;
+        if (direct) return direct;
+        const arr = root.items || root.data?.items || [];
+        for (const it of (Array.isArray(arr)?arr:[])){
+          if (it?.profile) return it.profile;
+          if (it?.owner_profile) return it.owner_profile;
+          const p = it?.post || it || {};
+          if (p?.owner_profile) return p.owner_profile;
+          if (p?.author && (p.author.cameo_count != null || p.author.follower_count != null || p.author.username)) return p.author;
+        }
+        return null;
+      };
+      const prof = findProfile(json);
+      const profFollowers = Number(json?.follower_count ?? json?.profile?.follower_count ?? prof?.follower_count);
+      const profCameos = Number(json?.cameo_count ?? json?.profile?.cameo_count ?? prof?.cameo_count);
+      const profHandle = (json?.username || json?.handle || json?.profile?.username || prof?.username || pageUserHandle || '').toString() || null;
+      const profId = json?.user_id || json?.id || json?.profile?.user_id || prof?.user_id || null;
+      if (profHandle) {
         const userKey = `h:${String(profHandle).toLowerCase()}`;
-        batch.push({
-          followers: profFollowers,
-          ts: Date.now(),
-          userHandle: profHandle,
-          userId: profId,
-          userKey,
-          pageUserHandle,
-          pageUserKey
-        });
+        const base = { ts: Date.now(), userHandle: profHandle, userId: profId, userKey, pageUserHandle, pageUserKey };
+        if (Number.isFinite(profFollowers)) { batch.push({ ...base, followers: profFollowers }); dlog('feed', 'profile followers', { userKey, profFollowers }); }
+        if (Number.isFinite(profCameos)) { batch.push({ ...base, cameo_count: profCameos }); dlog('feed', 'profile cameos', { userKey, profCameos }); }
       }
     } catch {}
 
@@ -1062,6 +1091,7 @@
       const tv = getTotalViews(it);
       const cm = getComments(it);
       const rx = getRemixes(it);
+      const cx = getCameos(it);
       // shares/downloads not captured
       const p = it?.post || it || {};
       const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
@@ -1099,6 +1129,7 @@
         comments: cm,
         remixes: rx,            // kept for backward compatibility in storage/UI
         remix_count: rx,        // explicit direct remix count
+        cameos: cx,
         // shares/downloads omitted
         followers,
         created_at,
