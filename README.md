@@ -5,10 +5,11 @@
 ## Features:
 - **Post View Counts** - Shows unique view counts right on Sora Explore, profile grids, and post pages.
 - **Post Like Rate** - Displays like rate (likes ÷ unique viewers) alongside the Unique count when available.
+- **Post Remix Rate** - Click into a post to see Remix Rate as RR!
 - **Post Hotness** - All posts with over 25 likes are color coded with a **red to yellow** gradient based on time elapsed since posting to visually signal hotness (planned feature: incorporate engagement rate to better influence color coding and emoji assignment)
 - **Super Hot!** - A post with more than 50 likes in under 1 hour will receive a special red glow and extra emojis to indicate a certified banger destined for Top
 - **Best Posting Time** - All posts made within 15 minutes +/- of the current time on 1 day increments into the past receive a **green** label, allowing you to infer what engagement you could potentially attain if you were to post right now
-- **Gather Mode** - Turn on Gather mode on any profile to auto-scroll and refresh Sora, auto-populating your local dashboard with current data in the background as long as it runs (runs as fast as 1-2 minute or slow as 15-17 minute intervals). Please see _notes_ section below for a tip on this Mode.
+- **Gather Mode** - Turn on Gather mode on any profile to auto-scroll and refresh Sora, auto-populating your local dashboard with current data in the background as long as it runs (runs as fast as 1-2 minute or slow as 15-17 minute intervals). Works on Top in a non-abusive fashion! Please see _notes_ section below for a tip on this Mode.
 
 Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboard in a new tab that lets you...
 - Type-ahead search to quickly select a user (with clear selection state)
@@ -49,6 +50,7 @@ This project is licensed under the Polyform Noncommercial License 1.0.0 (see [LI
 - 🚫 **Commercial** use requires a separate paid license (see [LICENSE-COMMERCIAL](./LICENSE-COMMERCIAL); contact william@cruttenden.dev).
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+
 
 
 
