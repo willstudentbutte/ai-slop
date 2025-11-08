@@ -36,6 +36,24 @@
     scheduleFlush();
   }
 
+  (function(){
+    function onMetricsRequest(ev){
+      const d = ev?.data;
+      if (!d || d.__sora_uv__ !== true || d.type !== 'metrics_request') return;
+      const req = d.req;
+      (async () => {
+        try {
+          const { metrics = { users:{} } } = await chrome.storage.local.get('metrics');
+          // Reply back into the page
+          window.postMessage({ __sora_uv__: true, type: 'metrics_response', req, metrics }, '*');
+        } catch {
+          window.postMessage({ __sora_uv__: true, type: 'metrics_response', req, metrics: { users:{} } }, '*');
+        }
+      })();
+    }
+    window.addEventListener('message', onMetricsRequest);
+  })();
+
   async function flush() {
     flushTimer = null;
     if (!PENDING.length) return;
