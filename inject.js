@@ -57,8 +57,10 @@
   let analyzeBtn = null;
   let analyzeOverlayEl = null;
   let analyzeHeaderTextEl = null;
+  let analyzeAutoRefreshId = null;
   let analyzeSliderWrap = null;
   let analyzeTableEl = null;
+  let analyzeHelperTextEl = null;
   let analyzeRapidScrollId = null;
   let analyzeRapidStopTimeout = null;
   let analyzeRefreshRowsInterval = null;
@@ -70,7 +72,8 @@
   // Time window (hours) for slicing rows
   const ANALYZE_WINDOW_KEY = 'SORA_UV_ANALYZE_WINDOW_H';
   let analyzeWindowHours = Math.min(24, Math.max(1, Number(localStorage.getItem(ANALYZE_WINDOW_KEY) || 24)));
-  const ANALYZE_RUN_MS = 10000; // 10 seconds
+  const ANALYZE_RUN_MS = 6500; // 6.5 seconds
+
 
   // Track route to detect same-tab navigation
   const routeKey = () => `${location.pathname}${location.search}`;
@@ -389,7 +392,7 @@
       borderRadius: '9999px',
       background: 'rgba(37,37,37,0.7)',
       color: '#fff',
-      zIndex: 1000000,
+      zIndex: '2147483647',
       pointerEvents: 'none',
       transform: 'translate(-50%,-110%)',
       whiteSpace: 'nowrap',
@@ -402,6 +405,36 @@
     sharedTooltip = t;
     return t;
   }
+
+
+  let _promptTipTimer = null;
+  async function copyTextToClipboard(text) {
+    const t = String(text ?? '');
+    try {
+      await navigator.clipboard.writeText(t);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = t;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      ta.style.pointerEvents = 'none';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { document.execCommand('copy'); } catch {}
+      document.body.removeChild(ta);
+    }
+  }
+  function showPromptClickTooltip(clientX, clientY, text = 'Prompt copied!', ms = 1000) {
+    const tip = getTooltip();
+    tip.textContent = text;
+    tip.style.left = `${clientX}px`;
+    tip.style.top = `${clientY + 1}px`;
+    tip.style.display = 'block';
+    if (_promptTipTimer) clearTimeout(_promptTipTimer);
+    _promptTipTimer = setTimeout(() => { tip.style.display = 'none'; }, ms);
+  }
+
 
   function attachTooltip(el, text, enabled = true) {
     if (!enabled || !text) return;
@@ -528,11 +561,26 @@
 
   function expireEtaTooltip(ageMin) {
     if (!Number.isFinite(ageMin)) return null;
-    const target = 1440 - 15; // 24h minus 15m
-    const remain = Math.max(0, Math.floor(target - ageMin));
+
+    if (isNearWholeDay(ageMin, 15)) return null;
+
+    const MIN_PER_H = 60;
+    const MIN_PER_D = 1440;
+    const a = Math.max(0, Math.floor(ageMin));
+
+    if (a >= MIN_PER_D) {
+      const d = Math.floor(a / MIN_PER_D);
+      const h = Math.floor((a - d * MIN_PER_D) / MIN_PER_H);
+      const m = a - d * MIN_PER_D - h * MIN_PER_H;
+      return `This was posted ${d}d ${h}h ${m}m ago`;
+    }
+
+    // Under 24h → keep graduation countdown (includes minutes via fmtAgeMin)
+    const remain = Math.max(0, MIN_PER_D - a);
     const human = fmtAgeMin(remain);
     return `This gen will graduate from Top in ~${human}!`;
   }
+
 
   function addBadge(card, views, meta) {
     if (views == null && !meta) return;
@@ -780,7 +828,7 @@
           border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.10);
           font-size:16px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;user-select:none;
           background:rgba(29,29,29,0.78);color:#fff;
-          box-shadow:inset 0 0 1px rgba(255,255,255,0.08),0 1px 10px rgba(0,0,0,0.30);
+          box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);
           backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
           transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease,opacity 120ms ease;
         }
@@ -864,9 +912,15 @@
       setPrefs(prefs);
     }
 
-    // new tab session
-    setGatherState({ filterIndex: 0, isGathering: false });
-    isGatheringActiveThisTab = false;
+    // ---- PRESERVE SESSION ACROSS REFRESH ----
+    // Only initialize a new session if no session exists; do NOT clobber an existing one.
+    const existingSess = getGatherState();
+    if (!existingSess || typeof existingSess !== 'object' || Object.keys(existingSess).length === 0) {
+      setGatherState({ filterIndex: 0, isGathering: false });
+    }
+    // Reflect persisted state into this-tab flag without starting loops here.
+    // init() will call updateGatherState()/startGathering() as needed.
+    isGatheringActiveThisTab = !!(existingSess && existingSess.isGathering);
 
     // --- Helper to disable with visual cues + block hover/click ---
     function setDisabled(btn, on) {
@@ -1083,6 +1137,58 @@
     return bar;
   }
 
+
+
+  function startAnalyzeAutoRefresh() {
+    if (analyzeAutoRefreshId) clearInterval(analyzeAutoRefreshId);
+
+    const TICK_MS = 30_000; // every 30s (your setting)
+
+    const tick = () => {
+      if (!analyzeActive) return;
+      if (document.hidden) return; // SAFEGUARD: no work when tab not visible
+      requestAnimationFrame(() => renderAnalyzeTable(true));
+    };
+
+    analyzeAutoRefreshId = setInterval(tick, TICK_MS);
+
+    // Run once immediately if we're visible
+    if (!document.hidden) tick();
+
+    // Refresh immediately when the tab gains focus or becomes visible
+    const onFocus = () => {
+      if (!analyzeActive) return;
+      if (!document.hidden) requestAnimationFrame(() => renderAnalyzeTable(true));
+    };
+    const onVis = () => {
+      if (!analyzeActive) return;
+      if (!document.hidden) requestAnimationFrame(() => renderAnalyzeTable(true));
+    };
+
+    // Store listeners so we can remove them on stop
+    startAnalyzeAutoRefresh._onFocus = onFocus;
+    startAnalyzeAutoRefresh._onVis = onVis;
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVis);
+  }
+
+  function stopAnalyzeAutoRefresh() {
+    if (analyzeAutoRefreshId) {
+      clearInterval(analyzeAutoRefreshId);
+      analyzeAutoRefreshId = null;
+    }
+    if (startAnalyzeAutoRefresh._onFocus) {
+      window.removeEventListener('focus', startAnalyzeAutoRefresh._onFocus);
+      startAnalyzeAutoRefresh._onFocus = null;
+    }
+    if (startAnalyzeAutoRefresh._onVis) {
+      document.removeEventListener('visibilitychange', startAnalyzeAutoRefresh._onVis);
+      startAnalyzeAutoRefresh._onVis = null;
+    }
+  }
+
+
   // ========================== STORAGE HELPERS ================================
   function __sorauv_toTs(v) {
     if (typeof v === 'number' && isFinite(v)) return v < 1e11 ? v * 1000 : v;
@@ -1258,118 +1364,62 @@
     return rows;
   }
 
-  // ---------------------------------------------------------------------------
-  // Overlay creator – table header sticks to the top of the overlay viewport
-  // ---------------------------------------------------------------------------
   function ensureAnalyzeOverlay() {
     if (analyzeOverlayEl && document.contains(analyzeOverlayEl)) return analyzeOverlayEl;
 
-    // ===== Overlay (page dimmer) =====
     const ov = document.createElement('div');
     ov.className = 'sora-uv-analyze-overlay';
     Object.assign(ov.style, {
       position: 'fixed',
       inset: '0',
       zIndex: 2147483646,
-      background: 'rgba(12,14,20,0.45)',
-      backdropFilter: 'blur(10px)',
-      WebkitBackdropFilter: 'blur(10px)',
+      background: 'rgba(33,33,33,0.75)', // page veil
       color: '#fff',
-      display: 'none', // shown in enterAnalyzeMode()
-      overflow: 'auto', // this is the scroll container for sticky
+      display: 'none',
+      overflow: 'auto', // scroll container for sticky header
     });
 
-    // scrollbars off (once)
+    // Hide scrollbars once
     if (!ov.querySelector('#sora-uv-hide-scroll')) {
       const st = document.createElement('style');
       st.id = 'sora-uv-hide-scroll';
       st.textContent = `
-      .sora-uv-analyze-overlay {scrollbar-width:none;-ms-overflow-style:none;}
-      .sora-uv-analyze-overlay::-webkit-scrollbar {width:0;height:0}
-      .sora-uv-analyze-overlay *::-webkit-scrollbar {width:0;height:0}
-    `;
+        .sora-uv-analyze-overlay {scrollbar-width:none;-ms-overflow-style:none;}
+        .sora-uv-analyze-overlay::-webkit-scrollbar {width:0;height:0}
+        .sora-uv-analyze-overlay *::-webkit-scrollbar {width:0;height:0}
+      `;
       ov.appendChild(st);
     }
 
-    // ===== Outer wrapper =====
     const wrap = document.createElement('div');
-    Object.assign(wrap.style, {
-      maxWidth: '1400px',
-      margin: '24px auto',
-      padding: '0 16px 40px',
-    });
+    Object.assign(wrap.style, { maxWidth: '1400px', margin: '24px auto', padding: '0 16px 40px' });
     ov.appendChild(wrap);
 
-    // ===== Panel =====
     const panel = document.createElement('div');
+    // IMPORTANT: do NOT use overflow:hidden here; use clip (no scroll container) or visible fallback.
+    const panelOverflow = (window.CSS && CSS.supports && CSS.supports('overflow', 'clip')) ? 'clip' : 'visible';
     Object.assign(panel.style, {
       position: 'relative',
       borderRadius: '24px',
       padding: '16px',
-      border: '1px solid rgba(255,255,255,0.12)',
+      border: '1px solid #353535',     // stroke
       boxShadow: '0 6px 28px rgba(0,0,0,0.35)',
-      background: 'transparent',
+      background: '#1e1e1e',           // panel BG
+      overflow: panelOverflow,          // was 'hidden' before; this breaks sticky
       isolation: 'isolate',
     });
     wrap.appendChild(panel);
-    ov._panel = panel; // for sticky-top calculations later (kept for compatibility)
+    ov._panel = panel;
 
-    // click-off to close
     ov.addEventListener('mousedown', (e) => {
-      if (!panel.contains(e.target)) {
-        e.preventDefault();
-        exitAnalyzeMode();
-      }
+      if (!panel.contains(e.target)) { e.preventDefault(); exitAnalyzeMode(); }
     });
 
-    // glassy background layers
-    const glass = document.createElement('div');
-    Object.assign(glass.style, {
-      position: 'absolute',
-      inset: 0,
-      borderRadius: '24px',
-      pointerEvents: 'none',
-      background: 'rgba(20,20,20,0.70)',
-      backdropFilter: 'blur(20px) saturate(120%)',
-      WebkitBackdropFilter: 'blur(20px) saturate(120%)',
-      willChange: 'transform, backdrop-filter',
-      transform: 'translateZ(0)',
-      zIndex: 0,
-    });
-    panel.appendChild(glass);
-
-    const veil = document.createElement('div');
-    Object.assign(veil.style, {
-      position: 'absolute',
-      inset: 0,
-      borderRadius: '24px',
-      pointerEvents: 'none',
-      background: 'rgba(0,0,0,0.06)',
-      zIndex: 1,
-    });
-    panel.appendChild(veil);
-
-    const ring = document.createElement('div');
-    Object.assign(ring.style, {
-      position: 'absolute',
-      inset: 0,
-      borderRadius: '24px',
-      pointerEvents: 'none',
-      boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.08)',
-      zIndex: 2,
-    });
-    panel.appendChild(ring);
-
-    // ===== Header =====
+    // ---------- Header ----------
     const headerBox = document.createElement('div');
     Object.assign(headerBox.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'flex-start',
-      gap: '10px',
-      marginBottom: '12px',
-      position: 'relative',
-      zIndex: 3,
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+      gap: '6px', marginBottom: '12px', position: 'relative',
     });
 
     const h1 = document.createElement('h1');
@@ -1378,70 +1428,53 @@
 
     analyzeHeaderTextEl = document.createElement('div');
     Object.assign(analyzeHeaderTextEl.style, {
-      fontSize: '15px',
-      fontWeight: '600',
-      opacity: 0.9,
-      color: 'rgba(255,255,255,0.9)',
+      fontSize: '15px', fontWeight: '600', opacity: 0.9, color: 'rgba(255,255,255,0.9)', margin: 0,
+    });
+
+    analyzeHelperTextEl = document.createElement('div');
+    analyzeHelperTextEl.textContent = "Pro tip: Run 'Gather' mode on Top Feed in its own window and this data will auto-refresh!";
+    Object.assign(analyzeHelperTextEl.style, {
+      fontSize: '12px',
+      fontWeight: '400',
+      color: '#a3a3a3',
       margin: 0,
+      display: 'none',
     });
 
     headerBox.appendChild(h1);
     headerBox.appendChild(analyzeHeaderTextEl);
+    headerBox.appendChild(analyzeHelperTextEl);
     panel.appendChild(headerBox);
 
-    // ===== Range-slider row =====
+    // ---------- Slider Row ----------
     analyzeSliderWrap = document.createElement('div');
     Object.assign(analyzeSliderWrap.style, {
-      width: '100%',
-      display: 'none',
-      alignItems: 'center',
-      gap: '10px',
-      padding: '10px 12px',
-      borderRadius: '14px',
-      background: 'rgba(16,18,24,0.55)',
-      border: '1px solid rgba(255,255,255,0.10)',
+      width: '100%', display: 'none', alignItems: 'center', gap: '10px',
+      padding: '10px 12px', borderRadius: '14px',
+      background: 'rgba(48,48,48,0.22)',
+      border: '1px solid #353535',
       boxShadow: '0 6px 20px rgba(0,0,0,0.30), inset 0 0 1px rgba(255,255,255,0.18)',
-      isolation: 'isolate',
-      position: 'relative',
-      margin: '4px 0 10px',
-      zIndex: 3,
+      isolation: 'isolate', position: 'relative', margin: '4px 0 10px',
     });
     panel.appendChild(analyzeSliderWrap);
 
-    // -- label + slider guts --
     const lbl = document.createElement('div');
     lbl.textContent = 'Range';
     Object.assign(lbl.style, { fontWeight: 800, fontSize: '13px', opacity: 0.9, minWidth: '64px' });
 
     const track = document.createElement('div');
-    Object.assign(track.style, {
-      position: 'relative',
-      flex: '1 1 auto',
-      height: '20px',
-      display: 'flex',
-      alignItems: 'center',
-    });
+    Object.assign(track.style, { position: 'relative', flex: '1 1 auto', height: '20px', display: 'flex', alignItems: 'center' });
 
     const trackBar = document.createElement('div');
     Object.assign(trackBar.style, {
-      position: 'absolute',
-      left: 0,
-      right: 0,
-      height: '8px',
-      borderRadius: '9999px',
-      background: 'rgba(255,255,255,0.85)',
-      pointerEvents: 'none',
+      position: 'absolute', left: 0, right: 0, height: '8px',
+      borderRadius: '9999px', background: 'rgba(255,255,255,0.85)', pointerEvents: 'none',
     });
 
     const fillBar = document.createElement('div');
     Object.assign(fillBar.style, {
-      position: 'absolute',
-      left: 0,
-      height: '8px',
-      borderRadius: '9999px',
-      background: 'hsla(120,60%,30%,0.95)',
-      width: '0%',
-      pointerEvents: 'none',
+      position: 'absolute', left: 0, height: '8px', borderRadius: '9999px',
+      background: 'hsla(120,60%,30%,0.95)', width: '0%', pointerEvents: 'none', willChange: 'width',
     });
 
     const rangeInput = document.createElement('input');
@@ -1451,32 +1484,26 @@
     rangeInput.step = '1';
     rangeInput.value = String(analyzeWindowHours);
     Object.assign(rangeInput.style, {
-      appearance: 'none',
-      WebkitAppearance: 'none',
-      width: '100%',
-      height: '20px',
-      background: 'transparent',
-      outline: 'none',
-      zIndex: 1,
+      appearance: 'none', WebkitAppearance: 'none', width: '100%', height: '20px', background: 'transparent', outline: 'none', zIndex: 1,
     });
 
     if (!ov.querySelector('#sora-uv-range-thumb')) {
       const thumbStyle = document.createElement('style');
       thumbStyle.id = 'sora-uv-range-thumb';
       thumbStyle.textContent = `
-      .sora-uv-analyze-overlay input[type="range"]::-webkit-slider-thumb{
-        appearance:none;-webkit-appearance:none;width:18px;height:18px;border-radius:50%;
-        background:hsla(120,60%,30%,1);border:2px solid hsla(120,60%,40%,1);
-        box-shadow:0 0 0 2px rgba(0,0,0,0.15),0 6px 14px rgba(0,0,0,0.30);
-      }
-      .sora-uv-analyze-overlay input[type="range"]::-moz-range-thumb{
-        width:18px;height:18px;border-radius:50%;
-        background:hsla(120,60%,30%,1);border:2px solid hsla(120,60%,40%,1);
-        box-shadow:0 0 0 2px rgba(0,0,0,0.15),0 6px 14px rgba(0,0,0,0.30);
-      }
-      .sora-uv-analyze-overlay input[type="range"]::-webkit-slider-runnable-track{background:transparent;}
-      .sora-uv-analyze-overlay input[type="range"]::-moz-range-track{background:transparent;}
-    `;
+        .sora-uv-analyze-overlay input[type="range"]::-webkit-slider-thumb{
+          appearance:none;-webkit-appearance:none;width:18px;height:18px;border-radius:50%;
+          background:hsla(120,60%,30%,1);border:2px solid hsla(120,60%,40%,1);
+          box-shadow:0 0 0 2px rgba(0,0,0,0.15),0 6px 14px rgba(0,0,0,0.30);
+        }
+        .sora-uv-analyze-overlay input[type="range"]::-moz-range-thumb{
+          width:18px;height:18px;border-radius:50%;
+          background:hsla(120,60%,30%,1);border:2px solid hsla(120,60%,40%,1);
+          box-shadow:0 0 0 2px rgba(0,0,0,0.15),0 6px 14px rgba(0,0,0,0.30);
+        }
+        .sora-uv-analyze-overlay input[type="range"]::-webkit-slider-runnable-track{background:transparent;}
+        .sora-uv-analyze-overlay input[type="range"]::-moz-range-track{background:transparent;}
+      `;
       ov.appendChild(thumbStyle);
     }
 
@@ -1497,10 +1524,10 @@
     const updateSliderUI = () => {
       const val = Number(rangeInput.value) || 1;
       pill.textContent = val === 1 ? '1 hour' : `${val} hours`;
-      const pct = ((val - 1) / 23) * 100;
-      fillBar.style.width = Math.min(99.6, Math.max(0, pct)) + '%';
+      const pctLogical = ((val - 1) / 23) * 100;
+      const pctSafe = Math.min(99.6, Math.max(0, pctLogical));
+      fillBar.style.width = pctSafe + '%';
     };
-    updateSliderUI();
 
     pill.onclick = () => {
       rangeInput.value = '24';
@@ -1515,6 +1542,7 @@
       updateSliderUI();
       renderAnalyzeTable(true);
     };
+    window.addEventListener('resize', updateSliderUI);
 
     track.appendChild(trackBar);
     track.appendChild(fillBar);
@@ -1524,11 +1552,11 @@
     analyzeSliderWrap.appendChild(track);
     analyzeSliderWrap.appendChild(pill);
 
-    // ===== TABLE (rounded; header sticks) =====
+    // ---------- Table ----------
     analyzeTableEl = document.createElement('table');
     Object.assign(analyzeTableEl.style, {
       width: '100%',
-      borderCollapse: 'separate',
+      borderCollapse: 'separate',   // keep separate for sticky compatibility
       borderSpacing: 0,
       fontSize: '13px',
       background: 'transparent',
@@ -1538,44 +1566,46 @@
     });
     panel.appendChild(analyzeTableEl);
 
-    // --- sticky-top offset: force to 0 so header sticks only at the real viewport top ---
-    function recomputeAnalyzeSticky() {
-      ov.style.setProperty('--analyze-sticky-top', '0px');
-    }
-    ov._recomputeSticky = recomputeAnalyzeSticky;
-
-    const ro = new ResizeObserver(() => recomputeAnalyzeSticky());
-    ov._stickyRO = ro;
+    // Sticky header offset var for thead/th
+    ov._recomputeSticky = () => {
+      ov.style.setProperty('--analyze-sticky-top', '0px'); // stick to overlay viewport top
+    };
+    const ro = new ResizeObserver(() => ov._recomputeSticky());
     ro.observe(panel);
     ro.observe(headerBox);
     ro.observe(analyzeSliderWrap);
-    window.addEventListener('resize', recomputeAnalyzeSticky);
-    requestAnimationFrame(recomputeAnalyzeSticky);
+    window.addEventListener('resize', ov._recomputeSticky);
+    requestAnimationFrame(() => {
+      ov._recomputeSticky();
+      updateSliderUI();
+    });
 
     document.documentElement.appendChild(ov);
     analyzeOverlayEl = ov;
     return ov;
   }
 
-  // ---------------------------------------------------------------------------
-  // Build table header – sticky to the overlay viewport top, no rounded corners
-  // ---------------------------------------------------------------------------
+
   function buildAnalyzeHeaderIfNeeded() {
     const table = analyzeTableEl;
     if (!table) return;
 
-    // remove any old external header
     const legacy = document.querySelector('.sora-uv-sticky-head');
     if (legacy) legacy.remove();
 
-    // ensure single <thead>; drop extras
     const allHeads = Array.from(table.querySelectorAll('thead'));
     const existing = allHeads.shift();
     allHeads.forEach((h) => h.remove());
 
-    // ensure a <colgroup> once
     if (!table.querySelector('colgroup')) {
       const cg = document.createElement('colgroup');
+
+      // Tiny Prompt column (first)
+      const colPrompt = document.createElement('col');
+      colPrompt.style.width = '28px';
+      colPrompt.style.minWidth = '28px';
+      colPrompt.style.maxWidth = '28px';
+      cg.appendChild(colPrompt);
 
       const colPost = document.createElement('col');
       colPost.style.width = 'auto';
@@ -1592,12 +1622,12 @@
       table.insertBefore(cg, table.firstChild);
     }
 
-    // build header if needed
     let thead = existing;
     if (!thead) {
       thead = document.createElement('thead');
       const tr = document.createElement('tr');
       [
+        ['prompt', '📋'],
         ['post', 'Post'],
         ['views', 'Views'],
         ['likes', '👍'],
@@ -1610,11 +1640,12 @@
         const th = document.createElement('th');
         th.dataset.key = key;
         th.textContent = label;
+        if (key === 'prompt') th.title = 'Prompt';
         Object.assign(th.style, {
-          background: 'rgba(18,20,24,0.88)',
-          textAlign: key === 'post' ? 'left' : 'right',
-          padding: '10px 12px',
-          cursor: 'pointer',
+          background: 'rgba(24,24,24,0.88)',
+          textAlign: key === 'post' ? 'left' : (key === 'prompt' ? 'center' : 'right'),
+          padding: key === 'prompt' ? '6px 0' : '10px 12px',
+          cursor: key === 'prompt' ? 'default' : 'pointer',
           fontWeight: '800',
           userSelect: 'none',
           position: 'sticky',
@@ -1622,27 +1653,37 @@
           borderBottom: '1px solid rgba(255,255,255,0.1)',
           borderTop: '1px solid rgba(255,255,255,0.1)',
           zIndex: 12,
-          // no rounded corners on header cells:
           borderRadius: '0',
           borderTopLeftRadius: '0',
           borderTopRightRadius: '0',
+          width: key === 'prompt' ? '28px' : undefined,
+          maxWidth: key === 'prompt' ? '28px' : undefined,
+          minWidth: key === 'prompt' ? '28px' : undefined,
         });
-        th.onclick = () => {
-          analyzeSortDir = analyzeSortKey === key && analyzeSortDir === 'asc' ? 'desc' : 'asc';
-          analyzeSortKey = key;
-          updateAnalyzeHeaderSortIndicators();
-          renderAnalyzeTable(true);
-        };
+
+        if (key === 'post') {
+          th.style.paddingLeft = '0';
+          th.style.marginLeft = '0';
+        }
+
+        // Only make sortable if not the prompt column
+        if (key !== 'prompt') {
+          th.onclick = () => {
+            analyzeSortDir = analyzeSortKey === key && analyzeSortDir === 'asc' ? 'desc' : 'asc';
+            analyzeSortKey = key;
+            updateAnalyzeHeaderSortIndicators();
+            renderAnalyzeTable(true);
+          };
+        }
+
         tr.appendChild(th);
       });
       thead.appendChild(tr);
     }
 
-    // place header before first tbody
     const firstBody = table.querySelector('tbody');
     table.insertBefore(thead, firstBody);
 
-    // sticky + blur and square edges on thead itself
     Object.assign(thead.style, {
       position: 'sticky',
       top: 'var(--analyze-sticky-top,0)',
@@ -1652,7 +1693,6 @@
       borderRadius: '0',
     });
 
-    // normalize any previously-set radii if header already existed
     Array.from(thead.querySelectorAll('th')).forEach((th) => {
       th.style.borderTopLeftRadius = '0';
       th.style.borderTopRightRadius = '0';
@@ -1661,6 +1701,310 @@
 
     updateAnalyzeHeaderSortIndicators();
   }
+
+  function updateAnalyzeHeaderSortIndicators() {
+    const table = analyzeTableEl;
+    if (!table || !table.tHead) return;
+    const ths = Array.from(table.tHead.querySelectorAll('th'));
+    for (const th of ths) {
+      const key = th.dataset.key;
+      const base = th.textContent.replace(/\s+[▲▼]$/, '');
+      if (key && key === analyzeSortKey) {
+        th.textContent = base + (analyzeSortDir === 'asc' ? ' ▲' : ' ▼');
+      } else {
+        th.textContent = base;
+      }
+    }
+  }
+
+  function buildAnalyzeHeaderIfNeeded() {
+    const table = analyzeTableEl;
+    if (!table) return;
+
+    const legacy = document.querySelector('.sora-uv-sticky-head');
+    if (legacy) legacy.remove();
+
+    const allHeads = Array.from(table.querySelectorAll('thead'));
+    const existing = allHeads.shift();
+    allHeads.forEach((h) => h.remove());
+
+    if (!table.querySelector('colgroup')) {
+      const cg = document.createElement('colgroup');
+
+      // Tiny Prompt column (first)
+      const colPrompt = document.createElement('col');
+      colPrompt.style.width = '28px';
+      colPrompt.style.minWidth = '28px';
+      colPrompt.style.maxWidth = '28px';
+      cg.appendChild(colPrompt);
+
+      const colPost = document.createElement('col');
+      colPost.style.width = 'auto';
+      colPost.style.minWidth = '140px';
+      cg.appendChild(colPost);
+
+      ['100px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
+        const c = document.createElement('col');
+        c.style.width = w;
+        c.style.maxWidth = w;
+        cg.appendChild(c);
+      });
+
+      table.insertBefore(cg, table.firstChild);
+    }
+
+    let thead = existing;
+    if (!thead) {
+      thead = document.createElement('thead');
+      const tr = document.createElement('tr');
+      [
+        ['prompt', '📋'],
+        ['post', 'Post'],
+        ['views', 'Views'],
+        ['likes', '👍'],
+        ['remixes', '🌀'],
+        ['comments', '💬'],
+        ['rr', 'RR %'],
+        ['ir', 'IR %'],
+        ['expiring', 'Expires'],
+      ].forEach(([key, label]) => {
+        const th = document.createElement('th');
+        th.dataset.key = key;
+        th.textContent = label;
+        if (key === 'prompt') th.title = 'Prompt';
+        Object.assign(th.style, {
+          background: 'rgba(24,24,24,0.88)',
+          textAlign: key === 'post' ? 'left' : (key === 'prompt' ? 'center' : 'right'),
+          padding: key === 'prompt' ? '6px 0' : '10px 12px',
+          cursor: key === 'prompt' ? 'default' : 'pointer',
+          fontWeight: '800',
+          userSelect: 'none',
+          position: 'sticky',
+          top: 'var(--analyze-sticky-top,0)',
+          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          zIndex: 12,
+          borderRadius: '0',
+          borderTopLeftRadius: '0',
+          borderTopRightRadius: '0',
+          width: key === 'prompt' ? '28px' : undefined,
+          maxWidth: key === 'prompt' ? '28px' : undefined,
+          minWidth: key === 'prompt' ? '28px' : undefined,
+        });
+
+        if (key === 'post') {
+          th.style.paddingLeft = '0';
+          th.style.marginLeft = '0';
+        }
+
+        // Only make sortable if not the prompt column
+        if (key !== 'prompt') {
+          th.onclick = () => {
+            analyzeSortDir = analyzeSortKey === key && analyzeSortDir === 'asc' ? 'desc' : 'asc';
+            analyzeSortKey = key;
+            updateAnalyzeHeaderSortIndicators();
+            renderAnalyzeTable(true);
+          };
+        }
+
+        tr.appendChild(th);
+      });
+      thead.appendChild(tr);
+    }
+
+    const firstBody = table.querySelector('tbody');
+    table.insertBefore(thead, firstBody);
+
+    Object.assign(thead.style, {
+      position: 'sticky',
+      top: 'var(--analyze-sticky-top,0)',
+      zIndex: 12,
+      backdropFilter: 'blur(6px)',
+      WebkitBackdropFilter: 'blur(6px)',
+      borderRadius: '0',
+    });
+
+    Array.from(thead.querySelectorAll('th')).forEach((th) => {
+      th.style.borderTopLeftRadius = '0';
+      th.style.borderTopRightRadius = '0';
+      th.style.borderRadius = '0';
+    });
+
+    updateAnalyzeHeaderSortIndicators();
+  }
+
+async function renderAnalyzeTable(force = false) {
+  if (!force) {
+    if (renderAnalyzeTable._busy) return;
+    const now = Date.now();
+    if (renderAnalyzeTable._last && now - renderAnalyzeTable._last < 200) return;
+    renderAnalyzeTable._last = now;
+  }
+  renderAnalyzeTable._busy = true;
+
+  try {
+    if (!analyzeActive) return;
+    ensureAnalyzeOverlay();
+    buildAnalyzeHeaderIfNeeded();
+
+    // ⛔️ Do NOT force borderCollapse='collapse' here.
+    // Leave the table with border-collapse: separate (set at creation).
+
+    let rows = await collectAnalyzeRowsFromStorage();
+    if (!rows.length && typeof collectAnalyzeRowsFromLiveMaps === 'function') rows = collectAnalyzeRowsFromLiveMaps();
+
+    const windowMin = (Number(analyzeWindowHours) || 24) * 60;
+    const expiringThreshold = 1440 - windowMin;
+    rows = rows.filter((r) => Number.isFinite(r.expiringMin) && r.expiringMin >= expiringThreshold);
+    rows = sortRows(rows);
+
+    const newTbody = document.createElement('tbody');
+
+    const mkTdNum = (v) => {
+      const td = document.createElement('td');
+      td.textContent = typeof v === 'number' ? v.toLocaleString('en-US') : v || '—';
+      Object.assign(td.style, {
+        padding: '10px 12px',
+        textAlign: 'right',
+        borderBottom: '1px solid rgba(255,255,255,0.08)',
+      });
+      return td;
+    };
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const tr = document.createElement('tr');
+      Object.assign(tr.style, { transition: 'background-color 120ms ease' });
+      if (i % 2 === 1) tr.style.background = 'rgba(255,255,255,0.03)';
+      tr.onmouseenter = () => { tr.style.background = 'rgba(255,255,255,0.05)'; };
+      tr.onmouseleave = () => { tr.style.background = i % 2 === 1 ? 'rgba(255,255,255,0.03)' : 'transparent'; };
+
+      const tdPrompt = document.createElement('td');
+      Object.assign(tdPrompt.style, {
+        padding: '6px 4px',
+        borderBottom: '1px solid rgba(255,255,255,0.08)',
+        textAlign: 'center',
+        width: '28px',
+        minWidth: '28px',
+        maxWidth: '28px',
+      });
+      const captionOnly = (typeof r.caption === 'string' ? r.caption : '').replace(/\s+/g, ' ').trim();
+      if (captionOnly.length > 100) {
+        const btn = document.createElement('a');
+        btn.href = 'javascript:void(0)';
+        btn.textContent = '📋';
+        btn.setAttribute('role', 'button');
+        btn.setAttribute('aria-label', 'Copy prompt');
+        Object.assign(btn.style, {
+          textDecoration: 'none',
+          cursor: 'pointer',
+          userSelect: 'none',
+          display: 'inline-block',
+          lineHeight: '1',
+        });
+        btn.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          await copyTextToClipboard(captionOnly);
+          showPromptClickTooltip(ev.clientX, ev.clientY, 'Prompt copied!', 1000);
+        });
+        btn.addEventListener('keydown', async (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            await copyTextToClipboard(captionOnly);
+            const rect = btn.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top;
+            showPromptClickTooltip(cx, cy, 'Prompt copied!', 1000);
+          }
+        });
+        tdPrompt.appendChild(btn);
+      } else {
+        tdPrompt.textContent = '';
+      }
+
+      const tdPost = document.createElement('td');
+      Object.assign(tdPost.style, {
+        padding: '10px 12px 10px 0',
+        borderBottom: '1px solid rgba(255,255,255,0.08)',
+        textAlign: 'left',
+      });
+
+      const a = document.createElement('a');
+      a.href = r.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      Object.assign(a.style, {
+        color: '#cfe3ff',
+        textDecoration: 'none',
+        display: 'block',
+        width: '100%',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        paddingLeft: '0',
+        marginLeft: '0',
+      });
+
+      const owner = typeof r.ownerHandle === 'string' && r.ownerHandle ? r.ownerHandle : '';
+      const captionRaw = typeof r.caption === 'string' && r.caption ? r.caption : r.id;
+      const fullLabel = owner ? `${owner} • ${captionRaw}` : captionRaw || '';
+      a.title = fullLabel;
+
+      if (owner) {
+        const u = document.createElement('span'); u.textContent = owner; u.style.fontWeight = '800'; a.appendChild(u);
+        const sep = document.createElement('span'); sep.textContent = ' - '; sep.style.fontWeight = '300'; a.appendChild(sep);
+        const c = document.createElement('span'); c.textContent = captionRaw || ''; c.style.fontWeight = '300'; a.appendChild(c);
+      } else {
+        const c = document.createElement('span'); c.textContent = captionRaw || ''; c.style.fontWeight = '300'; a.appendChild(c);
+      }
+
+      a.onmouseenter = () => { a.style.textDecoration = 'underline'; };
+      a.onmouseleave = () => { a.style.textDecoration = 'none'; };
+      tdPost.appendChild(a);
+
+      const tdViews = mkTdNum(r.views);
+      const tdLikes = mkTdNum(r.likes);
+      const tdRemixes = mkTdNum(r.remixes);
+      const tdComments = mkTdNum(r.comments);
+      const tdRR = mkTdNum(r.rrPctStr || '—');
+      const tdIR = mkTdNum(r.irPctStr || '—');
+      const expStr = typeof r.expiringMin === 'number' ? (r.expiringMin <= 0 ? '0m' : fmtAgeMin(r.expiringMin)) : '—';
+      const tdExp = mkTdNum(expStr);
+
+      tr.appendChild(tdPrompt);
+      tr.appendChild(tdPost);
+      tr.appendChild(tdViews);
+      tr.appendChild(tdLikes);
+      tr.appendChild(tdRemixes);
+      tr.appendChild(tdComments);
+      tr.appendChild(tdRR);
+      tr.appendChild(tdIR);
+      tr.appendChild(tdExp);
+      newTbody.appendChild(tr);
+    }
+
+    const table = analyzeTableEl;
+    const oldTbody = table.tBodies[0];
+    const swap = () => {
+      if (oldTbody) table.replaceChild(newTbody, oldTbody);
+      else table.appendChild(newTbody);
+    };
+    if ('requestAnimationFrame' in window) requestAnimationFrame(swap);
+    else swap();
+
+    const isAnalyzing = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
+    if (!isAnalyzing && analyzeHeaderTextEl) {
+      const hoursLabel = (n) => (Number(n) === 1 ? '1 hour' : `${n} hours`);
+      analyzeHeaderTextEl.textContent = rows.length
+        ? `${rows.length} top gens from the last ${hoursLabel(analyzeWindowHours)}`
+        : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
+    }
+  } finally {
+    renderAnalyzeTable._busy = false;
+  }
+}
+
 
   function updateAnalyzeHeaderSortIndicators() {
     const table = analyzeTableEl;
@@ -1686,11 +2030,15 @@
     const key = analyzeSortKey;
     const dir = analyzeSortDir === 'asc' ? 1 : -1;
     rows.sort((a, b) => {
+      if (key === 'prompt') {
+        const aLen = (a.caption || '').replace(/\s+/g, ' ').trim().length;
+        const bLen = (b.caption || '').replace(/\s+/g, ' ').trim().length;
+        return (aLen - bLen) * dir;
+      }
       if (key === 'post') {
         const aUser = (a.ownerHandle || '').toLowerCase();
         const bUser = (b.ownerHandle || '').toLowerCase();
         if (aUser !== bUser) return aUser.localeCompare(bUser) * dir;
-
         const aCap = (a.caption || a.id || '').toLowerCase();
         const bCap = (b.caption || b.id || '').toLowerCase();
         return aCap.localeCompare(bCap) * dir;
@@ -1707,156 +2055,6 @@
     return rows;
   }
 
-  async function renderAnalyzeTable(force = false) {
-    if (!force) {
-      if (renderAnalyzeTable._busy) return;
-      const now = Date.now();
-      if (renderAnalyzeTable._last && now - renderAnalyzeTable._last < 200) return;
-      renderAnalyzeTable._last = now;
-    }
-    renderAnalyzeTable._busy = true;
-
-    try {
-      if (!analyzeActive) return;
-      ensureAnalyzeOverlay();
-      buildAnalyzeHeaderIfNeeded();
-
-      let rows = await collectAnalyzeRowsFromStorage();
-      if (!rows.length && typeof collectAnalyzeRowsFromLiveMaps === 'function') {
-        rows = collectAnalyzeRowsFromLiveMaps();
-      }
-
-      const windowMin = (Number(analyzeWindowHours) || 24) * 60;
-      const expiringThreshold = 1440 - windowMin;
-      rows = rows.filter((r) => Number.isFinite(r.expiringMin) && r.expiringMin >= expiringThreshold);
-
-      rows = sortRows(rows);
-
-      const newTbody = document.createElement('tbody');
-
-      const mkTdNum = (v) => {
-        const td = document.createElement('td');
-        td.textContent = typeof v === 'number' ? v.toLocaleString('en-US') : v || '—';
-        Object.assign(td.style, {
-          padding: '10px 12px',
-          textAlign: 'right',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-        });
-        return td;
-      };
-
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        const tr = document.createElement('tr');
-        Object.assign(tr.style, { transition: 'background-color 120ms ease' });
-        if (i % 2 === 1) tr.style.background = 'rgba(255,255,255,0.03)';
-        tr.onmouseenter = () => {
-          tr.style.background = 'rgba(255,255,255,0.05)';
-        };
-        tr.onmouseleave = () => {
-          tr.style.background = i % 2 === 1 ? 'rgba(255,255,255,0.03)' : 'transparent';
-        };
-
-        // Post column: username bold, then bullet + caption lighter
-        const tdPost = document.createElement('td');
-        Object.assign(tdPost.style, {
-          padding: '10px 12px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          textAlign: 'left',
-        });
-
-        const a = document.createElement('a');
-        a.href = r.url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        Object.assign(a.style, {
-          color: '#cfe3ff',
-          textDecoration: 'none',
-          display: 'block',
-          width: '100%',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        });
-
-        const owner = typeof r.ownerHandle === 'string' && r.ownerHandle ? r.ownerHandle : '';
-        const captionRaw = typeof r.caption === 'string' && r.caption ? r.caption : r.id;
-        const fullLabel = owner ? `${owner} • ${captionRaw}` : captionRaw || '';
-
-        // Title shows full string
-        a.title = fullLabel;
-
-        if (owner) {
-          const u = document.createElement('span');
-          u.textContent = owner;
-          u.style.fontWeight = '800'; // username
-          a.appendChild(u);
-
-          const sep = document.createElement('span');
-          sep.textContent = ' - ';
-          sep.style.fontWeight = '300'; // separator
-          a.appendChild(sep);
-
-          const c = document.createElement('span');
-          c.textContent = captionRaw || '';
-          c.style.fontWeight = '300'; // caption
-          a.appendChild(c);
-        } else {
-          const c = document.createElement('span');
-          c.textContent = captionRaw || '';
-          c.style.fontWeight = '300';
-          a.appendChild(c);
-        }
-
-        a.onmouseenter = () => {
-          a.style.textDecoration = 'underline';
-        };
-        a.onmouseleave = () => {
-          a.style.textDecoration = 'none';
-        };
-        tdPost.appendChild(a);
-
-        const tdViews = mkTdNum(r.views);
-        const tdLikes = mkTdNum(r.likes);
-        const tdRemixes = mkTdNum(r.remixes);
-        const tdComments = mkTdNum(r.comments);
-        const tdRR = mkTdNum(r.rrPctStr || '—');
-        const tdIR = mkTdNum(r.irPctStr || '—');
-        const expStr =
-          typeof r.expiringMin === 'number' ? (r.expiringMin <= 0 ? '0m' : fmtAgeMin(r.expiringMin)) : '—';
-        const tdExp = mkTdNum(expStr);
-
-        tr.appendChild(tdPost);
-        tr.appendChild(tdViews);
-        tr.appendChild(tdLikes);
-        tr.appendChild(tdRemixes);
-        tr.appendChild(tdComments);
-        tr.appendChild(tdRR);
-        tr.appendChild(tdIR);
-        tr.appendChild(tdExp);
-        newTbody.appendChild(tr);
-      }
-
-      const table = analyzeTableEl;
-      const oldTbody = table.tBodies[0];
-      const swap = () => {
-        if (oldTbody) table.replaceChild(newTbody, oldTbody);
-        else table.appendChild(newTbody);
-      };
-      if ('requestAnimationFrame' in window) requestAnimationFrame(swap);
-      else swap();
-
-      const isAnalyzing = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-      if (!isAnalyzing && analyzeHeaderTextEl) {
-        const hoursLabel = (n) => (Number(n) === 1 ? '1 hour' : `${n} hours`);
-        analyzeHeaderTextEl.textContent = rows.length
-          ? `${rows.length} top gens from the last ${hoursLabel(analyzeWindowHours)}`
-          : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
-      }
-    } finally {
-      renderAnalyzeTable._busy = false;
-    }
-  }
 
   function hideAllCards(hide) {
     for (const card of selectAllCards()) {
@@ -1866,13 +2064,17 @@
   }
 
   function startRapidAnalyzeGather() {
-    stopRapidAnalyzeGather(); // safety
-    showAnalyzeTable(false); // keep table hidden during the run
-    if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'none'; // hide slider while analyzing
+    stopRapidAnalyzeGather();
+    showAnalyzeTable(false);
+    if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'none';
+
+    // Faster, longer bursts; no end detection
+    const BURST_STEP_PX = 1200; // was 100
+    const TICK_MS = 5;          // was 10
 
     const step = () => {
-      if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) window.scrollBy(0, 100);
-      analyzeRapidScrollId = setTimeout(step, 10);
+      window.scrollBy(0, BURST_STEP_PX);
+      analyzeRapidScrollId = setTimeout(step, TICK_MS);
     };
     step();
 
@@ -1882,6 +2084,7 @@
       analyzeHeaderTextEl.textContent = `Analyzing for ${analyzeCountdownRemainingSec}…`;
     };
     updateCountdown();
+
     analyzeCountdownIntervalId = setInterval(() => {
       analyzeCountdownRemainingSec = Math.max(0, analyzeCountdownRemainingSec - 1);
       if (analyzeCountdownRemainingSec > 0) updateCountdown();
@@ -1890,10 +2093,18 @@
     analyzeRapidStopTimeout = setTimeout(() => {
       stopRapidAnalyzeGather();
       showAnalyzeTable(true);
-      if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'flex'; // show slider after analyzing
+      if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'flex';
       renderAnalyzeTable(true);
+      setTimeout(() => {
+        try {
+          const hasRows = !!(analyzeTableEl && analyzeTableEl.tBodies[0] && analyzeTableEl.tBodies[0].rows.length);
+          if (analyzeHelperTextEl) analyzeHelperTextEl.style.display = hasRows ? '' : 'none';
+        } catch {}
+      }, 0);
     }, ANALYZE_RUN_MS);
   }
+
+
 
   function stopRapidAnalyzeGather() {
     if (analyzeRapidScrollId) {
@@ -1918,32 +2129,29 @@
     analyzeActive = true;
     const ov = ensureAnalyzeOverlay();
 
-    // (hide scrollbars style injection unchanged)
-
     hideAllCards(true);
     ov.style.display = 'block';
 
-    // >>> recompute sticky now that elements have real sizes
     if (typeof ov._recomputeSticky === 'function') ov._recomputeSticky();
 
     analyzeBtn && analyzeBtn.setActive && analyzeBtn.setActive(true);
-    analyzeSortKey = 'views';
-    analyzeSortDir = 'desc';
+    // keep existing sort (don’t reset), only set defaults if nothing chosen
+    if (!analyzeSortKey) analyzeSortKey = 'views';
+    if (!analyzeSortDir) analyzeSortDir = 'desc';
 
-    // Hide Filter & Gather immediately (unchanged...)
-
-    startRapidAnalyzeGather();
+    startRapidAnalyzeGather();      // 10s burst to populate quickly
+    startAnalyzeAutoRefresh();      // then keep it fresh every minute
     updateControlsVisibility();
   }
 
   function exitAnalyzeMode() {
     analyzeActive = false;
     stopRapidAnalyzeGather();
+    stopAnalyzeAutoRefresh();
     hideAllCards(false);
     if (analyzeOverlayEl) analyzeOverlayEl.style.display = 'none';
     analyzeBtn && analyzeBtn.setActive && analyzeBtn.setActive(false);
 
-    // Show Filter & Gather again
     const bar = controlBar || ensureControlBar();
     if (bar) {
       const f = bar.querySelector('[data-role="filter-btn"]');
@@ -2008,6 +2216,7 @@
   }
 
   function startGathering(forceNewDeadline = false) {
+    // stop any prior loops
     if (gatherScrollIntervalId) {
       clearTimeout(gatherScrollIntervalId);
       gatherScrollIntervalId = null;
@@ -2017,29 +2226,35 @@
       gatherRefreshTimeoutId = null;
     }
 
+    // small, frequent increments for smoothness (~60fps)
+    const TICK_MS = 16; // ~60Hz
+    function startSmoothAutoScroll(pxPerStep) {
+      const step = Math.max(0.25, Number(pxPerStep) || 1); // allow sub-pixel movement
+      function tick() {
+        const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 100;
+        if (!atBottom) {
+          window.scrollTo(0, window.scrollY + step);
+        }
+        gatherScrollIntervalId = setTimeout(tick, TICK_MS);
+      }
+      tick();
+    }
+
     if (isTopFeed()) {
-      const refreshMs = 10 * 60 * 1000;
+      // === TOP: keep 10m loop ===
+      const refreshMs = 5 * 60 * 1000;
+      const TOP_PX_PER_STEP = 6; // was 1 → ~75 px/s
 
       const s0 = getGatherState() || {};
       if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now()) {
         const remaining = s0.refreshDeadline - Date.now();
-        function slowScrollResume() {
-          if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) window.scrollBy(0, 3);
-          gatherScrollIntervalId = setTimeout(slowScrollResume, 4000);
-        }
-        slowScrollResume();
-        gatherRefreshTimeoutId = setTimeout(() => {
-          location.reload();
-        }, remaining);
+        startSmoothAutoScroll(TOP_PX_PER_STEP);
+        gatherRefreshTimeoutId = setTimeout(() => location.reload(), remaining);
         updateCountdownDisplay();
         return;
       }
 
-      function slowScroll() {
-        if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) window.scrollBy(0, 3);
-        gatherScrollIntervalId = setTimeout(slowScroll, 4000);
-      }
-      slowScroll();
+      startSmoothAutoScroll(TOP_PX_PER_STEP);
 
       const now = Date.now();
       let sessionState = getGatherState() || {};
@@ -2050,47 +2265,46 @@
         sessionState.refreshDeadline = now + refreshDelay;
         setGatherState(sessionState);
       }
-      gatherRefreshTimeoutId = setTimeout(() => {
-        location.reload();
-      }, refreshDelay);
+      gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
       updateCountdownDisplay();
       return;
     }
 
-    // Profile: slider-based gather
+    // === PROFILE: slider-based smooth scroll (unchanged) ===
     const prefs = getPrefs();
     const speedValue = prefs.gatherSpeed != null ? prefs.gatherSpeed : '0';
     const t = Math.min(1, Math.max(0, Number(speedValue) / 100));
 
-    const speedSlow = { sMin: 10000, sMax: 15000, rMin: 15 * 60000, rMax: 17 * 60000 };
-    const speedMid = { sMin: 4500, sMax: 6500, rMin: 7 * 60000, rMax: 9 * 60000 };
-    const speedFast = { sMin: 50, sMax: 150, rMin: 1 * 60000, rMax: 2 * 60000 };
+    // Map slider to pixels-per-second (slow → fast)
+    const PPS_SLOW = 50;     // px/s at far left
+    const PPS_MID  = 1500;   // px/s mid
+    const PPS_FAST = 3000;   // px/s far right
 
     const lerp = (a, b, u) => a + (b - a) * u;
-    let scrollMinMs, scrollMaxMs, refreshMinMs, refreshMaxMs;
+    let pps;
+    if (t <= 0.5) {
+      pps = lerp(PPS_SLOW, PPS_MID, t / 0.5);
+    } else {
+      pps = lerp(PPS_MID, PPS_FAST, (t - 0.5) / 0.5);
+    }
+    const pxPerStep = (pps * TICK_MS) / 1000; // per-tick movement
+    startSmoothAutoScroll(pxPerStep);
+
+    // randomized refresh window (unchanged)
+    const speedSlow = { rMin: 15 * 60000, rMax: 17 * 60000 };
+    const speedMid  = { rMin: 7 * 60000,  rMax: 9 * 60000  };
+    const speedFast = { rMin: 1 * 60000,  rMax: 2 * 60000  };
+
+    let refreshMinMs, refreshMaxMs;
     if (t <= 0.5) {
       const u = t / 0.5;
-      scrollMinMs = lerp(speedSlow.sMin, speedMid.sMin, u);
-      scrollMaxMs = lerp(speedSlow.sMax, speedMid.sMax, u);
       refreshMinMs = lerp(speedSlow.rMin, speedMid.rMin, u);
       refreshMaxMs = lerp(speedSlow.rMax, speedMid.rMax, u);
     } else {
       const u = (t - 0.5) / 0.5;
-      scrollMinMs = lerp(speedMid.sMin, speedFast.sMin, u);
-      scrollMaxMs = lerp(speedMid.sMax, speedFast.sMax, u);
       refreshMinMs = lerp(speedMid.rMin, speedFast.rMin, u);
       refreshMaxMs = lerp(speedMid.rMax, speedFast.rMax, u);
     }
-
-    function randomScroll() {
-      if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) {
-        const amt = t <= 0.1 ? 3 : t <= 0.3 ? 8 : t <= 0.7 ? 20 : 100;
-        window.scrollBy(0, amt);
-      }
-      const delay = Math.random() * (scrollMaxMs - scrollMinMs) + scrollMinMs;
-      gatherScrollIntervalId = setTimeout(randomScroll, delay);
-    }
-    randomScroll();
 
     const now = Date.now();
     let s = getGatherState() || {};
@@ -2102,11 +2316,10 @@
       s.refreshDeadline = now + refreshDelay;
       setGatherState(s);
     }
-    gatherRefreshTimeoutId = setTimeout(() => {
-      location.reload();
-    }, refreshDelay);
+    gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
     updateCountdownDisplay();
   }
+
 
   function stopGathering(clearSessionState = false) {
     if (gatherScrollIntervalId) {
@@ -2481,14 +2694,24 @@
     }
   }
 
-  // == Init ==
   function init() {
     dlog('feed', 'init');
-    resetFilterFreshSlate();
+    // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
     installFetchSniffer();
     startObservers();
     onRouteChange();
     window.addEventListener('storage', handleStorageChange);
+
+    // If this tab had Gather running pre-refresh, resume it AND start a fresh timer.
+    const s = getGatherState() || {};
+    if (s.isGathering) {
+      isGatheringActiveThisTab = true;
+      const bar = controlBar || ensureControlBar();
+      if (bar && typeof bar.updateGatherState === 'function') bar.updateGatherState();
+      // Force a new schedule after refresh so the loop "starts over"
+      startGathering(true);
+      if (!gatherCountdownIntervalId) gatherCountdownIntervalId = setInterval(updateCountdownDisplay, 1000);
+    }
   }
 
   if (document.readyState === 'loading') {
