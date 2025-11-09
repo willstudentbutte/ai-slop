@@ -1,7 +1,6 @@
 /*
- * Copyright (c) 2025 William Cruttenden
- * Licensed under the Polyform Noncommercial License 1.0.0.
- * Noncommercial use permitted. Commercial use requires a separate license from the copyright holder.
+ * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
+ * Licensed under the MIT License. See the LICENSE file for details.
  *
  * What this does (simple):
  * - Reads the site’s feed JSON and adds a small badge to each post card.
