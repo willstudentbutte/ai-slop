@@ -13,11 +13,17 @@
 (function () {
   'use strict';
 
-  try { console.log('[SoraUV] inject.js loaded'); } catch {}
+  try {
+    console.log('[SoraUV] inject.js loaded');
+  } catch {}
 
   // Debug toggles
-  const DEBUG = { feed: true, thumbs: true };
-  const dlog = (topic, ...args) => { try { if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args); } catch {} };
+  const DEBUG = { feed: true, thumbs: true, analyze: true };
+  const dlog = (topic, ...args) => {
+    try {
+      if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args);
+    } catch {}
+  };
 
   // == Configuration & Constants ==
   const PREF_KEY = 'SORA_UV_PREFS_V1';
@@ -34,7 +40,7 @@
   const idToViews = new Map();
   const idToComments = new Map();
   const idToRemixes = new Map();
-  const idToMeta = new Map();
+  const idToMeta = new Map(); // { ageMin }
 
   // == UI State ==
   let controlBar = null;
@@ -46,22 +52,63 @@
   let gatherCountdownIntervalId = null;
   let isGatheringActiveThisTab = false;
 
+  // Analyze (Top feed only)
+  let analyzeActive = false;
+  let analyzeBtn = null;
+  let analyzeOverlayEl = null;
+  let analyzeHeaderTextEl = null;
+  let analyzeSliderWrap = null;
+  let analyzeTableEl = null;
+  let analyzeRapidScrollId = null;
+  let analyzeRapidStopTimeout = null;
+  let analyzeRefreshRowsInterval = null;
+  let analyzeCountdownIntervalId = null;
+  let analyzeCountdownRemainingSec = 0;
+  let analyzeSortKey = 'views';
+  let analyzeSortDir = 'desc';
+
+  // Time window (hours) for slicing rows
+  const ANALYZE_WINDOW_KEY = 'SORA_UV_ANALYZE_WINDOW_H';
+  let analyzeWindowHours = Math.min(24, Math.max(1, Number(localStorage.getItem(ANALYZE_WINDOW_KEY) || 24)));
+  const ANALYZE_RUN_MS = 10000; // 10 seconds
+
   // Track route to detect same-tab navigation
   const routeKey = () => `${location.pathname}${location.search}`;
   let lastRouteKey = routeKey();
 
   // == Utils ==
-  const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M' :
-    n >= 1e3 ? (n / 1e3).toFixed(n % 1e3 ? 1 : 0) + 'K' : String(n));
+  const fmt = (n) =>
+    n >= 1e6
+      ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M'
+      : n >= 1e3
+      ? (n / 1e3).toFixed(n % 1e3 ? 1 : 0) + 'K'
+      : String(n);
+
+  const fmtInt = (n) => {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return '';
+    return x.toLocaleString('en-US');
+  };
+
+  function truncateInline(str, max = 140) {
+    if (typeof str !== 'string') return '';
+    const s = str.replace(/\s+/g, ' ').trim();
+    return s.length > max ? s.slice(0, max).trim() + '…' : s;
+  }
 
   function fmtAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return '∞';
     const mTotal = Math.max(0, Math.floor(ageMin));
-    const MIN_PER_H = 60, MIN_PER_D = 1440, MIN_PER_Y = 525600;
+    const MIN_PER_H = 60,
+      MIN_PER_D = 1440,
+      MIN_PER_Y = 525600;
     let r = mTotal;
-    const y = Math.floor(r / MIN_PER_Y); r -= y * MIN_PER_Y;
-    const d = Math.floor(r / MIN_PER_D); r -= d * MIN_PER_D;
-    const h = Math.floor(r / MIN_PER_H); r -= h * MIN_PER_H;
+    const y = Math.floor(r / MIN_PER_Y);
+    r -= y * MIN_PER_Y;
+    const d = Math.floor(r / MIN_PER_D);
+    r -= d * MIN_PER_D;
+    const h = Math.floor(r / MIN_PER_H);
+    r -= h * MIN_PER_H;
     const m = r;
     const parts = [];
     if (y) parts.push(`${y}y`);
@@ -78,10 +125,11 @@
     return `${m}m ${s.toString().padStart(2, '0')}s`;
   }
 
-  const minutesSince = (epochSec) => !epochSec ? Infinity : Math.max(0, (Date.now() / 1000 - epochSec) / 60);
+  const minutesSince = (epochSec) => (!epochSec ? Infinity : Math.max(0, (Date.now() / 1000 - epochSec) / 60));
 
   const fmtPct = (num, denom, digits = 1) => {
-    const n = Number(num), d = Number(denom);
+    const n = Number(num),
+      d = Number(denom);
     if (!Number.isFinite(n) || !Number.isFinite(d) || d <= 0) return null;
     return ((n / d) * 100).toFixed(digits) + '%';
   };
@@ -89,23 +137,25 @@
   const likeRate = (likes, unique, views) => {
     const l = Number(likes);
     if (!Number.isFinite(l) || l < 0) return null;
-    const u = Number(unique), v = Number(views);
-    const denom = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(v) && v > 0) ? v : null);
+    const u = Number(unique),
+      v = Number(views);
+    const denom = Number.isFinite(u) && u > 0 ? u : Number.isFinite(v) && v > 0 ? v : null;
     return denom ? fmtPct(l, denom) : null;
   };
 
   const interactionRate = (likes, comments, unique) => {
-    const l = Number(likes), c = Number(comments), u = Number(unique);
+    const l = Number(likes),
+      c = Number(comments),
+      u = Number(unique);
     const sum = (Number.isFinite(l) ? l : 0) + (Number.isFinite(c) ? c : 0);
-    return (Number.isFinite(u) && u > 0) ? fmtPct(sum, u) : null;
+    return Number.isFinite(u) && u > 0 ? fmtPct(sum, u) : null;
   };
 
-  // Remix Rate (remixes / likes)
   function remixRate(likes, remixes) {
     const l = Number(likes);
     const r = Number(remixes);
     if (!Number.isFinite(l) || l <= 0 || !Number.isFinite(r) || r < 0) return null;
-    return fmtPct(r, l);
+    return ((r / l) * 100).toFixed(2);
   }
 
   // == Page type helpers ==
@@ -118,7 +168,9 @@
     try {
       const u = new URL(location.href);
       return u.origin === 'https://sora.chatgpt.com' && u.pathname === '/explore' && u.searchParams.get('feed') === 'top';
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   };
 
   const isFilterHiddenPage = () => {
@@ -141,7 +193,10 @@
     try {
       const p = item?.post ?? item;
       const cands = [p?.like_count, p?.likes_count, p?.likes, p?.stats?.like_count, p?.statistics?.like_count, p?.reactions?.like?.count];
-      for (const v of cands) { const n = Number(v); if (Number.isFinite(n)) return n; }
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
     } catch {}
     return null;
   };
@@ -149,15 +204,29 @@
     try {
       const p = item?.post ?? item;
       const cands = [p?.view_count, p?.views, p?.play_count, p?.impression_count, p?.stats?.view_count, p?.statistics?.view_count];
-      for (const v of cands) { const n = Number(v); if (Number.isFinite(n)) return n; }
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
     } catch {}
     return null;
   };
   const getComments = (item) => {
     try {
       const p = item?.post ?? item;
-      const cands = [p?.comment_count, p?.comments_count, p?.comments, p?.reply_count, p?.replies?.count, p?.stats?.comment_count, p?.statistics?.comment_count];
-      for (const v of cands) { const n = Number(v); if (Number.isFinite(n)) return n; }
+      const cands = [
+        p?.comment_count,
+        p?.comments_count,
+        p?.comments,
+        p?.reply_count,
+        p?.replies?.count,
+        p?.stats?.comment_count,
+        p?.statistics?.comment_count,
+      ];
+    for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
     } catch {}
     return null;
   };
@@ -165,7 +234,10 @@
     try {
       const p = item?.post ?? item;
       const cands = [p?.remix_count, p?.stats?.remix_count, p?.statistics?.remix_count];
-      for (const v of cands) { const n = Number(v); if (Number.isFinite(n)) return n; }
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
     } catch {}
     return null;
   };
@@ -173,7 +245,10 @@
     try {
       const p = item?.post ?? item;
       const cands = [p?.cameo_count, p?.stats?.cameo_count, p?.statistics?.cameo_count];
-      for (const v of cands) { const n = Number(v); if (Number.isFinite(n)) return n; }
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
       const arr = Array.isArray(p?.cameo_profiles) ? p.cameo_profiles : null;
       if (arr) return arr.length;
     } catch {}
@@ -182,40 +257,65 @@
   const getFollowerCount = (item) => {
     try {
       const p = item?.post ?? item;
-      const cands = [item?.profile?.follower_count, item?.user?.follower_count, item?.author?.follower_count,
-        p?.author?.follower_count, p?.owner?.follower_count, item?.owner_profile?.follower_count];
-      for (const v of cands) { const n = Number(v); if (Number.isFinite(n)) return n; }
+      const cands = [
+        item?.profile?.follower_count,
+        item?.user?.follower_count,
+        item?.author?.follower_count,
+        p?.author?.follower_count,
+        p?.owner?.follower_count,
+        item?.owner_profile?.follower_count,
+      ];
+      for (const v of cands) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
     } catch {}
     return null;
   };
   function getOwner(item) {
     try {
       const p = item?.post ?? item;
-      const prof = item?.profile || item?.owner_profile || item?.user || item?.author || p?.author || p?.owner || p?.profile || null;
+      const prof =
+        item?.profile || item?.owner_profile || item?.user || item?.author || p?.author || p?.owner || p?.profile || null;
       let id = p?.shared_by || prof?.user_id || prof?.id || prof?._id || null;
       let handle = prof?.username || prof?.handle || prof?.name || null;
-      return { handle: (typeof handle === 'string' && handle) ? handle : null, id: (typeof id === 'string' && id) ? id : null };
-    } catch { return { handle: null, id: null }; }
+      return { handle: typeof handle === 'string' && handle ? handle : null, id: typeof id === 'string' && id ? id : null };
+    } catch {
+      return { handle: null, id: null };
+    }
   }
   const getThumbnail = (item) => {
     try {
       const p = item?.post ?? item;
       const id = getItemId(item);
       const atts = Array.isArray(p?.attachments) ? p.attachments : null;
-      if (atts) for (const att of atts) {
-        const t = att?.encodings?.thumbnail?.path;
-        if (typeof t === 'string' && /^https?:\/\//.test(t)) { dlog('thumbs', 'picked', { id, source: 'att.encodings.thumbnail', url: t }); return t; }
+      if (atts)
+        for (const att of atts) {
+          const t = att?.encodings?.thumbnail?.path;
+          if (typeof t === 'string' && /^https?:\/\//.test(t)) {
+            dlog('thumbs', 'picked', { id, source: 'att.encodings.thumbnail', url: t });
+            return t;
+          }
+        }
+      if (typeof p?.preview_image_url === 'string' && /^https?:\/\//.test(p.preview_image_url)) {
+        dlog('thumbs', 'picked', { id, source: 'preview_image_url', url: p.preview_image_url });
+        return p.preview_image_url;
       }
-      if (typeof p?.preview_image_url === 'string' && /^https?:\/\//.test(p.preview_image_url)) { dlog('thumbs','picked',{id,source:'preview_image_url',url:p.preview_image_url}); return p.preview_image_url; }
       const pairs = [
-        ['thumbnail_url', p?.thumbnail_url], ['thumb', p?.thumb], ['cover', p?.cover],
+        ['thumbnail_url', p?.thumbnail_url],
+        ['thumb', p?.thumb],
+        ['cover', p?.cover],
         ['image.url|image', p?.image?.url || p?.image],
         ['images[0].url', Array.isArray(p?.images) ? p.images[0]?.url : null],
         ['media.thumb|cover|poster', p?.media?.thumbnail || p?.media?.cover || p?.media?.poster],
         ['assets[0].thumb|url', Array.isArray(p?.assets) ? p.assets[0]?.thumbnail_url || p.assets[0]?.url : null],
         ['poster.url', p?.poster?.url],
       ];
-      for (const [label, u] of pairs) if (typeof u === 'string' && /^https?:\/\//.test(u)) { dlog('thumbs','picked',{id,source:label,url:u}); return u; }
+      for (const [label, u] of pairs)
+        if (typeof u === 'string' && /^https?:\/\//.test(u)) {
+          dlog('thumbs', 'picked', { id, source: label, url: u });
+          return u;
+        }
     } catch {}
     return null;
   };
@@ -244,8 +344,8 @@
     const m = link.getAttribute('href').match(/\/p\/(s_[A-Za-z0-9]+)/i);
     return m ? normalizeId(m[1]) : null;
   };
-  const selectAllCards = () => Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
-    .map(a => a.closest('article,div,section') || a);
+  const selectAllCards = () =>
+    Array.from(document.querySelectorAll('a[href^="/p/s_"]')).map((a) => a.closest('article,div,section') || a);
 
   // == Badge & UI (Feed) ==
   function colorForAgeMin(ageMin) {
@@ -254,9 +354,9 @@
     if (hHours < 0 || hHours >= 18) return null;
     const idx = Math.floor(hHours);
     const t = idx / 17;
-    const h = 0 + (50 * t);
-    const l = 42 - (12 * t);
-    return `hsla(${h.toFixed(1)}, 100%, ${l.toFixed(1)}%, 0.92)`;
+    const h = 0 + 50 * t;
+    const l = 42 - 12 * t;
+    return `hsla(${h.toFixed(1)}, 100%, ${l.toFixed(1)}%, 0.85)`;
   }
   function isNearWholeDay(ageMin, windowMin = 15) {
     if (!Number.isFinite(ageMin) || ageMin < 0) return false;
@@ -274,6 +374,83 @@
     return '';
   }
 
+  // Tooltip (1s delayed, cursor-follow)
+  let sharedTooltip;
+  function getTooltip() {
+    if (sharedTooltip && document.contains(sharedTooltip)) return sharedTooltip;
+    const t = document.createElement('div');
+    t.className = 'sora-uv-tooltip';
+    Object.assign(t.style, {
+      position: 'fixed',
+      padding: '6px 10px',
+      fontSize: '12px',
+      fontWeight: '600',
+      lineHeight: '1',
+      borderRadius: '9999px',
+      background: 'rgba(37,37,37,0.7)',
+      color: '#fff',
+      zIndex: 1000000,
+      pointerEvents: 'none',
+      transform: 'translate(-50%,-110%)',
+      whiteSpace: 'nowrap',
+      display: 'none',
+      boxShadow: 'inset 0 0 1px rgba(0,0,0,0.10), inset 0 0 1px rgba(255,255,255,0.50), 0 2px 20px rgba(0,0,0,0.25)',
+      backdropFilter: 'blur(6px)',
+      WebkitBackdropFilter: 'blur(6px)',
+    });
+    document.documentElement.appendChild(t);
+    sharedTooltip = t;
+    return t;
+  }
+
+  function attachTooltip(el, text, enabled = true) {
+    if (!enabled || !text) return;
+    let timerId = null;
+    let tracking = false;
+    const DELAY_MS = 1000;
+    const OFFSET_Y = 1;
+
+    const move = (e) => {
+      const tip = getTooltip();
+      tip.textContent = text;
+      tip.style.left = `${e.clientX}px`;
+      tip.style.top = `${e.clientY + OFFSET_Y}px`;
+    };
+
+    el.addEventListener('mouseenter', (e) => {
+      timerId = setTimeout(() => {
+        const tip = getTooltip();
+        tip.textContent = text;
+        tip.style.display = 'block';
+        move(e);
+        if (!tracking) {
+          tracking = true;
+          el.addEventListener('mousemove', move);
+        }
+      }, DELAY_MS);
+    });
+
+    const hide = () => {
+      if (timerId) clearTimeout(timerId);
+      const tip = getTooltip();
+      tip.style.display = 'none';
+      if (tracking) {
+        el.removeEventListener('mousemove', move);
+        tracking = false;
+      }
+    };
+
+    el.addEventListener('mouseleave', hide);
+
+    const obs = new MutationObserver(() => {
+      if (!document.contains(el)) {
+        hide();
+        obs.disconnect();
+      }
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
   function ensureBadge(card) {
     let badge = card.querySelector('.sora-uv-badge');
     if (!badge) {
@@ -281,14 +458,53 @@
       badge = document.createElement('div');
       badge.className = 'sora-uv-badge';
       Object.assign(badge.style, {
-        position: 'absolute', top: '6px', left: '6px',
-        padding: '3px 6px', fontSize: '12px', lineHeight: '1', fontWeight: '600',
-        borderRadius: '8px', background: 'rgba(0,0,0,0.72)', color: '#fff',
-        zIndex: 9999, pointerEvents: 'none', backdropFilter: 'blur(2px)',
+        position: 'absolute',
+        top: '6px',
+        left: '6px',
+        display: 'flex',
+        gap: '6px',
+        flexWrap: 'wrap',
+        padding: '4px',
+        fontSize: '12px',
+        lineHeight: '1',
+        fontWeight: '600',
+        borderRadius: '10px',
+        background: 'rgba(0,0,0,0.4)',
+        color: '#fff',
+        zIndex: 9999,
+        pointerEvents: 'auto',
       });
       card.appendChild(badge);
     }
     return badge;
+  }
+
+  function createPill(parent, text, tooltipText, tooltipEnabled = true) {
+    if (!text) return null;
+    const pill = document.createElement('span');
+    pill.className = 'sora-uv-pill';
+    Object.assign(pill.style, {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '4px 8px',
+      borderRadius: '9999px',
+      background: 'rgba(37,37,37,0.7)',
+      color: '#fff',
+      fontSize: '13px',
+      fontWeight: '700',
+      lineHeight: '1.1',
+      userSelect: 'none',
+      whiteSpace: 'nowrap',
+      backdropFilter: 'blur(8px)',
+      WebkitBackdropFilter: 'blur(8px)',
+      boxShadow:
+        'inset 0 0 1px rgba(0,0,0,0.10), inset 0 0 1px rgba(255,255,255,0.50), 0 2px 20px rgba(0,0,0,0.25)',
+    });
+    pill.textContent = text;
+    parent.appendChild(pill);
+    attachTooltip(pill, tooltipText, tooltipEnabled);
+    return pill;
   }
 
   function badgeBgFor(id, meta) {
@@ -310,6 +526,14 @@
     return '';
   }
 
+  function expireEtaTooltip(ageMin) {
+    if (!Number.isFinite(ageMin)) return null;
+    const target = 1440 - 15; // 24h minus 15m
+    const remain = Math.max(0, Math.floor(target - ageMin));
+    const human = fmtAgeMin(remain);
+    return `This gen will graduate from Top in ~${human}!`;
+  }
+
   function addBadge(card, views, meta) {
     if (views == null && !meta) return;
     const badge = ensureBadge(card);
@@ -318,19 +542,55 @@
     const ageMin = meta?.ageMin;
     const isSuperHot = likes >= 50 && Number.isFinite(ageMin) && ageMin < 60;
 
-    const viewsStr = views != null ? `${fmt(views)} views` : null;
-    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
-    const emoji = badgeEmojiFor(id, meta);
-    const ir = interactionRate(idToLikes.get(id), idToComments.get(id), idToUnique.get(id));
-    const irStr = ir ? `${ir} IR` : null;
+    const uv = idToUnique.get(id);
+    const irRaw = interactionRate(idToLikes.get(id), idToComments.get(id), idToUnique.get(id)); // already like "12.3%"
+    const rrRaw = remixRate(idToLikes.get(id), idToRemixes.get(id)); // "12.34" (no %)
 
-    badge.textContent = [viewsStr, irStr, ageStr, emoji].filter(Boolean).join(' • ');
+    // Normalize IR/RR displays
+    const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
+    const rrDisp =
+      rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
+
+    const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
+    const irStr = irDisp ? `${irDisp} IR` : null;
+    const rrStr = rrDisp ? `${rrDisp} RR` : null;
+    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
+    const emojiStr = badgeEmojiFor(id, meta);
+    const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
+
     const bg = badgeBgFor(id, meta);
-    badge.style.background = bg || 'rgba(0,0,0,0.72)';
+    badge.style.background = 'transparent';
+    const pillBg = bg || 'rgba(37,37,37,0.7)';
+
+    const newKey = JSON.stringify([viewsStr, irStr, rrStr, timeEmojiStr, pillBg]);
+    if (badge.dataset.key === newKey) {
+      badge.style.boxShadow = isSuperHot ? '0 0 10px 3px hsla(0, 100%, 50%, 0.7)' : 'none';
+      return;
+    }
+    badge.dataset.key = newKey;
+
+    badge.innerHTML = '';
+    if (viewsStr) {
+      const el = createPill(badge, viewsStr, `${fmtInt(uv)} Unique Views`, true);
+      el.style.background = pillBg;
+    }
+    if (irStr) {
+      const el = createPill(badge, irStr, 'Likes + Comments relative to Unique Views', true);
+      el.style.background = pillBg;
+    }
+    if (rrStr) {
+      const el = createPill(badge, rrStr, 'Total Remixes relative to Likes', true);
+      el.style.background = pillBg;
+    }
+    if (timeEmojiStr) {
+      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
+      const nearDay = isNearWholeDay(ageMin);
+      const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
+      const el = createPill(badge, timeEmojiStr, tipFinal, !!tipFinal);
+      el.style.background = pillBg;
+    }
+
     badge.style.boxShadow = isSuperHot ? '0 0 10px 3px hsla(0, 100%, 50%, 0.7)' : 'none';
-    const note = isNearWholeDay(ageMin) ? 'Green day mark ✅' : (bg ? 'Hot ✅' : '');
-    const ageLabel = ageStr || '∞';
-    badge.title = meta ? `Age: ${ageLabel}${note ? `\n${note}` : ''}` : '';
   }
 
   function renderBadges() {
@@ -345,23 +605,37 @@
     applyFilter();
   }
 
-  // == Detail badge (includes RR) ==
+  // == Detail badge (post page only) ==
   function ensureDetailBadge() {
     if (detailBadgeEl && document.contains(detailBadgeEl)) return detailBadgeEl;
     const el = document.createElement('div');
     el.className = 'sora-uv-badge-detail';
     Object.assign(el.style, {
-      position: 'fixed', top: '12px', left: '12px',
-      padding: '6px 10px', fontSize: '13px', fontWeight: '700',
-      borderRadius: '10px', background: 'rgba(0,0,0,0.75)', color: '#fff',
-      zIndex: 999999, pointerEvents: 'none', backdropFilter: 'blur(2px)',
+      position: 'fixed',
+      top: '12px',
+      left: '12px',
+      padding: '6px 10px',
+      fontSize: '13px',
+      fontWeight: '700',
+      borderRadius: '10px',
+      background: 'rgba(0,0,0,0.75)',
+      color: '#fff',
+      zIndex: 999999,
+      pointerEvents: 'none',
     });
     document.documentElement.appendChild(el);
     detailBadgeEl = el;
     return el;
   }
+
   function renderDetailBadge() {
-    if (!isPost()) { if (detailBadgeEl) { detailBadgeEl.remove(); detailBadgeEl = null; } return; }
+    if (!isPost()) {
+      if (detailBadgeEl) {
+        detailBadgeEl.remove();
+        detailBadgeEl = null;
+      }
+      return;
+    }
     const sid = currentSIdFromURL();
     if (!sid) return;
 
@@ -371,10 +645,12 @@
     const comments = idToComments.get(sid);
     const remixes = idToRemixes.get(sid);
 
-    const ir = interactionRate(likes, comments, uv);
-    const rr = remixRate(likes, remixes);
+    const irRaw = interactionRate(likes, comments, uv); // "12.3%"
+    const rrRaw = remixRate(likes, remixes); // "12.34"
+    const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
+    const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
 
-    if (uv == null && !ir && !rr) return;
+    if (uv == null && !irDisp && !rrDisp) return;
 
     const el = ensureDetailBadge();
     const meta = idToMeta.get(sid);
@@ -383,8 +659,8 @@
 
     const parts = [];
     if (uv != null) parts.push(`${fmt(uv)} views`);
-    if (ir) parts.push(`${ir} IR`);
-    if (rr) parts.push(`${rr} RR`);
+    if (irDisp) parts.push(`${irDisp} IR`);
+    if (rrDisp) parts.push(`${rrDisp} RR`);
     if (Number.isFinite(ageMin)) parts.push(fmtAgeMin(ageMin));
     const emoji = badgeEmojiFor(sid, meta);
     if (emoji) parts.push(emoji);
@@ -394,28 +670,37 @@
     el.style.background = bg || 'rgba(0,0,0,0.75)';
     el.style.boxShadow = isSuperHot ? '0 0 10px 3px hsla(0, 100%, 50%, 0.7)' : 'none';
 
-    const note = isNearWholeDay(ageMin) ? 'Green day mark ✅' : (bg ? 'Hot ✅' : '');
+    const note = isNearWholeDay(ageMin) ? 'Green day mark ✅' : bg ? 'Hot ✅' : '';
     const ageLabel = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : '∞';
     el.title = meta ? `Age: ${ageLabel}${note ? `\n${note}` : ''}` : '';
   }
 
-  // == Profile Impact ==
+  // == Profile Impact (unchanged) ==
   function parseMetricNumber(text) {
     if (typeof text !== 'string') return null;
     let t = text.trim().toUpperCase();
     if (!t) return null;
     let mult = 1;
-    if (t.endsWith('K')) { mult = 1e3; t = t.slice(0, -1); }
-    else if (t.endsWith('M')) { mult = 1e6; t = t.slice(0, -1); }
-    else if (t.endsWith('B')) { mult = 1e9; t = t.slice(0, -1); }
+    if (t.endsWith('K')) {
+      mult = 1e3;
+      t = t.slice(0, -1);
+    } else if (t.endsWith('M')) {
+      mult = 1e6;
+      t = t.slice(0, -1);
+    } else if (t.endsWith('B')) {
+      mult = 1e9;
+      t = t.slice(0, -1);
+    }
     t = t.replace(/[\s,]/g, '');
     const n = Number(t);
     return Number.isFinite(n) ? n * mult : null;
   }
   function formatImpactRatio(likes, followers) {
-    const l = Number(likes), f = Number(followers);
+    const l = Number(likes),
+      f = Number(followers);
     if (!Number.isFinite(l) || !Number.isFinite(f) || f <= 0) return null;
-    const ratio = l / f; const rounded = Math.ceil(ratio * 10) / 10;
+    const ratio = l / f;
+    const rounded = Math.ceil(ratio * 10) / 10;
     return `${rounded.toFixed(1)}x`;
   }
   function removeProfileImpact() {
@@ -423,13 +708,16 @@
     if (existing && existing.parentElement) existing.parentElement.removeChild(existing);
   }
   function renderProfileImpact() {
-    if (!isProfile()) { removeProfileImpact(); return; }
+    if (!isProfile()) {
+      removeProfileImpact();
+      return;
+    }
     const metricsRow = document.querySelector('section div.grid.auto-cols-fr.grid-flow-col');
     if (!metricsRow) return;
 
     const metricLabels = Array.from(metricsRow.querySelectorAll('.text-xs'));
-    const followersLabel = metricLabels.find(el => el.textContent?.trim().toLowerCase() === 'followers');
-    const likesLabel = metricLabels.find(el => el.textContent?.trim().toLowerCase() === 'likes');
+    const followersLabel = metricLabels.find((el) => el.textContent?.trim().toLowerCase() === 'followers');
+    const likesLabel = metricLabels.find((el) => el.textContent?.trim().toLowerCase() === 'likes');
 
     const followersValueEl = followersLabel?.previousElementSibling;
     const likesValueEl = likesLabel?.previousElementSibling;
@@ -447,7 +735,10 @@
     if (!impactText) impactText = formatImpactRatio(likes, followers);
 
     const existing = metricsRow.querySelector('[data-sora-uv-impact]');
-    if (!impactText) { if (existing) existing.remove(); return; }
+    if (!impactText) {
+      if (existing) existing.remove();
+      return;
+    }
 
     if (existing) {
       const valueEl = existing.querySelector('[data-sora-uv-impact-value]');
@@ -478,87 +769,169 @@
     }
   }
 
-  // == Control Bar UI ==
-  function stylBtn(b) {
-    Object.assign(b.style, {
-      background: 'rgba(255,255,255,0.12)', color: '#fff',
-      border: '1px solid rgba(255,255,255,0.2)', borderRadius: '8px',
-      padding: '4px 8px', cursor: 'pointer'
-    });
-    b.onmouseenter = () => { if (b.dataset.gathering === 'true' || b.disabled) return; b.style.background = 'rgba(255,255,255,0.2)'; };
-    b.onmouseleave = () => { if (b.dataset.gathering === 'true' || b.disabled) return; b.style.background = 'rgba(255,255,255,0.12)'; };
+  function makePill(btn, label) {
+    // inject shared CSS once
+    if (!document.getElementById('sora-uv-btn-style')) {
+      const st = document.createElement('style');
+      st.id = 'sora-uv-btn-style';
+      st.textContent = `
+        .sora-uv-btn{
+          display:inline-flex;align-items:center;justify-content:center;height:40px;
+          border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.10);
+          font-size:16px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;user-select:none;
+          background:rgba(29,29,29,0.78);color:#fff;
+          box-shadow:inset 0 0 1px rgba(255,255,255,0.08),0 1px 10px rgba(0,0,0,0.30);
+          backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+          transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease,opacity 120ms ease;
+        }
+        .sora-uv-btn:hover{ background:rgba(29,29,29,0.88) }
+        .sora-uv-btn[disabled]{ opacity:.5; cursor:not-allowed }
+        .sora-uv-btn[data-active="true"]{
+          background:hsla(120,60%,30%,.90);
+          border:1px solid hsla(120,60%,40%,.90);
+          box-shadow:0 0 10px 3px hsla(120,60%,35%,.45);
+        }
+        .sora-uv-btn[data-active="true"]:hover{
+          background:hsla(120,60%,32%,.95);
+        }
+      `;
+      document.head.appendChild(st);
+    }
+
+    // reset + label
+    while (btn.firstChild) btn.removeChild(btn.firstChild);
+    const span = document.createElement('span');
+    span.textContent = label;
+    btn.appendChild(span);
+
+    // base attrs
+    btn.type = 'button';
+    btn.setAttribute('role', 'combobox');
+    btn.setAttribute('aria-expanded', 'false');
+    btn.setAttribute('aria-autocomplete', 'none');
+    btn.dataset.state = 'closed';
+
+    // apply class; CSS handles normal/hover/active
+    btn.classList.add('sora-uv-btn');
+
+    // helpers
+    btn._labelSpan = span;
+    btn.setLabel = (t) => {
+      btn._labelSpan.textContent = t;
+    };
+    btn.setActive = (on) => {
+      btn.dataset.active = on ? 'true' : 'false';
+    };
+
+    return btn;
   }
 
   function ensureControlBar() {
+    // Make sure the shared .sora-uv-btn styles exist even if we early-return
+    if (!document.getElementById('sora-uv-btn-style')) {
+      // leverage makePill's injector by creating a throwaway button once
+      makePill(document.createElement('button'), '');
+    }
+
     if (controlBar && document.contains(controlBar)) return controlBar;
 
     const bar = document.createElement('div');
     bar.className = 'sora-uv-controls';
     Object.assign(bar.style, {
-      position: 'fixed', top: '12px', right: '12px', zIndex: 999999,
-      display: 'flex', gap: '8px', padding: '6px 8px', borderRadius: '10px',
-      background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: '12px',
-      alignItems: 'center', backdropFilter: 'blur(2px)', userSelect: 'none', flexDirection: 'column'
+      position: 'fixed',
+      top: '12px',
+      right: '12px',
+      zIndex: 2147483647,
+      display: 'flex',
+      gap: '8px',
+      padding: '0',
+      borderRadius: '0',
+      background: 'transparent',
+      color: '#fff',
+      fontSize: '12px',
+      alignItems: 'center',
+      userSelect: 'none',
+      flexDirection: 'column',
     });
 
-    const buttonContainer = document.createElement('div');
-    buttonContainer.style.display = 'flex';
-    buttonContainer.style.gap = '8px';
+    const buttonRow = document.createElement('div');
+    Object.assign(buttonRow.style, { display: 'flex', gap: '8px', background: 'transparent' });
 
-    // Prefs
+    // prefs
     let prefs = getPrefs();
-    if (typeof prefs.gatherSpeed !== 'string') { prefs.gatherSpeed = '0'; setPrefs(prefs); }
+    if (typeof prefs.gatherSpeed !== 'string') {
+      prefs.gatherSpeed = '0';
+      setPrefs(prefs);
+    }
 
-    // Tab session: ALWAYS start fresh on creation
-    let sessionState = getGatherState();
-    sessionState = { filterIndex: 0, isGathering: false };
-    setGatherState(sessionState);
+    // new tab session
+    setGatherState({ filterIndex: 0, isGathering: false });
     isGatheringActiveThisTab = false;
 
+    // --- Helper to disable with visual cues + block hover/click ---
+    function setDisabled(btn, on) {
+      if (!btn) return;
+      btn.disabled = !!on;
+      btn.style.opacity = on ? '0.5' : '1';
+      btn.style.cursor = on ? 'not-allowed' : 'pointer';
+      btn.style.pointerEvents = on ? 'none' : 'auto';
+    }
+
+    // Filter
     const filterBtn = document.createElement('button');
-    stylBtn(filterBtn);
+    filterBtn.setAttribute('data-role', 'filter-btn');
+    makePill(filterBtn, 'Filter');
+    buttonRow.appendChild(filterBtn);
 
-    bar.updateFilterLabel = function () {
-      const s = getGatherState();
-      const idx = s.filterIndex ?? 0;
-      filterBtn.textContent = FILTER_LABELS[idx];
-    };
-    bar.updateFilterLabel();
-
-    filterBtn.onclick = () => {
-      const s = getGatherState();
-      s.filterIndex = ((s.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
-      setGatherState(s);
-      bar.updateFilterLabel();
-      applyFilter();
-    };
-    buttonContainer.appendChild(filterBtn);
-
+    // Gather
     const gatherBtn = document.createElement('button');
     gatherBtn.className = 'sora-uv-gather-btn';
     gatherBtn.dataset.gathering = 'false';
-    stylBtn(gatherBtn);
-    buttonContainer.appendChild(gatherBtn);
+    makePill(gatherBtn, 'Gather');
+    buttonRow.appendChild(gatherBtn);
 
-    bar.appendChild(buttonContainer);
+    // Analyze (Top only; visibility handled later)
+    analyzeBtn = document.createElement('button');
+    analyzeBtn.className = 'sora-uv-analyze-btn';
+    makePill(analyzeBtn, 'Analyze');
+    analyzeBtn.style.display = 'none';
+    buttonRow.appendChild(analyzeBtn);
 
+    bar.appendChild(buttonRow);
+
+    // Gather controls
     const gatherControlsWrapper = document.createElement('div');
     gatherControlsWrapper.className = 'sora-uv-gather-controls-wrapper';
     Object.assign(gatherControlsWrapper.style, {
-      display: 'none', flexDirection: 'column', width: '100%', gap: '6px', alignItems: 'center',
+      display: 'none',
+      flexDirection: 'column',
+      width: '100%',
+      gap: '6px',
+      alignItems: 'center',
+      background: 'transparent',
     });
 
     const sliderContainer = document.createElement('div');
     sliderContainer.className = 'sora-uv-slider-container';
     Object.assign(sliderContainer.style, {
-      display: 'flex', width: '100%', alignItems: 'center', gap: '5px',
+      display: 'flex',
+      width: '100%',
+      alignItems: 'center',
+      gap: '5px',
+      background: 'transparent',
     });
 
-    const emojiTurtle = document.createElement('span'); emojiTurtle.textContent = '🐢';
+    const emojiTurtle = document.createElement('span');
+    emojiTurtle.textContent = '🐢';
     const slider = document.createElement('input');
-    slider.type = 'range'; slider.min = '0'; slider.max = '100'; slider.step = '1';
-    slider.value = getPrefs().gatherSpeed; slider.style.flexGrow = '1';
-    const emojiRabbit = document.createElement('span'); emojiRabbit.textContent = '🐇';
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '100';
+    slider.step = '1';
+    slider.value = getPrefs().gatherSpeed;
+    slider.style.flexGrow = '1';
+    const emojiRabbit = document.createElement('span');
+    emojiRabbit.textContent = '🐇';
 
     sliderContainer.appendChild(emojiTurtle);
     sliderContainer.appendChild(slider);
@@ -568,7 +941,12 @@
     const refreshTimerDisplay = document.createElement('div');
     refreshTimerDisplay.className = 'sora-uv-refresh-timer';
     Object.assign(refreshTimerDisplay.style, {
-      width: '100%', textAlign: 'center', fontSize: '11px', color: 'rgba(255, 255, 255, 0.7)', lineHeight: '1',
+      width: '100%',
+      textAlign: 'center',
+      fontSize: '11px',
+      color: 'rgba(255, 255, 255, 0.7)',
+      lineHeight: '1',
+      background: 'transparent',
     });
     gatherControlsWrapper.appendChild(refreshTimerDisplay);
     gatherTimerEl = refreshTimerDisplay;
@@ -576,64 +954,1016 @@
     bar.appendChild(gatherControlsWrapper);
 
     const onSliderChange = () => {
-      let p = getPrefs(); p.gatherSpeed = slider.value; setPrefs(p);
+      let p = getPrefs();
+      p.gatherSpeed = slider.value;
+      setPrefs(p);
       if (isGatheringActiveThisTab) startGathering(true);
     };
     slider.addEventListener('input', onSliderChange);
 
-    bar.updateGatherState = function () {
-      const filterBtnEl = filterBtn;
+    // ----- Filter lock logic -----
+    function applyFilterLockState() {
+      // Don't touch buttons while Gather is on
+      if (isGatheringActiveThisTab) return;
+
+      const s = getGatherState();
+      const idx = s.filterIndex ?? 0;
+      const filterActive = idx > 0;
+
+      // Filter button "active" green when any filter is applied
+      if (typeof filterBtn.setActive === 'function') filterBtn.setActive(filterActive);
+
+      // Lock Gather & Analyze when filter is on
+      setDisabled(gatherBtn, filterActive);
+      setDisabled(analyzeBtn, filterActive);
+    }
+
+    // Label + lock in one place so we can call from multiple flows
+    bar.updateFilterLabel = () => {
+      const s = getGatherState();
+      const idx = s.filterIndex ?? 0;
+      filterBtn.setLabel(FILTER_LABELS[idx]);
+
+      // Only apply filter-lock when NOT gathering; otherwise we’d re-enable Analyze mid-gather
+      if (!isGatheringActiveThisTab) applyFilterLockState();
+    };
+
+    // Wire Filter button
+    filterBtn.onclick = () => {
+      if (filterBtn.disabled) return; // safety
+      const s = getGatherState();
+      s.filterIndex = ((s.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
+      setGatherState(s);
+      bar.updateFilterLabel();
+      applyFilter();
+    };
+
+    // Guard clicks on disabled buttons
+    gatherBtn.onclick = () => {
+      if (gatherBtn.disabled) return;
+      isGatheringActiveThisTab = !isGatheringActiveThisTab;
+      const s = getGatherState();
+      s.isGathering = isGatheringActiveThisTab;
+      if (!isGatheringActiveThisTab) {
+        delete s.refreshDeadline;
+      } else {
+        s.filterIndex = 0; // clear filter when starting Gather (optional)
+      }
+      setGatherState(s);
+      bar.updateGatherState();
+      if (isGatheringActiveThisTab) {
+        bar.updateFilterLabel();
+        applyFilter();
+      }
+    };
+
+    analyzeBtn.onclick = () => {
+      if (analyzeBtn.disabled) return;
+      toggleAnalyzeMode();
+    };
+
+    bar.updateGatherState = () => {
+      const filterLockActive = (getGatherState().filterIndex ?? 0) > 0;
 
       if (isGatheringActiveThisTab) {
-        gatherBtn.textContent = 'Gathering...';
-        gatherBtn.style.background = 'hsla(120, 60%, 30%, 0.9)';
+        // Gather ON
+        gatherBtn.setLabel('Gathering...');
         gatherBtn.dataset.gathering = 'true';
-        if (filterBtnEl) { filterBtnEl.disabled = true; filterBtnEl.style.opacity = '0.5'; filterBtnEl.style.cursor = 'not-allowed'; }
+        gatherBtn.setActive(true);
+
+        // Hide & hard-disable Analyze while gathering
+        if (analyzeBtn) {
+          analyzeBtn.style.display = 'none';
+          setDisabled(analyzeBtn, true);
+        }
+
+        // Disable Filter during gather
+        setDisabled(filterBtn, true);
 
         if (isProfile()) {
           gatherControlsWrapper.style.display = 'flex';
-          if (sliderContainer) sliderContainer.style.display = 'flex';
+          sliderContainer.style.display = 'flex';
         } else if (isTopFeed()) {
           gatherControlsWrapper.style.display = 'flex';
-          if (sliderContainer) sliderContainer.style.display = 'none';
+          sliderContainer.style.display = 'none';
         }
 
         startGathering(false);
         if (!gatherCountdownIntervalId) gatherCountdownIntervalId = setInterval(updateCountdownDisplay, 1000);
       } else {
-        gatherBtn.textContent = 'Gather';
-        gatherBtn.style.background = 'rgba(255,255,255,0.12)';
+        // Gather OFF
+        gatherBtn.setLabel('Gather');
         gatherBtn.dataset.gathering = 'false';
-        if (filterBtnEl) { filterBtnEl.disabled = false; filterBtnEl.style.opacity = '1'; filterBtnEl.style.cursor = 'pointer'; }
+        gatherBtn.setActive(false);
 
-        stopGathering(false);
+        // Re-enable Filter, then apply Filter-lock (may disable Gather/Analyze if a filter is set)
+        setDisabled(filterBtn, false);
         gatherControlsWrapper.style.display = 'none';
+        stopGathering(false);
+
+        // Restore Analyze visibility (Top feed only); then apply lock
+        if (analyzeBtn) {
+          analyzeBtn.style.display = isTopFeed() ? '' : 'none';
+          setDisabled(analyzeBtn, filterLockActive);
+        }
+
+        setDisabled(gatherBtn, filterLockActive);
+        if (typeof filterBtn.setActive === 'function') filterBtn.setActive(filterLockActive);
       }
 
+      // Update label text; applyFilterLockState will no-op while gathering
       if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
     };
 
-    gatherBtn.onclick = () => {
-      isGatheringActiveThisTab = !isGatheringActiveThisTab;
-      let sState = getGatherState();
-      sState.isGathering = isGatheringActiveThisTab;
-      if (!isGatheringActiveThisTab) {
-        delete sState.refreshDeadline;
-      } else {
-        sState.filterIndex = 0; // starting gather resets filter to All
-      }
-      setGatherState(sState);
-      bar.updateGatherState();
-      if (isGatheringActiveThisTab) { bar.updateFilterLabel(); applyFilter(); }
-    };
+    // Initial label + lock application
+    bar.updateFilterLabel();
 
     document.documentElement.appendChild(bar);
     controlBar = bar;
     return bar;
   }
 
+  // ========================== STORAGE HELPERS ================================
+  function __sorauv_toTs(v) {
+    if (typeof v === 'number' && isFinite(v)) return v < 1e11 ? v * 1000 : v;
+    if (typeof v === 'string' && v.trim()) {
+      const s = v.trim();
+      if (/^\d+$/.test(s)) {
+        const n = Number(s);
+        return n < 1e11 ? n * 1000 : n;
+      }
+      const d = Date.parse(s);
+      if (!isNaN(d)) return d;
+    }
+    return 0;
+  }
+  function __sorauv_getPostTimeStrict(p) {
+    const cands = [p?.post_time, p?.postTime, p?.post?.post_time, p?.post?.postTime, p?.meta?.post_time];
+    for (const c of cands) {
+      const t = __sorauv_toTs(c);
+      if (t) return t;
+    }
+    return 0;
+  }
+  function __sorauv_latestSnapshot(snaps) {
+    if (!Array.isArray(snaps) || snaps.length === 0) return null;
+    const last = snaps[snaps.length - 1];
+    if (last?.t != null) return last;
+    let best = null,
+      bt = -Infinity;
+    for (const s of snaps) {
+      const t = Number(s?.t);
+      if (isFinite(t) && t > bt) {
+        bt = t;
+        best = s;
+      }
+    }
+    return best || last || null;
+  }
+
+  let _metricsInFlight = null,
+    _metricsCache = null,
+    _metricsTs = 0;
+
+  async function requestStoredMetrics() {
+    const now = Date.now();
+    if (_metricsInFlight) return _metricsInFlight;
+    if (_metricsCache && now - _metricsTs < 1000) return _metricsCache; // 1s cache
+
+    _metricsInFlight = new Promise((resolve) => {
+      const token = Math.random().toString(36).slice(2);
+      const onReply = (ev) => {
+        const d = ev?.data;
+        if (!d || d.__sora_uv__ !== true || d.type !== 'metrics_response' || d.req !== token) return;
+        window.removeEventListener('message', onReply);
+        _metricsInFlight = null;
+        _metricsCache = d.metrics || { users: {} };
+        _metricsTs = Date.now();
+        resolve(_metricsCache);
+      };
+      window.addEventListener('message', onReply);
+      window.postMessage({ __sora_uv__: true, type: 'metrics_request', req: token }, '*');
+      setTimeout(() => {
+        // timeout safety
+        window.removeEventListener('message', onReply);
+        _metricsInFlight = null;
+        resolve(_metricsCache || { users: {} });
+      }, 2000);
+    });
+    return _metricsInFlight;
+  }
+
+  async function collectAnalyzeRowsFromStorage() {
+    const metrics = await requestStoredMetrics();
+    const rows = [];
+    const NOW = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    for (const [, user] of Object.entries(metrics?.users || {})) {
+      for (const [pid, p] of Object.entries(user?.posts || {})) {
+        const tPost = __sorauv_getPostTimeStrict(p);
+        if (!tPost || NOW - tPost > DAY_MS) continue;
+
+        const snap = __sorauv_latestSnapshot(p?.snapshots);
+        if (!snap) continue;
+        const likes = Number(snap.likes);
+        if (!isFinite(likes) || likes < 20) continue;
+
+        const uv = Number(snap.uv);
+        const comments = Number(snap.comments);
+        const remixes = Number(snap.remix_count ?? snap.remixes);
+
+        const rrVal =
+          isFinite(likes) && likes > 0 && isFinite(remixes) && remixes >= 0 ? (remixes / likes) * 100 : null;
+        const irVal = isFinite(uv) && uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
+
+        const ageMin = Math.max(0, Math.floor((NOW - tPost) / 60000));
+        const expiringMin = Math.max(0, 1440 - ageMin);
+
+        const caption =
+          typeof p?.caption === 'string' && p.caption ? p.caption : typeof p?.text === 'string' && p.text ? p.text : '';
+
+        // pull owner handle if present in user or post node
+        const ownerHandle =
+          typeof user?.userHandle === 'string' && user.userHandle
+            ? user.userHandle
+            : typeof user?.handle === 'string' && user.handle
+            ? user.handle
+            : typeof p?.userHandle === 'string' && p.userHandle
+            ? p.userHandle
+            : '';
+
+        const rrPctStr = rrVal == null ? '' : rrVal === 0 ? '0%' : rrVal.toFixed(2).replace(/\.00$/, '') + '%';
+        const irPctStr = irVal == null ? '' : irVal === 0 ? '0%' : irVal.toFixed(1).replace(/\.0$/, '') + '%';
+
+        rows.push({
+          id: pid,
+          url: p.url ? p.url : `${location.origin}/p/${pid}`,
+          ownerHandle,
+          views: isFinite(uv) ? uv : 0,
+          likes: isFinite(likes) ? likes : 0,
+          remixes: isFinite(remixes) ? remixes : 0,
+          comments: isFinite(comments) ? comments : 0,
+          rrPctStr,
+          rrPctVal: rrVal == null ? -1 : rrVal,
+          irPctStr,
+          irPctVal: irVal == null ? -1 : irVal,
+          expiringMin,
+          caption,
+        });
+      }
+    }
+    if (DEBUG.analyze) dlog('analyze', 'rows from storage', rows.length);
+    return rows;
+  }
+
+  function collectAnalyzeRowsFromLiveMaps() {
+    const rows = [];
+    for (const [id, likes] of idToLikes.entries()) {
+      const meta = idToMeta.get(id);
+      const ageMin = meta?.ageMin;
+      if (!Number.isFinite(ageMin) || ageMin > 1440) continue;
+      if (!Number.isFinite(likes) || likes < 20) continue;
+
+      const uv = Number(idToUnique.get(id) ?? 0);
+      const comments = Number(idToComments.get(id) ?? 0);
+      const remixes = Number(idToRemixes.get(id) ?? 0);
+
+      const rrRaw = remixRate(likes, remixes); // "12.34" or null
+      const rrPctStr = rrRaw == null ? '' : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
+      const rrPctVal = rrRaw == null ? -1 : +rrRaw;
+
+      const irVal = uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
+      const irPctStr = irVal == null ? '' : irVal === 0 ? '0%' : irVal.toFixed(1).replace(/\.0$/, '') + '%';
+
+      const expiringMin = Math.max(0, 1440 - Math.floor(ageMin));
+
+      rows.push({
+        id,
+        url: `${location.origin}/p/${id}`,
+        ownerHandle: typeof meta?.userHandle === 'string' && meta.userHandle ? meta.userHandle : '',
+        views: uv || 0,
+        likes: Number(likes) || 0,
+        remixes: remixes || 0,
+        comments: comments || 0,
+        rrPctStr,
+        rrPctVal,
+        irPctStr,
+        irPctVal: irVal == null ? -1 : irVal,
+        expiringMin,
+        caption: '', // live map path doesn’t retain caption reliably
+      });
+    }
+    if (DEBUG.analyze) dlog('analyze', 'rows from live maps', rows.length);
+    return rows;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Overlay creator – table header sticks to the top of the overlay viewport
+  // ---------------------------------------------------------------------------
+  function ensureAnalyzeOverlay() {
+    if (analyzeOverlayEl && document.contains(analyzeOverlayEl)) return analyzeOverlayEl;
+
+    // ===== Overlay (page dimmer) =====
+    const ov = document.createElement('div');
+    ov.className = 'sora-uv-analyze-overlay';
+    Object.assign(ov.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: 2147483646,
+      background: 'rgba(12,14,20,0.45)',
+      backdropFilter: 'blur(10px)',
+      WebkitBackdropFilter: 'blur(10px)',
+      color: '#fff',
+      display: 'none', // shown in enterAnalyzeMode()
+      overflow: 'auto', // this is the scroll container for sticky
+    });
+
+    // scrollbars off (once)
+    if (!ov.querySelector('#sora-uv-hide-scroll')) {
+      const st = document.createElement('style');
+      st.id = 'sora-uv-hide-scroll';
+      st.textContent = `
+      .sora-uv-analyze-overlay {scrollbar-width:none;-ms-overflow-style:none;}
+      .sora-uv-analyze-overlay::-webkit-scrollbar {width:0;height:0}
+      .sora-uv-analyze-overlay *::-webkit-scrollbar {width:0;height:0}
+    `;
+      ov.appendChild(st);
+    }
+
+    // ===== Outer wrapper =====
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, {
+      maxWidth: '1400px',
+      margin: '24px auto',
+      padding: '0 16px 40px',
+    });
+    ov.appendChild(wrap);
+
+    // ===== Panel =====
+    const panel = document.createElement('div');
+    Object.assign(panel.style, {
+      position: 'relative',
+      borderRadius: '24px',
+      padding: '16px',
+      border: '1px solid rgba(255,255,255,0.12)',
+      boxShadow: '0 6px 28px rgba(0,0,0,0.35)',
+      background: 'transparent',
+      isolation: 'isolate',
+    });
+    wrap.appendChild(panel);
+    ov._panel = panel; // for sticky-top calculations later (kept for compatibility)
+
+    // click-off to close
+    ov.addEventListener('mousedown', (e) => {
+      if (!panel.contains(e.target)) {
+        e.preventDefault();
+        exitAnalyzeMode();
+      }
+    });
+
+    // glassy background layers
+    const glass = document.createElement('div');
+    Object.assign(glass.style, {
+      position: 'absolute',
+      inset: 0,
+      borderRadius: '24px',
+      pointerEvents: 'none',
+      background: 'rgba(20,20,20,0.70)',
+      backdropFilter: 'blur(20px) saturate(120%)',
+      WebkitBackdropFilter: 'blur(20px) saturate(120%)',
+      willChange: 'transform, backdrop-filter',
+      transform: 'translateZ(0)',
+      zIndex: 0,
+    });
+    panel.appendChild(glass);
+
+    const veil = document.createElement('div');
+    Object.assign(veil.style, {
+      position: 'absolute',
+      inset: 0,
+      borderRadius: '24px',
+      pointerEvents: 'none',
+      background: 'rgba(0,0,0,0.06)',
+      zIndex: 1,
+    });
+    panel.appendChild(veil);
+
+    const ring = document.createElement('div');
+    Object.assign(ring.style, {
+      position: 'absolute',
+      inset: 0,
+      borderRadius: '24px',
+      pointerEvents: 'none',
+      boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.08)',
+      zIndex: 2,
+    });
+    panel.appendChild(ring);
+
+    // ===== Header =====
+    const headerBox = document.createElement('div');
+    Object.assign(headerBox.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-start',
+      gap: '10px',
+      marginBottom: '12px',
+      position: 'relative',
+      zIndex: 3,
+    });
+
+    const h1 = document.createElement('h1');
+    h1.textContent = "Today's Top Insights";
+    Object.assign(h1.style, { fontSize: '22px', fontWeight: '800', margin: 0 });
+
+    analyzeHeaderTextEl = document.createElement('div');
+    Object.assign(analyzeHeaderTextEl.style, {
+      fontSize: '15px',
+      fontWeight: '600',
+      opacity: 0.9,
+      color: 'rgba(255,255,255,0.9)',
+      margin: 0,
+    });
+
+    headerBox.appendChild(h1);
+    headerBox.appendChild(analyzeHeaderTextEl);
+    panel.appendChild(headerBox);
+
+    // ===== Range-slider row =====
+    analyzeSliderWrap = document.createElement('div');
+    Object.assign(analyzeSliderWrap.style, {
+      width: '100%',
+      display: 'none',
+      alignItems: 'center',
+      gap: '10px',
+      padding: '10px 12px',
+      borderRadius: '14px',
+      background: 'rgba(16,18,24,0.55)',
+      border: '1px solid rgba(255,255,255,0.10)',
+      boxShadow: '0 6px 20px rgba(0,0,0,0.30), inset 0 0 1px rgba(255,255,255,0.18)',
+      isolation: 'isolate',
+      position: 'relative',
+      margin: '4px 0 10px',
+      zIndex: 3,
+    });
+    panel.appendChild(analyzeSliderWrap);
+
+    // -- label + slider guts --
+    const lbl = document.createElement('div');
+    lbl.textContent = 'Range';
+    Object.assign(lbl.style, { fontWeight: 800, fontSize: '13px', opacity: 0.9, minWidth: '64px' });
+
+    const track = document.createElement('div');
+    Object.assign(track.style, {
+      position: 'relative',
+      flex: '1 1 auto',
+      height: '20px',
+      display: 'flex',
+      alignItems: 'center',
+    });
+
+    const trackBar = document.createElement('div');
+    Object.assign(trackBar.style, {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      height: '8px',
+      borderRadius: '9999px',
+      background: 'rgba(255,255,255,0.85)',
+      pointerEvents: 'none',
+    });
+
+    const fillBar = document.createElement('div');
+    Object.assign(fillBar.style, {
+      position: 'absolute',
+      left: 0,
+      height: '8px',
+      borderRadius: '9999px',
+      background: 'hsla(120,60%,30%,0.95)',
+      width: '0%',
+      pointerEvents: 'none',
+    });
+
+    const rangeInput = document.createElement('input');
+    rangeInput.type = 'range';
+    rangeInput.min = '1';
+    rangeInput.max = '24';
+    rangeInput.step = '1';
+    rangeInput.value = String(analyzeWindowHours);
+    Object.assign(rangeInput.style, {
+      appearance: 'none',
+      WebkitAppearance: 'none',
+      width: '100%',
+      height: '20px',
+      background: 'transparent',
+      outline: 'none',
+      zIndex: 1,
+    });
+
+    if (!ov.querySelector('#sora-uv-range-thumb')) {
+      const thumbStyle = document.createElement('style');
+      thumbStyle.id = 'sora-uv-range-thumb';
+      thumbStyle.textContent = `
+      .sora-uv-analyze-overlay input[type="range"]::-webkit-slider-thumb{
+        appearance:none;-webkit-appearance:none;width:18px;height:18px;border-radius:50%;
+        background:hsla(120,60%,30%,1);border:2px solid hsla(120,60%,40%,1);
+        box-shadow:0 0 0 2px rgba(0,0,0,0.15),0 6px 14px rgba(0,0,0,0.30);
+      }
+      .sora-uv-analyze-overlay input[type="range"]::-moz-range-thumb{
+        width:18px;height:18px;border-radius:50%;
+        background:hsla(120,60%,30%,1);border:2px solid hsla(120,60%,40%,1);
+        box-shadow:0 0 0 2px rgba(0,0,0,0.15),0 6px 14px rgba(0,0,0,0.30);
+      }
+      .sora-uv-analyze-overlay input[type="range"]::-webkit-slider-runnable-track{background:transparent;}
+      .sora-uv-analyze-overlay input[type="range"]::-moz-range-track{background:transparent;}
+    `;
+      ov.appendChild(thumbStyle);
+    }
+
+    const pill = document.createElement('div');
+    Object.assign(pill.style, {
+      padding: '6px 10px',
+      borderRadius: '9999px',
+      background: 'hsla(120,60%,30%,0.85)',
+      border: '1px solid hsla(120,60%,40%,0.9)',
+      boxShadow: '0 0 10px 3px hsla(120,60%,35%,0.35)',
+      fontWeight: 800,
+      fontSize: '12px',
+      whiteSpace: 'nowrap',
+      zIndex: 2,
+      cursor: 'pointer',
+    });
+
+    const updateSliderUI = () => {
+      const val = Number(rangeInput.value) || 1;
+      pill.textContent = val === 1 ? '1 hour' : `${val} hours`;
+      const pct = ((val - 1) / 23) * 100;
+      fillBar.style.width = Math.min(99.6, Math.max(0, pct)) + '%';
+    };
+    updateSliderUI();
+
+    pill.onclick = () => {
+      rangeInput.value = '24';
+      analyzeWindowHours = 24;
+      localStorage.setItem('SORA_UV_ANALYZE_WINDOW_H', '24');
+      updateSliderUI();
+      renderAnalyzeTable(true);
+    };
+    rangeInput.oninput = () => {
+      analyzeWindowHours = Math.min(24, Math.max(1, Number(rangeInput.value) || 24));
+      localStorage.setItem('SORA_UV_ANALYZE_WINDOW_H', String(analyzeWindowHours));
+      updateSliderUI();
+      renderAnalyzeTable(true);
+    };
+
+    track.appendChild(trackBar);
+    track.appendChild(fillBar);
+    track.appendChild(rangeInput);
+
+    analyzeSliderWrap.appendChild(lbl);
+    analyzeSliderWrap.appendChild(track);
+    analyzeSliderWrap.appendChild(pill);
+
+    // ===== TABLE (rounded; header sticks) =====
+    analyzeTableEl = document.createElement('table');
+    Object.assign(analyzeTableEl.style, {
+      width: '100%',
+      borderCollapse: 'separate',
+      borderSpacing: 0,
+      fontSize: '13px',
+      background: 'transparent',
+      tableLayout: 'fixed',
+      position: 'relative',
+      borderRadius: '14px',
+    });
+    panel.appendChild(analyzeTableEl);
+
+    // --- sticky-top offset: force to 0 so header sticks only at the real viewport top ---
+    function recomputeAnalyzeSticky() {
+      ov.style.setProperty('--analyze-sticky-top', '0px');
+    }
+    ov._recomputeSticky = recomputeAnalyzeSticky;
+
+    const ro = new ResizeObserver(() => recomputeAnalyzeSticky());
+    ov._stickyRO = ro;
+    ro.observe(panel);
+    ro.observe(headerBox);
+    ro.observe(analyzeSliderWrap);
+    window.addEventListener('resize', recomputeAnalyzeSticky);
+    requestAnimationFrame(recomputeAnalyzeSticky);
+
+    document.documentElement.appendChild(ov);
+    analyzeOverlayEl = ov;
+    return ov;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Build table header – sticky to the overlay viewport top, no rounded corners
+  // ---------------------------------------------------------------------------
+  function buildAnalyzeHeaderIfNeeded() {
+    const table = analyzeTableEl;
+    if (!table) return;
+
+    // remove any old external header
+    const legacy = document.querySelector('.sora-uv-sticky-head');
+    if (legacy) legacy.remove();
+
+    // ensure single <thead>; drop extras
+    const allHeads = Array.from(table.querySelectorAll('thead'));
+    const existing = allHeads.shift();
+    allHeads.forEach((h) => h.remove());
+
+    // ensure a <colgroup> once
+    if (!table.querySelector('colgroup')) {
+      const cg = document.createElement('colgroup');
+
+      const colPost = document.createElement('col');
+      colPost.style.width = 'auto';
+      colPost.style.minWidth = '140px';
+      cg.appendChild(colPost);
+
+      ['100px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
+        const c = document.createElement('col');
+        c.style.width = w;
+        c.style.maxWidth = w;
+        cg.appendChild(c);
+      });
+
+      table.insertBefore(cg, table.firstChild);
+    }
+
+    // build header if needed
+    let thead = existing;
+    if (!thead) {
+      thead = document.createElement('thead');
+      const tr = document.createElement('tr');
+      [
+        ['post', 'Post'],
+        ['views', 'Views'],
+        ['likes', '👍'],
+        ['remixes', '🌀'],
+        ['comments', '💬'],
+        ['rr', 'RR %'],
+        ['ir', 'IR %'],
+        ['expiring', 'Expires'],
+      ].forEach(([key, label]) => {
+        const th = document.createElement('th');
+        th.dataset.key = key;
+        th.textContent = label;
+        Object.assign(th.style, {
+          background: 'rgba(18,20,24,0.88)',
+          textAlign: key === 'post' ? 'left' : 'right',
+          padding: '10px 12px',
+          cursor: 'pointer',
+          fontWeight: '800',
+          userSelect: 'none',
+          position: 'sticky',
+          top: 'var(--analyze-sticky-top,0)',
+          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          zIndex: 12,
+          // no rounded corners on header cells:
+          borderRadius: '0',
+          borderTopLeftRadius: '0',
+          borderTopRightRadius: '0',
+        });
+        th.onclick = () => {
+          analyzeSortDir = analyzeSortKey === key && analyzeSortDir === 'asc' ? 'desc' : 'asc';
+          analyzeSortKey = key;
+          updateAnalyzeHeaderSortIndicators();
+          renderAnalyzeTable(true);
+        };
+        tr.appendChild(th);
+      });
+      thead.appendChild(tr);
+    }
+
+    // place header before first tbody
+    const firstBody = table.querySelector('tbody');
+    table.insertBefore(thead, firstBody);
+
+    // sticky + blur and square edges on thead itself
+    Object.assign(thead.style, {
+      position: 'sticky',
+      top: 'var(--analyze-sticky-top,0)',
+      zIndex: 12,
+      backdropFilter: 'blur(6px)',
+      WebkitBackdropFilter: 'blur(6px)',
+      borderRadius: '0',
+    });
+
+    // normalize any previously-set radii if header already existed
+    Array.from(thead.querySelectorAll('th')).forEach((th) => {
+      th.style.borderTopLeftRadius = '0';
+      th.style.borderTopRightRadius = '0';
+      th.style.borderRadius = '0';
+    });
+
+    updateAnalyzeHeaderSortIndicators();
+  }
+
+  function updateAnalyzeHeaderSortIndicators() {
+    const table = analyzeTableEl;
+    if (!table || !table.tHead) return;
+    const ths = Array.from(table.tHead.querySelectorAll('th'));
+    for (const th of ths) {
+      const key = th.dataset.key;
+      const base = th.textContent.replace(/\s+[▲▼]$/, '');
+      if (key && key === analyzeSortKey) {
+        th.textContent = base + (analyzeSortDir === 'asc' ? ' ▲' : ' ▼');
+      } else {
+        th.textContent = base;
+      }
+    }
+  }
+
+  function showAnalyzeTable(show) {
+    if (!analyzeTableEl) return;
+    analyzeTableEl.style.display = show ? '' : 'none';
+  }
+
+  function sortRows(rows) {
+    const key = analyzeSortKey;
+    const dir = analyzeSortDir === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {
+      if (key === 'post') {
+        const aUser = (a.ownerHandle || '').toLowerCase();
+        const bUser = (b.ownerHandle || '').toLowerCase();
+        if (aUser !== bUser) return aUser.localeCompare(bUser) * dir;
+
+        const aCap = (a.caption || a.id || '').toLowerCase();
+        const bCap = (b.caption || b.id || '').toLowerCase();
+        return aCap.localeCompare(bCap) * dir;
+      }
+      if (key === 'views') return (a.views - b.views) * dir;
+      if (key === 'likes') return (a.likes - b.likes) * dir;
+      if (key === 'remixes') return (a.remixes - b.remixes) * dir;
+      if (key === 'comments') return (a.comments - b.comments) * dir;
+      if (key === 'rr') return ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
+      if (key === 'ir') return ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
+      if (key === 'expiring') return (a.expiringMin - b.expiringMin) * dir;
+      return 0;
+    });
+    return rows;
+  }
+
+  async function renderAnalyzeTable(force = false) {
+    if (!force) {
+      if (renderAnalyzeTable._busy) return;
+      const now = Date.now();
+      if (renderAnalyzeTable._last && now - renderAnalyzeTable._last < 200) return;
+      renderAnalyzeTable._last = now;
+    }
+    renderAnalyzeTable._busy = true;
+
+    try {
+      if (!analyzeActive) return;
+      ensureAnalyzeOverlay();
+      buildAnalyzeHeaderIfNeeded();
+
+      let rows = await collectAnalyzeRowsFromStorage();
+      if (!rows.length && typeof collectAnalyzeRowsFromLiveMaps === 'function') {
+        rows = collectAnalyzeRowsFromLiveMaps();
+      }
+
+      const windowMin = (Number(analyzeWindowHours) || 24) * 60;
+      const expiringThreshold = 1440 - windowMin;
+      rows = rows.filter((r) => Number.isFinite(r.expiringMin) && r.expiringMin >= expiringThreshold);
+
+      rows = sortRows(rows);
+
+      const newTbody = document.createElement('tbody');
+
+      const mkTdNum = (v) => {
+        const td = document.createElement('td');
+        td.textContent = typeof v === 'number' ? v.toLocaleString('en-US') : v || '—';
+        Object.assign(td.style, {
+          padding: '10px 12px',
+          textAlign: 'right',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+        });
+        return td;
+      };
+
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const tr = document.createElement('tr');
+        Object.assign(tr.style, { transition: 'background-color 120ms ease' });
+        if (i % 2 === 1) tr.style.background = 'rgba(255,255,255,0.03)';
+        tr.onmouseenter = () => {
+          tr.style.background = 'rgba(255,255,255,0.05)';
+        };
+        tr.onmouseleave = () => {
+          tr.style.background = i % 2 === 1 ? 'rgba(255,255,255,0.03)' : 'transparent';
+        };
+
+        // Post column: username bold, then bullet + caption lighter
+        const tdPost = document.createElement('td');
+        Object.assign(tdPost.style, {
+          padding: '10px 12px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          textAlign: 'left',
+        });
+
+        const a = document.createElement('a');
+        a.href = r.url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        Object.assign(a.style, {
+          color: '#cfe3ff',
+          textDecoration: 'none',
+          display: 'block',
+          width: '100%',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        });
+
+        const owner = typeof r.ownerHandle === 'string' && r.ownerHandle ? r.ownerHandle : '';
+        const captionRaw = typeof r.caption === 'string' && r.caption ? r.caption : r.id;
+        const fullLabel = owner ? `${owner} • ${captionRaw}` : captionRaw || '';
+
+        // Title shows full string
+        a.title = fullLabel;
+
+        if (owner) {
+          const u = document.createElement('span');
+          u.textContent = owner;
+          u.style.fontWeight = '800'; // username
+          a.appendChild(u);
+
+          const sep = document.createElement('span');
+          sep.textContent = ' - ';
+          sep.style.fontWeight = '300'; // separator
+          a.appendChild(sep);
+
+          const c = document.createElement('span');
+          c.textContent = captionRaw || '';
+          c.style.fontWeight = '300'; // caption
+          a.appendChild(c);
+        } else {
+          const c = document.createElement('span');
+          c.textContent = captionRaw || '';
+          c.style.fontWeight = '300';
+          a.appendChild(c);
+        }
+
+        a.onmouseenter = () => {
+          a.style.textDecoration = 'underline';
+        };
+        a.onmouseleave = () => {
+          a.style.textDecoration = 'none';
+        };
+        tdPost.appendChild(a);
+
+        const tdViews = mkTdNum(r.views);
+        const tdLikes = mkTdNum(r.likes);
+        const tdRemixes = mkTdNum(r.remixes);
+        const tdComments = mkTdNum(r.comments);
+        const tdRR = mkTdNum(r.rrPctStr || '—');
+        const tdIR = mkTdNum(r.irPctStr || '—');
+        const expStr =
+          typeof r.expiringMin === 'number' ? (r.expiringMin <= 0 ? '0m' : fmtAgeMin(r.expiringMin)) : '—';
+        const tdExp = mkTdNum(expStr);
+
+        tr.appendChild(tdPost);
+        tr.appendChild(tdViews);
+        tr.appendChild(tdLikes);
+        tr.appendChild(tdRemixes);
+        tr.appendChild(tdComments);
+        tr.appendChild(tdRR);
+        tr.appendChild(tdIR);
+        tr.appendChild(tdExp);
+        newTbody.appendChild(tr);
+      }
+
+      const table = analyzeTableEl;
+      const oldTbody = table.tBodies[0];
+      const swap = () => {
+        if (oldTbody) table.replaceChild(newTbody, oldTbody);
+        else table.appendChild(newTbody);
+      };
+      if ('requestAnimationFrame' in window) requestAnimationFrame(swap);
+      else swap();
+
+      const isAnalyzing = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
+      if (!isAnalyzing && analyzeHeaderTextEl) {
+        const hoursLabel = (n) => (Number(n) === 1 ? '1 hour' : `${n} hours`);
+        analyzeHeaderTextEl.textContent = rows.length
+          ? `${rows.length} top gens from the last ${hoursLabel(analyzeWindowHours)}`
+          : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
+      }
+    } finally {
+      renderAnalyzeTable._busy = false;
+    }
+  }
+
+  function hideAllCards(hide) {
+    for (const card of selectAllCards()) {
+      if (hide) card.style.display = 'none';
+      else card.style.display = '';
+    }
+  }
+
+  function startRapidAnalyzeGather() {
+    stopRapidAnalyzeGather(); // safety
+    showAnalyzeTable(false); // keep table hidden during the run
+    if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'none'; // hide slider while analyzing
+
+    const step = () => {
+      if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) window.scrollBy(0, 100);
+      analyzeRapidScrollId = setTimeout(step, 10);
+    };
+    step();
+
+    analyzeCountdownRemainingSec = Math.max(1, Math.round(ANALYZE_RUN_MS / 1000));
+    const updateCountdown = () => {
+      if (!analyzeHeaderTextEl) return;
+      analyzeHeaderTextEl.textContent = `Analyzing for ${analyzeCountdownRemainingSec}…`;
+    };
+    updateCountdown();
+    analyzeCountdownIntervalId = setInterval(() => {
+      analyzeCountdownRemainingSec = Math.max(0, analyzeCountdownRemainingSec - 1);
+      if (analyzeCountdownRemainingSec > 0) updateCountdown();
+    }, 1000);
+
+    analyzeRapidStopTimeout = setTimeout(() => {
+      stopRapidAnalyzeGather();
+      showAnalyzeTable(true);
+      if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'flex'; // show slider after analyzing
+      renderAnalyzeTable(true);
+    }, ANALYZE_RUN_MS);
+  }
+
+  function stopRapidAnalyzeGather() {
+    if (analyzeRapidScrollId) {
+      clearTimeout(analyzeRapidScrollId);
+      analyzeRapidScrollId = null;
+    }
+    if (analyzeRapidStopTimeout) {
+      clearTimeout(analyzeRapidStopTimeout);
+      analyzeRapidStopTimeout = null;
+    }
+    if (analyzeRefreshRowsInterval) {
+      clearInterval(analyzeRefreshRowsInterval);
+      analyzeRefreshRowsInterval = null;
+    }
+    if (analyzeCountdownIntervalId) {
+      clearInterval(analyzeCountdownIntervalId);
+      analyzeCountdownIntervalId = null;
+    }
+  }
+
+  async function enterAnalyzeMode() {
+    analyzeActive = true;
+    const ov = ensureAnalyzeOverlay();
+
+    // (hide scrollbars style injection unchanged)
+
+    hideAllCards(true);
+    ov.style.display = 'block';
+
+    // >>> recompute sticky now that elements have real sizes
+    if (typeof ov._recomputeSticky === 'function') ov._recomputeSticky();
+
+    analyzeBtn && analyzeBtn.setActive && analyzeBtn.setActive(true);
+    analyzeSortKey = 'views';
+    analyzeSortDir = 'desc';
+
+    // Hide Filter & Gather immediately (unchanged...)
+
+    startRapidAnalyzeGather();
+    updateControlsVisibility();
+  }
+
+  function exitAnalyzeMode() {
+    analyzeActive = false;
+    stopRapidAnalyzeGather();
+    hideAllCards(false);
+    if (analyzeOverlayEl) analyzeOverlayEl.style.display = 'none';
+    analyzeBtn && analyzeBtn.setActive && analyzeBtn.setActive(false);
+
+    // Show Filter & Gather again
+    const bar = controlBar || ensureControlBar();
+    if (bar) {
+      const f = bar.querySelector('[data-role="filter-btn"]');
+      const g = bar.querySelector('.sora-uv-gather-btn');
+      if (f) f.style.display = '';
+      if (g) g.style.display = '';
+    }
+
+    updateControlsVisibility();
+  }
+
+  function toggleAnalyzeMode() {
+    if (!isTopFeed()) return;
+    if (analyzeActive) exitAnalyzeMode();
+    else enterAnalyzeMode();
+  }
+
   // == Filtering ==
   function applyFilter() {
+    if (analyzeActive) return; // overlay handles visibility
     const s = getGatherState();
     const idx = s.filterIndex ?? 0;
     const limitMin = FILTER_STEPS_MIN[idx];
@@ -641,7 +1971,10 @@
     for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
-      if (limitMin == null || isGatheringActiveThisTab) { card.style.display = ''; continue; }
+      if (limitMin == null || isGatheringActiveThisTab) {
+        card.style.display = '';
+        continue;
+      }
       const show = Number.isFinite(meta?.ageMin) && meta.ageMin <= limitMin;
       card.style.display = show ? '' : 'none';
     }
@@ -649,62 +1982,61 @@
 
   // == Gather Mode ==
   function getGatherState() {
-    try { return JSON.parse(sessionStorage.getItem(SESS_KEY) || '{}'); } catch { return {}; }
+    try {
+      return JSON.parse(sessionStorage.getItem(SESS_KEY) || '{}');
+    } catch {
+      return {};
+    }
   }
-  function setGatherState(s) { sessionStorage.setItem(SESS_KEY, JSON.stringify(s)); }
+  function setGatherState(s) {
+    sessionStorage.setItem(SESS_KEY, JSON.stringify(s));
+  }
 
   function updateCountdownDisplay() {
-    if (!isGatheringActiveThisTab || !gatherTimerEl) { if (gatherTimerEl) gatherTimerEl.textContent = ''; return; }
+    if (!isGatheringActiveThisTab || !gatherTimerEl) {
+      if (gatherTimerEl) gatherTimerEl.textContent = '';
+      return;
+    }
     const state = getGatherState();
     const deadline = state.refreshDeadline;
-    if (deadline && deadline > Date.now()) {
-      const remainingMs = deadline - Date.now();
-      gatherTimerEl.textContent = isTopFeed()
-        ? `Gathering top for ${fmtRefreshCountdown(remainingMs)}...`
-        : `Refresh in ${fmtRefreshCountdown(remainingMs)}`;
-    } else if (deadline) {
-      gatherTimerEl.textContent = isTopFeed() ? 'Gathering top for 0m 00s...' : 'Refreshing...';
+    if (deadline) {
+      const remainingMs = Math.max(0, deadline - Date.now());
+      gatherTimerEl.textContent = `Refresh in ${fmtRefreshCountdown(remainingMs)}`;
     } else {
       gatherTimerEl.textContent = '';
     }
   }
 
   function startGathering(forceNewDeadline = false) {
-    if (gatherScrollIntervalId) { clearTimeout(gatherScrollIntervalId); gatherScrollIntervalId = null; }
-    if (gatherRefreshTimeoutId) { clearTimeout(gatherRefreshTimeoutId); gatherRefreshTimeoutId = null; }
-
-    console.log('UV: Starting/resuming gathering...');
+    if (gatherScrollIntervalId) {
+      clearTimeout(gatherScrollIntervalId);
+      gatherScrollIntervalId = null;
+    }
+    if (gatherRefreshTimeoutId) {
+      clearTimeout(gatherRefreshTimeoutId);
+      gatherRefreshTimeoutId = null;
+    }
 
     if (isTopFeed()) {
       const refreshMs = 10 * 60 * 1000;
 
-      // If timers already exist and we aren't forcing a new deadline, just resume.
       const s0 = getGatherState() || {};
       if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now()) {
         const remaining = s0.refreshDeadline - Date.now();
-        console.log(`UV: Top resume. ${Math.round(remaining / 1000)}s remaining.`);
-        // Resume scroll loop
         function slowScrollResume() {
-          if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) {
-            window.scrollBy(0, 3); // slightly faster than before
-          }
-          gatherScrollIntervalId = setTimeout(slowScrollResume, 4000); // slightly quicker cadence
+          if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) window.scrollBy(0, 3);
+          gatherScrollIntervalId = setTimeout(slowScrollResume, 4000);
         }
         slowScrollResume();
-
         gatherRefreshTimeoutId = setTimeout(() => {
-          console.log('UV: Refreshing page (Top feed)...');
           location.reload();
         }, remaining);
         updateCountdownDisplay();
         return;
       }
 
-      // Fresh cycle
       function slowScroll() {
-        if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) {
-          window.scrollBy(0, 3);
-        }
+        if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) window.scrollBy(0, 3);
         gatherScrollIntervalId = setTimeout(slowScroll, 4000);
       }
       slowScroll();
@@ -713,32 +2045,28 @@
       let sessionState = getGatherState() || {};
       let refreshDelay = refreshMs;
       if (!forceNewDeadline && sessionState.refreshDeadline && sessionState.refreshDeadline > now) {
-        refreshDelay = sessionState.refreshDeadline - now; // should not happen due to early return, but keep safe
+        refreshDelay = sessionState.refreshDeadline - now;
       } else {
         sessionState.refreshDeadline = now + refreshDelay;
         setGatherState(sessionState);
       }
-
-      console.log(`UV: Top feed refresh set for ${Math.round(refreshDelay / 1000)}s.`);
       gatherRefreshTimeoutId = setTimeout(() => {
-        console.log('UV: Refreshing page (Top feed)...');
         location.reload();
       }, refreshDelay);
-
       updateCountdownDisplay();
       return;
     }
 
-    // Profile (slider-based)
+    // Profile: slider-based gather
     const prefs = getPrefs();
-    const speedValue = (prefs.gatherSpeed != null) ? prefs.gatherSpeed : '0';
+    const speedValue = prefs.gatherSpeed != null ? prefs.gatherSpeed : '0';
     const t = Math.min(1, Math.max(0, Number(speedValue) / 100));
 
     const speedSlow = { sMin: 10000, sMax: 15000, rMin: 15 * 60000, rMax: 17 * 60000 };
-    const speedMid  = { sMin:  4500, sMax:  6500, rMin:  7 * 60000, rMax:  9 * 60000 };
-    const speedFast = { sMin:    50, sMax:   150, rMin:  1 * 60000, rMax:  2 * 60000 };
+    const speedMid = { sMin: 4500, sMax: 6500, rMin: 7 * 60000, rMax: 9 * 60000 };
+    const speedFast = { sMin: 50, sMax: 150, rMin: 1 * 60000, rMax: 2 * 60000 };
 
-    const lerp = (a,b,u)=>a+(b-a)*u;
+    const lerp = (a, b, u) => a + (b - a) * u;
     let scrollMinMs, scrollMaxMs, refreshMinMs, refreshMaxMs;
     if (t <= 0.5) {
       const u = t / 0.5;
@@ -754,11 +2082,9 @@
       refreshMaxMs = lerp(speedMid.rMax, speedFast.rMax, u);
     }
 
-    console.log(`UV: Speed t=${t.toFixed(2)} | scroll=[${Math.round(scrollMinMs)}..${Math.round(scrollMaxMs)}] ms | refresh=[${Math.round(refreshMinMs/60000)}..${Math.round(refreshMaxMs/60000)}] min`);
-
     function randomScroll() {
       if (window.innerHeight + window.scrollY < document.body.scrollHeight - 100) {
-        const amt = t <= 0.1 ? 3 : (t <= 0.3 ? 8 : (t <= 0.7 ? 20 : 100));
+        const amt = t <= 0.1 ? 3 : t <= 0.3 ? 8 : t <= 0.7 ? 20 : 100;
         window.scrollBy(0, amt);
       }
       const delay = Math.random() * (scrollMaxMs - scrollMinMs) + scrollMinMs;
@@ -771,23 +2097,30 @@
     let refreshDelay;
     if (!forceNewDeadline && s.refreshDeadline && s.refreshDeadline > now) {
       refreshDelay = s.refreshDeadline - now;
-      console.log(`UV: Resuming refresh timer. ${Math.round(refreshDelay/1000)}s remaining.`);
     } else {
       refreshDelay = Math.random() * (refreshMaxMs - refreshMinMs) + refreshMinMs;
-      s.refreshDeadline = now + refreshDelay; setGatherState(s);
-      console.log(`UV: ${forceNewDeadline ? 'New forced' : 'New'} refresh timer set for ${Math.round(refreshDelay/1000)}s.`);
+      s.refreshDeadline = now + refreshDelay;
+      setGatherState(s);
     }
-    gatherRefreshTimeoutId = setTimeout(() => { console.log('UV: Refreshing page...'); location.reload(); }, refreshDelay);
-
+    gatherRefreshTimeoutId = setTimeout(() => {
+      location.reload();
+    }, refreshDelay);
     updateCountdownDisplay();
   }
 
-  // Never nuke filterIndex unless explicitly resetting to fresh slate
   function stopGathering(clearSessionState = false) {
-    console.log('Sora UV: Stopping gathering.');
-    if (gatherScrollIntervalId) { clearTimeout(gatherScrollIntervalId); gatherScrollIntervalId = null; }
-    if (gatherRefreshTimeoutId) { clearTimeout(gatherRefreshTimeoutId); gatherRefreshTimeoutId = null; }
-    if (gatherCountdownIntervalId) { clearInterval(gatherCountdownIntervalId); gatherCountdownIntervalId = null; }
+    if (gatherScrollIntervalId) {
+      clearTimeout(gatherScrollIntervalId);
+      gatherScrollIntervalId = null;
+    }
+    if (gatherRefreshTimeoutId) {
+      clearTimeout(gatherRefreshTimeoutId);
+      gatherRefreshTimeoutId = null;
+    }
+    if (gatherCountdownIntervalId) {
+      clearInterval(gatherCountdownIntervalId);
+      gatherCountdownIntervalId = null;
+    }
     if (gatherTimerEl) gatherTimerEl.textContent = '';
 
     const s = getGatherState() || {};
@@ -795,7 +2128,7 @@
     delete s.refreshDeadline;
 
     if (clearSessionState === true) {
-      const keptFilter = (typeof s.filterIndex === 'number') ? s.filterIndex : 0;
+      const keptFilter = typeof s.filterIndex === 'number' ? s.filterIndex : 0;
       sessionStorage.setItem(SESS_KEY, JSON.stringify({ filterIndex: keptFilter, isGathering: false }));
     } else {
       setGatherState(s);
@@ -803,19 +2136,31 @@
   }
 
   // == Network & Processing ==
-  function looksLikeSoraFeed(json){
+  function looksLikeSoraFeed(json) {
     try {
       const items = json?.items || json?.data?.items || null;
       if (!Array.isArray(items) || items.length === 0) return false;
       let hits = 0;
-      for (let i=0;i<Math.min(items.length, 10); i++){
-        const it = items[i], p = it?.post || it || {};
-        if (typeof p?.id === 'string' && /^s_[A-Za-z0-9]+$/.test(p.id)) { hits++; continue; }
-        if (typeof p?.preview_image_url === 'string') { hits++; continue; }
-        if (Array.isArray(p?.attachments) && p.attachments.length) { hits++; continue; }
+      for (let i = 0; i < Math.min(items.length, 10); i++) {
+        const it = items[i],
+          p = it?.post || it || {};
+        if (typeof p?.id === 'string' && /^s_[A-Za-z0-9]+$/.test(p.id)) {
+          hits++;
+          continue;
+        }
+        if (typeof p?.preview_image_url === 'string') {
+          hits++;
+          continue;
+        }
+        if (Array.isArray(p?.attachments) && p.attachments.length) {
+          hits++;
+          continue;
+        }
       }
       return hits > 0;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   }
 
   function installFetchSniffer() {
@@ -824,17 +2169,28 @@
     window.fetch = async function (input, init) {
       const res = await origFetch.apply(this, arguments);
       try {
-        const url = typeof input === 'string' ? input : (input?.url || '');
+        const url = typeof input === 'string' ? input : input?.url || '';
         if (FEED_RE.test(url)) {
           dlog('feed', 'fetch matched', { url });
-          res.clone().json().then((j)=>{ dlog('feed', 'fetch parsed', { url, items: (j?.items||j?.data?.items||[]).length }); processFeedJson(j); }).catch(()=>{});
-        } else if (typeof url === 'string' && url.startsWith(location.origin)) {
-          res.clone().json().then((j)=>{
-            if (looksLikeSoraFeed(j)) {
-              dlog('feed', 'fetch autodetected', { url, items: (j?.items||j?.data?.items||[]).length });
+          res
+            .clone()
+            .json()
+            .then((j) => {
+              dlog('feed', 'fetch parsed', { url, items: (j?.items || j?.data?.items || []).length });
               processFeedJson(j);
-            }
-          }).catch(()=>{});
+            })
+            .catch(() => {});
+        } else if (typeof url === 'string' && url.startsWith(location.origin)) {
+          res
+            .clone()
+            .json()
+            .then((j) => {
+              if (looksLikeSoraFeed(j)) {
+                dlog('feed', 'fetch autodetected', { url, items: (j?.items || j?.data?.items || []).length });
+                processFeedJson(j);
+              }
+            })
+            .catch(() => {});
         }
       } catch {}
       return res;
@@ -847,14 +2203,14 @@
             dlog('feed', 'xhr matched', { url });
             try {
               const j = JSON.parse(this.responseText);
-              dlog('feed', 'xhr parsed', { url, items: (j?.items||j?.data?.items||[]).length });
+              dlog('feed', 'xhr parsed', { url, items: (j?.items || j?.data?.items || []).length });
               processFeedJson(j);
             } catch {}
           } else if (typeof url === 'string' && url.startsWith(location.origin)) {
             try {
               const j = JSON.parse(this.responseText);
               if (looksLikeSoraFeed(j)) {
-                dlog('feed', 'xhr autodetected', { url, items: (j?.items||j?.data?.items||[]).length });
+                dlog('feed', 'xhr autodetected', { url, items: (j?.items || j?.data?.items || []).length });
                 processFeedJson(j);
               }
             } catch {}
@@ -880,19 +2236,22 @@
         const direct = root.profile || root.data?.profile || root.owner_profile || null;
         if (direct) return direct;
         const arr = root.items || root.data?.items || [];
-        for (const it of (Array.isArray(arr)?arr:[])){
+        for (const it of Array.isArray(arr) ? arr : []) {
           if (it?.profile) return it.profile;
           if (it?.owner_profile) return it.owner_profile;
           const p = it?.post || it || {};
           if (p?.owner_profile) return p.owner_profile;
-          if (p?.author && (p.author.cameo_count != null || p.author.follower_count != null || p.author.username)) return p.author;
+          if (p?.author && (p.author.cameo_count != null || p.author.follower_count != null || p.author.username))
+            return p.author;
         }
         return null;
       };
       const prof = findProfile(json);
       const profFollowers = Number(json?.follower_count ?? json?.profile?.follower_count ?? prof?.follower_count);
       const profCameos = Number(json?.cameo_count ?? json?.profile?.cameo_count ?? prof?.cameo_count);
-      const profHandle = (json?.username || json?.handle || json?.profile?.username || prof?.username || pageUserHandle || '').toString() || null;
+      const profHandle =
+        (json?.username || json?.handle || json?.profile?.username || prof?.username || pageUserHandle || '')
+          .toString() || null;
       const profId = json?.user_id || json?.id || json?.profile?.user_id || prof?.user_id || null;
       if (profHandle) {
         const userKey = `h:${String(profHandle).toLowerCase()}`;
@@ -913,8 +2272,10 @@
       const rx = getRemixes(it);
       const cx = getCameos(it);
       const p = it?.post || it || {};
-      const created_at = p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
-      const caption = (typeof p?.caption === 'string' && p.caption) ? p.caption : (typeof p?.text === 'string' && p.text ? p.text : null);
+      const created_at =
+        p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
+      const caption =
+        (typeof p?.caption === 'string' && p.caption) ? p.caption : (typeof p?.text === 'string' && p.text ? p.text : null);
       const ageMin = minutesSince(created_at);
       const th = getThumbnail(it);
 
@@ -923,26 +2284,48 @@
       if (tv != null) idToViews.set(id, tv);
       if (cm != null) idToComments.set(id, cm);
       if (rx != null) idToRemixes.set(id, rx);
-      idToMeta.set(id, { ageMin });
 
       const absUrl = `${location.origin}/p/${id}`;
       const owner = getOwner(it);
       const userHandle = owner.handle || pageUserHandle || null;
       const userId = owner.id || null;
-      const userKey = userHandle ? `h:${userHandle.toLowerCase()}` : (userId != null ? `id:${userId}` : pageUserKey);
+
+      // store owner with meta so Analyze can render "<owner> • <caption>"
+      idToMeta.set(id, { ageMin, userHandle });
+
+      const userKey = userHandle ? `h:${userHandle.toLowerCase()}` : userId != null ? `id:${userId}` : pageUserKey;
       const followers = getFollowerCount(it);
 
       batch.push({
-        postId: id, uv, likes, views: tv, comments: cm, remixes: rx, remix_count: rx, cameos: cx,
-        followers, created_at, caption, ageMin, thumb: th, url: absUrl, ts: Date.now(),
-        userHandle, userId, userKey, parent_post_id: p?.parent_post_id ?? null, root_post_id: p?.root_post_id ?? null,
-        pageUserHandle, pageUserKey
+        postId: id,
+        uv,
+        likes,
+        views: tv,
+        comments: cm,
+        remixes: rx,
+        remix_count: rx,
+        cameos: cx,
+        followers,
+        created_at,
+        caption,
+        ageMin,
+        thumb: th,
+        url: absUrl,
+        ts: Date.now(),
+        userHandle,
+        userId,
+        userKey,
+        parent_post_id: p?.parent_post_id ?? null,
+        root_post_id: p?.root_post_id ?? null,
+        pageUserHandle,
+        pageUserKey,
       });
     }
 
-    if (batch.length) try {
-      window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*');
-    } catch {}
+    if (batch.length)
+      try {
+        window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*');
+      } catch {}
 
     renderBadges();
     renderDetailBadge();
@@ -968,7 +2351,6 @@
     updateControlsVisibility();
   }
 
-  // Fresh slate helper: reset filter to All immediately
   function resetFilterFreshSlate() {
     const newState = { filterIndex: 0, isGathering: false };
     setGatherState(newState);
@@ -979,14 +2361,22 @@
   }
 
   (function patchHistory() {
-    const _push = history.pushState, _replace = history.replaceState;
+    const _push = history.pushState,
+      _replace = history.replaceState;
     const fire = () => setTimeout(onRouteChange, 0);
-    history.pushState = function () { const r = _push.apply(this, arguments); fire(); return r; };
-    history.replaceState = function () { const r = _replace.apply(this, arguments); fire(); return r; };
+    history.pushState = function () {
+      const r = _push.apply(this, arguments);
+      fire();
+      return r;
+    };
+    history.replaceState = function () {
+      const r = _replace.apply(this, arguments);
+      fire();
+      return r;
+    };
     window.addEventListener('popstate', fire);
   })();
 
-  // Navigation: stop gather and force fresh filter slate on every route change
   function forceStopGatherOnNavigation() {
     if (isGatheringActiveThisTab) console.log('Sora UV: Route change — stopping gather for this tab.');
     isGatheringActiveThisTab = false;
@@ -995,6 +2385,7 @@
     const bar = controlBar || ensureControlBar();
     if (bar && typeof bar.updateGatherState === 'function') bar.updateGatherState();
     if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+    if (analyzeActive) exitAnalyzeMode();
     applyFilter();
   }
 
@@ -1002,28 +2393,48 @@
     const bar = ensureControlBar();
     if (!bar) return;
 
-    if (isFilterHiddenPage()) { bar.style.display = 'none'; return; }
-    else bar.style.display = 'flex';
+    if (isFilterHiddenPage()) {
+      bar.style.display = 'none';
+      return;
+    } else bar.style.display = 'flex';
 
+    const filterBtn = bar.querySelector('[data-role="filter-btn"]');
     const gatherBtn = bar.querySelector('.sora-uv-gather-btn');
     const gatherControlsWrapper = bar.querySelector('.sora-uv-gather-controls-wrapper');
     const sliderContainer = bar.querySelector('.sora-uv-slider-container');
-    if (!gatherBtn || !gatherControlsWrapper) return;
 
+    // Hide Filter/Gather entirely during Analyze mode
+    if (analyzeActive) {
+      if (filterBtn) filterBtn.style.display = 'none';
+      if (gatherBtn) gatherBtn.style.display = 'none';
+      if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
+      if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+      return; // nothing else to manage while analyzing
+    }
+
+    // Normal visibility rules (when NOT analyzing)
     if (isProfile() || isTopFeed()) {
-      gatherBtn.style.display = '';
-      gatherControlsWrapper.style.display = isGatheringActiveThisTab ? 'flex' : 'none';
+      if (gatherBtn) gatherBtn.style.display = '';
+      if (filterBtn) filterBtn.style.display = '';
+      if (gatherControlsWrapper) gatherControlsWrapper.style.display = isGatheringActiveThisTab ? 'flex' : 'none';
       if (sliderContainer) sliderContainer.style.display = isProfile() ? 'flex' : 'none';
       bar.updateGatherState();
     } else {
-      gatherBtn.style.display = 'none';
-      gatherControlsWrapper.style.display = 'none';
+      if (gatherBtn) gatherBtn.style.display = 'none';
+      if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
       if (isGatheringActiveThisTab) {
         isGatheringActiveThisTab = false;
-        let sState = getGatherState(); sState.isGathering = false; delete sState.refreshDeadline; setGatherState(sState);
+        let sState = getGatherState();
+        sState.isGathering = false;
+        delete sState.refreshDeadline;
+        setGatherState(sState);
         bar.updateGatherState();
       }
+      if (filterBtn) filterBtn.style.display = '';
     }
+
+    // Analyze button only on Top feed
+    if (analyzeBtn) analyzeBtn.style.display = isTopFeed() ? '' : 'none';
 
     if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
   }
@@ -1047,8 +2458,16 @@
   }
 
   // == Prefs ==
-  function getPrefs() { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); } catch { return {}; } }
-  function setPrefs(p) { localStorage.setItem(PREF_KEY, JSON.stringify(p)); }
+  function getPrefs() {
+    try {
+      return JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+    } catch {
+      return {};
+    }
+  }
+  function setPrefs(p) {
+    localStorage.setItem(PREF_KEY, JSON.stringify(p));
+  }
   function handleStorageChange(e) {
     if (e.key !== PREF_KEY) return;
     try {
@@ -1057,15 +2476,15 @@
       const slider = document.querySelector('.sora-uv-controls input[type="range"]');
       if (slider && slider.value !== newPrefs.gatherSpeed) slider.value = newPrefs.gatherSpeed;
       if (isGatheringActiveThisTab && !isTopFeed()) startGathering(true);
-    } catch (err) { console.error('Sora UV: Error applying storage change.', err); }
+    } catch (err) {
+      console.error('Sora UV: Error applying storage change.', err);
+    }
   }
 
   // == Init ==
   function init() {
     dlog('feed', 'init');
-    // ALWAYS begin a new tab with a fresh slate for Filter + Gather
     resetFilterFreshSlate();
-
     installFetchSniffer();
     startObservers();
     onRouteChange();
