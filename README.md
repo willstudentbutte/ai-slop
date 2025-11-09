@@ -1,4 +1,4 @@
-﻿[![License: Polyform Noncommercial 1.0.0](https://img.shields.io/badge/license-Polyform%20Noncommercial%201.0.0-blue.svg)](./LICENSE)
+﻿[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 # Sora Explore - Unique Views + Metrics Dashboard
 
@@ -44,10 +44,12 @@ Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboa
 - **Tip for Gather Mode:** Open a profile in its **own window** with **no other tabs** (can be dragged out of your way) to ensure Chrome does not put the tab to sleep. Further, consider toggling "Auto Discardable" to **X** for this tab by visiting chrome://discards/ to maximize capability.
 
 ## License
-This project is licensed under the Polyform Noncommercial License 1.0.0 (see [LICENSE](./LICENSE)).
+This project is licensed under the MIT License (see [LICENSE](./LICENSE)).
 
-- ✅ You may use, modify, and share for **noncommercial** purposes.
-- 🚫 **Commercial** use requires a separate paid license (see [LICENSE-COMMERCIAL](./LICENSE-COMMERCIAL); contact william@cruttenden.dev).
+Contributors:
+- Will ([@fancyson-ai](https://github.com/fancyson-ai))
+- Topher ([@cameoed](https://github.com/cameoed))
+- Skye ([@thecosmicskye](https://github.com/thecosmicskye))
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 
