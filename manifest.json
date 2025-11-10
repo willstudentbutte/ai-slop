@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sora Explore - Unique Views + Metrics Dashboard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Overlays Sora video view stats, includes a metrics dashboard for deeper insights, and more!",
   "icons": {
     "16": "icons/16.png",
