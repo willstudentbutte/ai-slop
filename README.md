@@ -1,6 +1,10 @@
-﻿[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
-
 # Sora Explore - Unique Views + Metrics Dashboard
+
+[![Add to Chrome](https://img.shields.io/badge/Chrome%20Extension-Add%20Now-blue?logo=googlechrome&logoColor=white)](https://chrome.google.com/webstore/detail/YOUR_EXTENSION_ID_HERE)
+
+> *Nothing in life is to be feared, it is only to be understood — Marie Curie.*  
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ## Features:
 - **Post View Counts** - Shows unique view counts right on Sora Explore, profile grids, and post pages.
@@ -20,6 +24,8 @@ Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboa
 - Export all snapshots for a user as CSV
 - Pair with Gather Mode for always-current data
 - ALL DATA STORED 100% LOCALLY IN YOUR BROWSER AND NEVER TRANSMITTED!
+
+![Sora Explore Dashboard](./icons/dashboard-preview.png)
 
 ---
 
@@ -53,6 +59,7 @@ Contributors:
 - Skye ([@thecosmicskye](https://github.com/thecosmicskye))
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+
 
 
 
