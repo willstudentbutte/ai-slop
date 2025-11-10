@@ -1,4 +1,4 @@
-﻿[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+﻿[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![Add to Chrome](https://img.shields.io/badge/Chrome%20Extension-Add%20Now-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
 
 # Sora Explore - Unique Views + Metrics Dashboard
 
@@ -24,6 +24,11 @@ Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboa
 ---
 
 ## Load it in Chrome
+
+Download directly from the [Chrome Web Store ](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
+
+Alternatively:
+- Clone repo
 - Open `chrome://extensions`, flip on **Developer mode**.
 - Hit **Load unpacked** and point it at the `sora-unique-views` folder.
 - Pin the icon if you want it handy in the toolbar.
@@ -53,6 +58,7 @@ Contributors:
 - Skye ([@thecosmicskye](https://github.com/thecosmicskye))
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+
 
 
 
