@@ -2,6 +2,13 @@
 
 # Sora Explore - Unique Views + Metrics Dashboard
 
+
+![](/imagery/extension1.jpg)
+
+![](/imagery/extension2.jpg)
+
+![](/imagery/extension5.jpg)
+
 ## Features:
 - **Post View Counts** - Shows unique view counts right on Sora Explore, profile grids, and post pages.
 - **Post Like Rate** - Displays like rate (likes ÷ unique viewers) alongside the Unique count when available.
@@ -53,11 +60,20 @@ Alternatively:
 This project is licensed under the MIT License (see [LICENSE](./LICENSE)).
 
 Contributors:
-- Will ([@fancyson-ai](https://github.com/fancyson-ai))
-- Topher ([@cameoed](https://github.com/cameoed))
-- Skye ([@thecosmicskye](https://github.com/thecosmicskye))
+- Will ([@fancyson](https://fancyson.ai))
+- Topher ([@cameoed](https://sora.com/profile/cameoed))
+- Skye ([@cosmic-skye](https://skye.page))
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+
+---
+
+## More visuals:
+
+![](/imagery/extension3.jpg)
+
+![](/imagery/extension4.jpg)
+
 
 
 
