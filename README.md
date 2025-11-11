@@ -1,6 +1,6 @@
 ﻿[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![Add to Chrome](https://img.shields.io/badge/Chrome%20Extension-Add%20Now-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
 
-# Sora Explore - Unique Views + Metrics Dashboard
+# Sora Creator Tools: _Video Stats, Post Analytics, View Tracker, & More_
 
 
 ![](/imagery/extension1.jpg)
@@ -12,7 +12,7 @@
 ## Features:
 - **Post View Counts** - Shows unique view counts right on Sora Explore, profile grids, and post pages.
 - **Post Like Rate** - Displays like rate (likes ÷ unique viewers) alongside the Unique count when available.
-- **Post Remix Rate** - Click into a post to see Remix Rate as RR!
+- **Post Remix Rate** - See Remix Rate (recursive) as RR!
 - **Post Hotness** - All posts with over 25 likes are color coded with a **red to yellow** gradient based on time elapsed since posting to visually signal hotness (planned feature: incorporate engagement rate to better influence color coding and emoji assignment)
 - **Super Hot!** - A post with more than 50 likes in under 1 hour will receive a special red glow and extra emojis to indicate a certified banger destined for Top
 - **Best Posting Time** - All posts made within 15 minutes +/- of the current time on 1 day increments into the past receive a **green** label, allowing you to infer what engagement you could potentially attain if you were to post right now
@@ -73,6 +73,7 @@ Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.m
 ![](/imagery/extension3.jpg)
 
 ![](/imagery/extension4.jpg)
+
 
 
 
