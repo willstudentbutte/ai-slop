@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Sora Explore - Unique Views + Metrics Dashboard",
+  "name": "Sora Creator Tools – Sora Video Stats, Post Analytics, Views Tracker, and More",
   "version": "1.0.1",
-  "description": "Overlays Sora video view stats, includes a metrics dashboard for deeper insights, and more!",
+  "description": "Powerful Sora extension that overlays video view stats, Dashboard mode for deeper insights, Analysis mode for Top feed analytics, and much more!",
   "icons": {
     "16": "icons/16.png",
     "48": "icons/48.png",
