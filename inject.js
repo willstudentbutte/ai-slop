@@ -636,10 +636,11 @@
       const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
       const el = createPill(badge, timeEmojiStr, tipFinal, !!tipFinal);
       el.style.background = pillBg;
+      if (isSuperHot) {
+          el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      }
     }
-
-    badge.style.boxShadow = isSuperHot ? '0 0 10px 3px hsla(0, 100%, 50%, 0.7)' : 'none';
-  }
+  } 
 
   function renderBadges() {
     ensureControlBar();
@@ -2243,7 +2244,7 @@ async function renderAnalyzeTable(force = false) {
     if (isTopFeed()) {
       // === TOP: keep 10m loop ===
       const refreshMs = 5 * 60 * 1000;
-      const TOP_PX_PER_STEP = 6; // was 1 → ~75 px/s
+      const TOP_PX_PER_STEP = 16; //  1 → ~75 px/s
 
       const s0 = getGatherState() || {};
       if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now()) {
