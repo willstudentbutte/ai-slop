@@ -1,14 +1,14 @@
 /*
- * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
- * Licensed under the MIT License. See the LICENSE file for details.
- *
- * What this does (simple):
- * - Reads the site’s feed JSON and adds a small badge to each post card.
- * - Badge color is based on time since posting (all posts >25 likes): red (<1h) → yellow (18h) in 18 gradient steps from RED (hot) to YELLOW (warm).
- * - If age is within ±15m of a whole day (1d, 2d, 3d…), the badge turns green with a 📝 icon.
- * - Corner button cycles a time filter: All, <3h, <6h, <12h, <15h, <18h, <21h.
- * - "Gather" mode (profile/top) auto-scrolls + refreshes; Top now scrolls slightly faster and uses a 10m loop.
- */
+ * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
+ * Licensed under the MIT License. See the LICENSE file for details.
+ *
+ * What this does (simple):
+ * - Reads the site’s feed JSON and adds a small badge to each post card.
+ * - Badge color is based on time since posting (all posts >25 likes): red (<1h) → yellow (18h) in 18 gradient steps from RED (hot) to YELLOW (warm).
+ * - If age is within ±15m of a whole day (1d, 2d, 3d…), the badge turns green with a 📝 icon.
+ * - Corner button cycles a time filter: All, <3h, <6h, <12h, <15h, <18h, <21h.
+ * - "Gather" mode (profile/top) auto-scrolls + refreshes; Top now scrolls slightly faster and uses a 10m loop.
+ */
 
 (function () {
   'use strict';
@@ -639,7 +639,7 @@
       const el = createPill(badge, timeEmojiStr, tipFinal, !!tipFinal);
       el.style.background = pillBg;
       if (isSuperHot) {
-          el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+        el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
       }
     }
   } 
@@ -657,38 +657,84 @@
   }
 
   // == Detail badge (post page only) ==
-  function ensureDetailBadge() {
-    if (detailBadgeEl && document.contains(detailBadgeEl)) return detailBadgeEl;
-    const el = document.createElement('div');
-    el.className = 'sora-uv-badge-detail';
-    Object.assign(el.style, {
-      position: 'fixed',
-      top: '12px',
-      left: '12px',
-      padding: '6px 10px',
-      fontSize: '13px',
-      fontWeight: '700',
-      borderRadius: '10px',
-      background: 'rgba(0,0,0,0.75)',
-      color: '#fff',
-      zIndex: 999999,
-      pointerEvents: 'none',
-    });
-    document.documentElement.appendChild(el);
-    detailBadgeEl = el;
-    return el;
+  
+  // This function targets the visible video container
+  function findDetailBadgeTarget() {
+    if (!isPost()) return null;
+
+    // 1. Find the wrapper div for the *visible* video player (the one at top: 0px and opacity: 1)
+    const visibleVideoWrapper = document.querySelector('.relative.h-full.w-full.origin-top > .absolute.overflow-hidden.rounded-xl.cursor-default[style*="top: 0px"][style*="opacity: 1"]');
+    
+    if (!visibleVideoWrapper) return null;
+    
+    // 2. The inner container which we want to attach the badge to is the .group.relative.h-full.w-full
+    const videoGroup = visibleVideoWrapper.querySelector('.group.relative.h-full.w-full');
+    
+    if (videoGroup) {
+      if (getComputedStyle(videoGroup).position === 'static') {
+        videoGroup.style.position = 'relative';
+      }
+      
+      // Find or create the data container inside the video group
+      let detailDataEl = videoGroup.querySelector('.sora-uv-badge-detail-container');
+      if (!detailDataEl) {
+        detailDataEl = document.createElement('div');
+        detailDataEl.className = 'sora-uv-badge-detail-container';
+        // This container is the wrapper for the pills, positioned at the top left.
+        Object.assign(detailDataEl.style, {
+          position: 'absolute',
+          top: '6px',
+          left: '6px',
+          display: 'flex',
+          gap: '6px',
+          flexWrap: 'wrap',
+          zIndex: 9999, // Ensure it sits above the video/image
+          pointerEvents: 'none', // Initially set to none, but individual pills will be 'auto'
+          padding: '4px', // Add some internal padding
+        });
+        videoGroup.appendChild(detailDataEl);
+      }
+      return detailDataEl;
+    }
+
+    return null;
   }
 
+  function ensureDetailBadgeContainer() {
+    if (detailBadgeEl && document.contains(detailBadgeEl)) return detailBadgeEl;
+    
+    const targetEl = findDetailBadgeTarget();
+
+    if (targetEl) {
+      detailBadgeEl = targetEl;
+      return detailBadgeEl;
+    }
+    
+    if (detailBadgeEl) {
+      detailBadgeEl.remove(); 
+      detailBadgeEl = null;
+    }
+    return null;
+  }
+
+
   function renderDetailBadge() {
-    if (!isPost()) {
+    const el = ensureDetailBadgeContainer();
+    
+    if (!isPost() || !el) {
+      if (el) el.innerHTML = ''; 
       if (detailBadgeEl) {
         detailBadgeEl.remove();
         detailBadgeEl = null;
       }
       return;
     }
+
     const sid = currentSIdFromURL();
-    if (!sid) return;
+    if (!sid) {
+      el.innerHTML = '';
+      return;
+    }
 
     const uv = idToUnique.get(sid);
     const likes = idToLikes.get(sid);
@@ -696,34 +742,78 @@
     const comments = idToComments.get(sid);
     const remixes = idToRemixes.get(sid);
 
-    const irRaw = interactionRate(likes, comments, uv); // "12.3%"
-    const rrRaw = remixRate(likes, remixes); // "12.34"
+    const irRaw = interactionRate(likes, comments, uv);
+    const rrRaw = remixRate(likes, remixes);
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
     const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
 
-    if (uv == null && !irDisp && !rrDisp) return;
-
-    const el = ensureDetailBadge();
     const meta = idToMeta.get(sid);
     const ageMin = meta?.ageMin;
     const isSuperHot = (likes ?? 0) >= 50 && Number.isFinite(ageMin) && ageMin < 60;
 
-    const parts = [];
-    if (uv != null) parts.push(`${fmt(uv)} views`);
-    if (irDisp) parts.push(`${irDisp} IR`);
-    if (rrDisp) parts.push(`${rrDisp} RR`);
-    if (Number.isFinite(ageMin)) parts.push(fmtAgeMin(ageMin));
+    const viewsStr = uv != null ? `👀 ${fmt(uv)} views` : null;
+    const irStr = irDisp ? `${irDisp} IR` : null;
+    const rrStr = rrDisp ? `${rrDisp} RR` : null;
+    
+    const timeStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
     const emoji = badgeEmojiFor(sid, meta);
-    if (emoji) parts.push(emoji);
-    el.textContent = parts.join(' • ');
 
-    const bg = badgeBgFor(sid, meta);
-    el.style.background = bg || 'rgba(0,0,0,0.75)';
-    el.style.boxShadow = isSuperHot ? '0 0 10px 3px hsla(0, 100%, 50%, 0.7)' : 'none';
+    // Determine if we have any data to display
+    if (viewsStr == null && irStr == null && rrStr == null && timeStr == null && emoji == '') {
+      el.innerHTML = '';
+      return;
+    }
 
-    const note = isNearWholeDay(ageMin) ? 'Green day mark ✅' : bg ? 'Hot ✅' : '';
-    const ageLabel = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : '∞';
-    el.title = meta ? `Age: ${ageLabel}${note ? `\n${note}` : ''}` : '';
+    // Use a key to prevent unnecessary DOM updates
+    const newKey = JSON.stringify([viewsStr, irStr, rrStr, timeStr, emoji]);
+    if (el.dataset.key === newKey) return;
+    el.dataset.key = newKey;
+    
+    el.innerHTML = '';
+
+    const pillBg = 'rgba(37,37,37,0.7)'; 
+    
+    // 1. Views Pill
+    if (viewsStr) {
+      const metEl = createPill(el, viewsStr, `${fmtInt(uv)} Unique Views`, true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 2. IR Pill
+    if (irStr) {
+      const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 3. RR Pill
+    if (rrStr) {
+      const metEl = createPill(el, rrStr, 'Total Remixes relative to Likes', true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 4. Time/Age Pill
+    if (timeStr || emoji) {
+      const timeEmojiStr = [timeStr || '', emoji || ''].filter(Boolean).join(' ');
+      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
+      const nearDay = isNearWholeDay(ageMin);
+      const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
+      
+      const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
+      const bg = badgeBgFor(sid, meta);
+      timeEl.style.background = bg || pillBg;
+      timeEl.style.pointerEvents = 'auto';
+
+      if (isSuperHot) {
+        timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      }
+    }
+
+    // Keep container pointerEvents: none to allow clicks to pass through to video controls, 
+    // but since the pills themselves are explicitly set to 'auto', they will still receive cursor events.
+    el.style.pointerEvents = 'none'; 
   }
 
   // == Profile Impact (unchanged) ==
@@ -1272,7 +1362,7 @@
     }
     
     // Explicitly call to purge old entries after adding a new one.
-    getAnalyzeVisited(true); 
+    getAnalyzeVisited(true);  
   }
   
   function __sorauv_toTs(v) {
@@ -1487,10 +1577,10 @@
       position: 'relative',
       borderRadius: '24px',
       padding: '16px',
-      border: '1px solid #353535',     // stroke
+      border: '1px solid #353535',      // stroke
       boxShadow: '0 6px 28px rgba(0,0,0,0.35)',
-      background: '#1e1e1e',           // panel BG
-      overflow: panelOverflow,          // was 'hidden' before; this breaks sticky
+      background: '#1e1e1e',          // panel BG
+      overflow: panelOverflow,        // was 'hidden' before; this breaks sticky
       isolation: 'isolate',
     });
     wrap.appendChild(panel);
@@ -1641,7 +1731,7 @@
     analyzeTableEl = document.createElement('table');
     Object.assign(analyzeTableEl.style, {
       width: '100%',
-      borderCollapse: 'separate',   // keep separate for sticky compatibility
+      borderCollapse: 'separate', // keep separate for sticky compatibility
       borderSpacing: 0,
       fontSize: '13px',
       background: 'transparent',
@@ -2168,7 +2258,7 @@ async function renderAnalyzeTable(force = false) {
 
     // Faster, longer bursts; no end detection
     const BURST_STEP_PX = 1200; // was 100
-    const TICK_MS = 5;          // was 10
+    const TICK_MS = 5;      // was 10
 
     const step = () => {
       window.scrollBy(0, BURST_STEP_PX);
@@ -2237,8 +2327,8 @@ async function renderAnalyzeTable(force = false) {
     if (!analyzeSortKey) analyzeSortKey = 'views';
     if (!analyzeSortDir) analyzeSortDir = 'desc';
 
-    startRapidAnalyzeGather();      // 10s burst to populate quickly
-    startAnalyzeAutoRefresh();      // then keep it fresh every minute
+    startRapidAnalyzeGather();    // 10s burst to populate quickly
+    startAnalyzeAutoRefresh();    // then keep it fresh every minute
     updateControlsVisibility();
   }
 
@@ -2374,9 +2464,9 @@ async function renderAnalyzeTable(force = false) {
     const t = Math.min(1, Math.max(0, Number(speedValue) / 100));
 
     // Map slider to pixels-per-second (slow → fast)
-    const PPS_SLOW = 50;     // px/s at far left
-    const PPS_MID  = 1500;   // px/s mid
-    const PPS_FAST = 3000;   // px/s far right
+    const PPS_SLOW = 50;    // px/s at far left
+    const PPS_MID = 1500;   // px/s mid
+    const PPS_FAST = 3000;    // px/s far right
 
     const lerp = (a, b, u) => a + (b - a) * u;
     let pps;
@@ -2390,8 +2480,8 @@ async function renderAnalyzeTable(force = false) {
 
     // randomized refresh window (unchanged)
     const speedSlow = { rMin: 15 * 60000, rMax: 17 * 60000 };
-    const speedMid  = { rMin: 7 * 60000,  rMax: 9 * 60000  };
-    const speedFast = { rMin: 1 * 60000,  rMax: 2 * 60000  };
+    const speedMid  = { rMin: 7 * 60000,  rMax: 9 * 60000 };
+    const speedFast = { rMin: 1 * 60000,  rMax: 2 * 60000 };
 
     let refreshMinMs, refreshMaxMs;
     if (t <= 0.5) {
