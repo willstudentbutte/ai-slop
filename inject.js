@@ -28,6 +28,8 @@
   // == Configuration & Constants ==
   const PREF_KEY = 'SORA_UV_PREFS_V1';
   const SESS_KEY = 'SORA_UV_GATHER_STATE_V1';
+  const ANALYZE_VISITED_KEY = 'SORA_UV_ANALYZE_VISITED';
+  const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
 
   // Includes <21h (1260 minutes)
@@ -40,7 +42,7 @@
   const idToViews = new Map();
   const idToComments = new Map();
   const idToRemixes = new Map();
-  const idToMeta = new Map(); // { ageMin }
+  const idToMeta = new Map(); // { ageMin, userHandle }
 
   // == UI State ==
   let controlBar = null;
@@ -1190,7 +1192,89 @@
   }
 
 
-  // ========================== STORAGE HELPERS ================================
+  // ========================== ANALYZE VISITED LINK STORAGE ================================
+  
+  function getAnalyzeVisited(purgeOld = true) {
+    let list = [];
+    try {
+      list = JSON.parse(localStorage.getItem(ANALYZE_VISITED_KEY) || '[]');
+      if (!Array.isArray(list)) list = [];
+    } catch {
+      list = [];
+    }
+    
+    // Convert list to a Map for easy ID lookup, while cleaning old data
+    const now = Date.now();
+    const map = new Map();
+    let needsSave = false;
+    
+    for (const item of list) {
+      if (typeof item?.id === 'string' && typeof item?.t === 'number') {
+        if (purgeOld && now - item.t > ANALYZE_VISITED_MAX_AGE_MS) {
+          needsSave = true; // Mark old data for removal
+        } else {
+          map.set(item.id, item.t); // Keep it
+        }
+      } else {
+        needsSave = true; // Clean up corrupted entries
+      }
+    }
+    
+    // If we purged anything, save the clean list back to storage
+    if (needsSave && purgeOld) {
+      // Rebuild the clean list from the Map values
+      const cleanList = Array.from(map.entries()).map(([id, t]) => ({ id, t }));
+      try {
+        localStorage.setItem(ANALYZE_VISITED_KEY, JSON.stringify(cleanList));
+      } catch (e) {
+        dlog('analyze', 'Error saving cleaned visited state', e);
+      }
+    }
+
+    // Return a Set of just the IDs for quick checking in renderAnalyzeTable
+    return new Set(map.keys());
+  }
+
+  function addAnalyzeVisited(postId) {
+    if (!postId) return;
+    
+    // Get the full list from storage (don't purge yet, just retrieve for update)
+    let list = [];
+    try {
+      list = JSON.parse(localStorage.getItem(ANALYZE_VISITED_KEY) || '[]');
+      if (!Array.isArray(list)) list = [];
+    } catch {
+      list = [];
+    }
+    
+    const now = Date.now();
+    let updated = false;
+    
+    // Check if the post ID already exists; if so, update its timestamp
+    for (let i = 0; i < list.length; i++) {
+      if (list[i]?.id === postId) {
+        list[i].t = now;
+        updated = true;
+        break;
+      }
+    }
+    
+    // If not found, add a new entry
+    if (!updated) {
+      list.push({ id: postId, t: now });
+    }
+    
+    // Save the updated list. 
+    try {
+      localStorage.setItem(ANALYZE_VISITED_KEY, JSON.stringify(list));
+    } catch (e) {
+      dlog('analyze', 'Error saving visited state', e);
+    }
+    
+    // Explicitly call to purge old entries after adding a new one.
+    getAnalyzeVisited(true); 
+  }
+  
   function __sorauv_toTs(v) {
     if (typeof v === 'number' && isFinite(v)) return v < 1e11 ? v * 1000 : v;
     if (typeof v === 'string' && v.trim()) {
@@ -1703,6 +1787,7 @@
     updateAnalyzeHeaderSortIndicators();
   }
 
+
   function updateAnalyzeHeaderSortIndicators() {
     const table = analyzeTableEl;
     if (!table || !table.tHead) return;
@@ -1860,6 +1945,7 @@ async function renderAnalyzeTable(force = false) {
     rows = sortRows(rows);
 
     const newTbody = document.createElement('tbody');
+    const visitedSet = getAnalyzeVisited(); // Get set once for quick lookups and purging
 
     const mkTdNum = (v) => {
       const td = document.createElement('td');
@@ -1874,6 +1960,8 @@ async function renderAnalyzeTable(force = false) {
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
+      const postId = r.id; // Post ID for visited tracking
+
       const tr = document.createElement('tr');
       Object.assign(tr.style, { transition: 'background-color 120ms ease' });
       if (i % 2 === 1) tr.style.background = 'rgba(255,255,255,0.03)';
@@ -1945,7 +2033,16 @@ async function renderAnalyzeTable(force = false) {
         textOverflow: 'ellipsis',
         paddingLeft: '0',
         marginLeft: '0',
+        // Apply opacity if visited
+        opacity: visitedSet.has(postId) ? '0.45' : '1',
       });
+
+      // Add click handler to mark as visited
+      a.addEventListener('click', () => {
+          addAnalyzeVisited(postId);
+          a.style.opacity = '0.6';
+      });
+
 
       const owner = typeof r.ownerHandle === 'string' && r.ownerHandle ? r.ownerHandle : '';
       const captionRaw = typeof r.caption === 'string' && r.caption ? r.caption : r.id;
