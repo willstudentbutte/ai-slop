@@ -18,6 +18,30 @@
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
   const esc = (s)=> String(s).replace(/[&<>"']/g, (c)=> ESC_MAP[c] || c);
+  
+  // Blend two hex colors (50/50 mix)
+  function blendColors(color1, color2){
+    const hex1 = color1.replace('#', '');
+    const hex2 = color2.replace('#', '');
+    const r1 = parseInt(hex1.substr(0, 2), 16);
+    const g1 = parseInt(hex1.substr(2, 2), 16);
+    const b1 = parseInt(hex1.substr(4, 2), 16);
+    const r2 = parseInt(hex2.substr(0, 2), 16);
+    const g2 = parseInt(hex2.substr(2, 2), 16);
+    const b2 = parseInt(hex2.substr(4, 2), 16);
+    const r = Math.round((r1 + r2) / 2);
+    const g = Math.round((g1 + g2) / 2);
+    const b = Math.round((b1 + b2) / 2);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+  }
+  
+  // Convert plural to singular
+  function singularize(word){
+    if (word.endsWith('s') && word.length > 1) {
+      return word.slice(0, -1);
+    }
+    return word;
+  }
 
   // (thumbnails are provided by the collector; no auto-rewrite here)
 
@@ -73,6 +97,12 @@
     if (!isFinite(uv) || uv <= 0) return null;
     const inter = interactionsOfSnap(snap);
     return (inter / uv) * 100;
+  }
+  function remixRate(likes, remixes){
+    const l = Number(likes);
+    const r = Number(remixes);
+    if (!isFinite(l) || l <= 0 || !isFinite(r) || r < 0) return null;
+    return ((r / l) * 100).toFixed(2);
   }
 
   // Get latest snapshot by timestamp; fallback to last array entry
@@ -394,8 +424,9 @@
       const color = typeof colorFor === 'function' ? colorFor(p.pid) : COLORS[i % COLORS.length];
       const thumbStyle = p.thumb ? `background-image:url('${p.thumb.replace(/'/g,"%27")}')` : '';
       row.innerHTML = `
-        <div class="dot" style="background:${color}"></div>
-        <div class="thumb" style="${thumbStyle}"></div>
+        <div class="thumb" style="${thumbStyle}">
+          <div class="dot" style="background:${color}"></div>
+        </div>
         <div class="meta">
           <div class="id"><a href="${p.url}" target="_blank" rel="noopener" title="${esc(p.title)}">${esc(p.label)}</a></div>
           <div class="stats">Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}</div>
@@ -432,6 +463,33 @@
       res.replies += num(last?.comments);
       res.remixes += num(latestRemixCountForPost(p));
       res.interactions += interactionsOfSnap(last);
+    }
+    return res;
+  }
+
+  function computeTotalsForUsers(userKeys, metrics){
+    const res = { views:0, likes:0, replies:0, remixes:0, interactions:0, cameos:0, followers:0 };
+    for (const userKey of userKeys){
+      const user = metrics?.users?.[userKey];
+      if (!user) continue;
+      const userTotals = computeTotalsForUser(user);
+      res.views += userTotals.views;
+      res.likes += userTotals.likes;
+      res.replies += userTotals.replies;
+      res.remixes += userTotals.remixes;
+      res.interactions += userTotals.interactions;
+      // Get latest cameos count
+      const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
+      if (cameosArr.length > 0){
+        const lastCameo = cameosArr[cameosArr.length - 1];
+        res.cameos += num(lastCameo?.count);
+      }
+      // Get latest followers count
+      const followersArr = Array.isArray(user.followers) ? user.followers : [];
+      if (followersArr.length > 0){
+        const lastFollower = followersArr[followersArr.length - 1];
+        res.followers += num(lastFollower?.count);
+      }
     }
     return res;
   }
@@ -488,9 +546,12 @@
     let hoverCb = null;
 
     function setData(series){
-      state.series = series;
+      state.series = series.map(s=>({
+        ...s,
+        points: [...s.points].sort((a,b)=>a.t-b.t)
+      }));
       const xs=[], ys=[];
-      for (const s of series){
+      for (const s of state.series){
         for (const p of s.points){ xs.push(p.x); ys.push(p.y); }
       }
       state.x = extent(xs, d=>d);
@@ -544,7 +605,6 @@
         // line
         if (s.points.length>1){
           ctx.strokeStyle = color; ctx.lineWidth = s.highlighted ? 2.2 : 1.2; ctx.beginPath();
-          s.points.sort((a,b)=>a.t-b.t);
           for (let i=0;i<s.points.length;i++){
             const p = s.points[i]; const x = mapX(p.x), y = mapY(p.y);
             if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
@@ -568,6 +628,9 @@
 
     // hover and click
     const tooltip = $('#tooltip');
+    let rafPending = null;
+    let lastHover = null;
+    
     function nearest(mx,my){
       let best=null, bd=Infinity;
       for (const s of state.series){
@@ -599,17 +662,35 @@
       tooltip.style.top  = (clientY + 12) + 'px';
     }
 
+    function handleMouseMove(e){
+      if (rafPending) return;
+      rafPending = requestAnimationFrame(()=>{
+        rafPending = null;
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
+        const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
+        if (drag){ drag.x1 = mx; drag.y1 = my; draw(); drawDragRect(drag); showTooltip(null); return; }
+        const h = nearest(mx,my);
+        const hoverKey = h ? `${h.pid}-${h.t}` : null;
+        if (hoverKey === lastHover) {
+          showTooltip(h, e.clientX, e.clientY);
+          return;
+        }
+        lastHover = hoverKey;
+        const prev = state.hoverSeries;
+        state.hover = h;
+        state.hoverSeries = h?.pid || null;
+        if (hoverCb && prev !== state.hoverSeries) hoverCb(state.hoverSeries);
+        draw();
+        showTooltip(h, e.clientX, e.clientY);
+      });
+    }
+
     // Zoom drag state
     let drag = null; // {x0,y0,x1,y1}
 
-    canvas.addEventListener('mousemove', (e)=>{
-      const rect = canvas.getBoundingClientRect();
-      const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
-      const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
-      if (drag){ drag.x1 = mx; drag.y1 = my; draw(); drawDragRect(drag); showTooltip(null); return; }
-      const h = nearest(mx,my); const prev = state.hoverSeries; state.hover = h; state.hoverSeries = h?.pid || null; if (hoverCb && prev !== state.hoverSeries) hoverCb(state.hoverSeries); draw(); showTooltip(h, e.clientX, e.clientY);
-    });
-    canvas.addEventListener('mouseleave', ()=>{ state.hover=null; state.hoverSeries=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
     canvas.addEventListener('click', ()=>{
       if (state.hover && state.hover.url) window.open(state.hover.url, '_blank');
     });
@@ -679,13 +760,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       canvas.width = Math.floor(W*DPR); canvas.height = Math.floor(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0);
       draw();
     }
-    const state = { series:[], x:[0,1], y:[0,1], zoomX:null, zoomY:null, hover:null, hoverSeries:null };
+    const state = { series:[], x:[0,1], y:[0,1], zoomX:null, zoomY:null, hover:null, hoverSeries:null, comparisonLine:null };
     let hoverCb = null;
 
     function setData(series){
-      state.series = series;
+      state.series = series.map(s=>({
+        ...s,
+        points: [...s.points].sort((a,b)=>a.t-b.t)
+      }));
       const xs=[], ys=[];
-      for (const s of series){
+      for (const s of state.series){
         for (const p of s.points){ xs.push(p.x); ys.push(p.y); }
       }
       state.x = extent(xs, d=>d);
@@ -740,6 +824,57 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       ctx.fillText('Time', W/2-20, H-6);
       ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText(yAxisLabel || 'Views', 0,0); ctx.restore();
     }
+    // Interpolate/extrapolate value for a series at a given x (time)
+    function getValueAtX(series, x){
+      if (!series.points || series.points.length === 0) return null;
+      const pts = series.points;
+      // Find the two points that bracket x, or use nearest if outside range
+      let before = null, after = null;
+      for (let i = 0; i < pts.length; i++){
+        if (pts[i].x <= x) before = pts[i];
+        if (pts[i].x >= x && !after) after = pts[i];
+      }
+      // If x is before all points, use first point (extrapolate backward)
+      if (!before && after) return after.y;
+      // If x is after all points, use last point (extrapolate forward)
+      if (before && !after) return before.y;
+      // If we have both, interpolate
+      if (before && after){
+        if (before.x === after.x) return before.y;
+        const t = (x - before.x) / (after.x - before.x);
+        return before.y + (after.y - before.y) * t;
+      }
+      // Fallback to first point
+      return pts[0]?.y ?? null;
+    }
+    
+    // Find two nearest series vertically at mouse x position
+    function findNearestTwoSeries(mx, my){
+      if (state.series.length < 2) return null;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      const candidates = [];
+      for (const s of state.series){
+        const val = getValueAtX(s, mouseX);
+        if (val == null) continue;
+        const y = mapY(val);
+        if (y < M.top || y > H - M.bottom) continue;
+        const dist = Math.abs(my - y);
+        candidates.push({ series: s, y, val, dist });
+      }
+      if (candidates.length < 2) return null;
+      candidates.sort((a,b) => a.dist - b.dist);
+      return {
+        top: candidates[0].y < candidates[1].y ? candidates[0] : candidates[1],
+        bottom: candidates[0].y < candidates[1].y ? candidates[1] : candidates[0],
+        x: mx,
+        mouseX
+      };
+    }
+    
     function nearest(mx,my){
       let best=null, bd=Infinity;
       for (const s of state.series){
@@ -756,7 +891,36 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       return best;
     }
     const tooltip = $(tooltipSelector);
-    function showTooltip(h, clientX, clientY){
+    let rafPending = null;
+    let lastHover = null;
+    
+    function showTooltip(h, clientX, clientY, comparisonData){
+      if (comparisonData){
+        const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
+        const diffRounded = Math.ceil(diff);
+        const unit = yAxisLabel || 'Views';
+        const unitLower = singularize(unit.toLowerCase());
+        const topColor = comparisonData.top.series.color || '#7dc4ff';
+        const bottomColor = comparisonData.bottom.series.color || '#7dc4ff';
+        tooltip.style.display='block';
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+          <div style="position:relative;width:20px;height:20px;">
+            <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
+            <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
+          </div>
+          <strong>${fmt(diffRounded)} ${unitLower} gap</strong>
+        </div>`;
+        const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+        const width = tooltip.offsetWidth || 0;
+        let left = clientX + 12;
+        if (left + width > vw - 8){
+          left = clientX - 12 - width;
+          if (left < 8) left = 8;
+        }
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = (clientY + 12) + 'px';
+        return;
+      }
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
       const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
@@ -773,14 +937,44 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       tooltip.style.left = left + 'px';
       tooltip.style.top = (clientY + 12) + 'px';
     }
+    
+    function handleMouseMove(e){
+      if (rafPending) return;
+      rafPending = requestAnimationFrame(()=>{
+        rafPending = null;
+        const rect=canvas.getBoundingClientRect();
+        const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
+        if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
+        
+        // Check if we're in comparison mode (2+ series) and find nearest two
+        const comparison = state.series.length >= 2 ? findNearestTwoSeries(mx, my) : null;
+        if (comparison && mx >= M.left && mx <= W - M.right){
+          state.comparisonLine = comparison;
+          draw();
+          showTooltip(null, e.clientX, e.clientY, comparison);
+          return;
+        }
+        
+        state.comparisonLine = null;
+        const h = nearest(mx,my);
+        const hoverKey = h ? `${h.pid}-${h.t}` : null;
+        if (hoverKey === lastHover) {
+          showTooltip(h, e.clientX, e.clientY);
+          return;
+        }
+        lastHover = hoverKey;
+        const prev=state.hoverSeries;
+        state.hover=h;
+        state.hoverSeries=h?.pid||null;
+        if (hoverCb && prev!==state.hoverSeries) hoverCb(state.hoverSeries);
+        draw();
+        showTooltip(h,e.clientX,e.clientY);
+      });
+    }
+    
     let drag=null;
-    canvas.addEventListener('mousemove',(e)=>{
-      const rect=canvas.getBoundingClientRect();
-      const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
-      if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); return; }
-      const h = nearest(mx,my); const prev=state.hoverSeries; state.hover=h; state.hoverSeries=h?.pid||null; if (hoverCb && prev!==state.hoverSeries) hoverCb(state.hoverSeries); draw(); showTooltip(h,e.clientX,e.clientY);
-    });
-    canvas.addEventListener('mouseleave', ()=>{ state.hover=null; state.hoverSeries=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
     // Track recent double-click to avoid opening posts while resetting zoom
     let lastDblClickTs = 0;
     canvas.addEventListener('dblclick', ()=>{ lastDblClickTs = Date.now(); state.zoomX=null; state.zoomY=null; draw(); });
@@ -804,14 +998,51 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function drawDragRect(d){ if (!d||d.x1==null||d.y1==null) return; ctx.save(); ctx.strokeStyle='#7dc4ff'; ctx.fillStyle='#7dc4ff22'; ctx.lineWidth=1; ctx.setLineDash([4,3]);
       const x0=Math.max(M.left,Math.min(W-M.right,d.x0)); const y0=Math.max(M.top,Math.min(H-M.bottom,d.y0)); const x1=Math.max(M.left,Math.min(W-M.right,d.x1)); const y1=Math.max(M.top,Math.min(H-M.bottom,d.y1));
       const x=Math.min(x0,x1), y=Math.min(y0,y1), w=Math.abs(x1-x0), h=Math.abs(y1-y0); ctx.strokeRect(x,y,w,h); ctx.fillRect(x,y,w,h); ctx.restore(); }
+    function drawComparisonLine(){
+      if (!state.comparisonLine) return;
+      const cl = state.comparisonLine;
+      const x = Math.max(M.left, Math.min(W - M.right, cl.x));
+      const topY = Math.max(M.top, Math.min(H - M.bottom, cl.top.y));
+      const bottomY = Math.max(M.top, Math.min(H - M.bottom, cl.bottom.y));
+      ctx.save();
+      const topColor = cl.top.series.color || '#7dc4ff';
+      const bottomColor = cl.bottom.series.color || '#7dc4ff';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]); // No dash pattern, we'll draw segments manually
+      
+      // Calculate line length and segment size
+      const lineLength = Math.abs(bottomY - topY);
+      const dashLength = 4;
+      const gapLength = 4;
+      const segmentLength = dashLength + gapLength;
+      const numSegments = Math.ceil(lineLength / segmentLength);
+      
+      // Draw alternating colored dashes
+      const startY = Math.min(topY, bottomY);
+      for (let i = 0; i < numSegments; i++) {
+        const yStart = startY + (i * segmentLength);
+        const yEnd = Math.min(startY + (i * segmentLength) + dashLength, startY + lineLength);
+        
+        if (yStart >= startY + lineLength) break;
+        
+        // Alternate colors: even segments use top color, odd use bottom color
+        ctx.strokeStyle = (i % 2 === 0) ? topColor : bottomColor;
+        ctx.beginPath();
+        ctx.moveTo(x, yStart);
+        ctx.lineTo(x, yEnd);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    
     function drawSeries(){
       const muted='#38424c'; const anyHover=!!state.hoverSeries;
-      for (const s of state.series){ const color=(anyHover && state.hoverSeries!==s.id)?muted:s.color; if (s.points.length>1){ ctx.strokeStyle=color; ctx.lineWidth=1.4; ctx.beginPath(); s.points.sort((a,b)=>a.t-b.t);
+      for (const s of state.series){ const color=(anyHover && state.hoverSeries!==s.id)?muted:s.color; if (s.points.length>1){ ctx.strokeStyle=color; ctx.lineWidth=1.4; ctx.beginPath();
         for (let i=0;i<s.points.length;i++){ const p=s.points[i]; const x=mapX(p.x), y=mapY(p.y); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);} ctx.stroke(); }
         for (const p of s.points){ const x=mapX(p.x), y=mapY(p.y); const isHover=state.hover && state.hover.pid===s.id && state.hover.i===p.t; ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,isHover?4.2:2.4,0,Math.PI*2); ctx.fill(); if (isHover){ ctx.strokeStyle='#ffffffaa'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.stroke(); } }
       }
     }
-    function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); }
+    function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); drawComparisonLine(); }
     window.addEventListener('resize', resize); resize();
     function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
     function setHoverSeries(pid){ state.hoverSeries=pid||null; draw(); }
@@ -821,15 +1052,62 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
-  // Followers time chart (single-series, Y-axis = Followers)
+  // Followers time chart (multi-series, Y-axis = Followers)
   function makeFollowersChart(canvas){
     const ctx = canvas.getContext('2d');
     const DPR = Math.max(1, window.devicePixelRatio||1);
     let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
     const M = { left:58, top:20, right:30, bottom:40 };
     function resize(){ W=canvas.clientWidth||canvas.width; H=canvas.clientHeight||canvas.height; canvas.width=Math.floor(W*DPR); canvas.height=Math.floor(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0); draw(); }
-    const state = { series:[], x:[0,1], y:[0,1], zoomX:null, zoomY:null, hover:null };
-    function setData(series){ state.series = series; const xs=[], ys=[]; for (const s of series){ for (const p of s.points){ xs.push(p.x); ys.push(p.y); } } state.x=extent(xs,d=>d); state.y=extent(ys,d=>d); draw(); }
+    const state = { series:[], x:[0,1], y:[0,1], zoomX:null, zoomY:null, hover:null, hoverSeries:null, comparisonLine:null };
+    let hoverCb = null;
+    
+    // Interpolate/extrapolate value for a series at a given x (time)
+    function getValueAtX(series, x){
+      if (!series.points || series.points.length === 0) return null;
+      const pts = series.points;
+      let before = null, after = null;
+      for (let i = 0; i < pts.length; i++){
+        if (pts[i].x <= x) before = pts[i];
+        if (pts[i].x >= x && !after) after = pts[i];
+      }
+      if (!before && after) return after.y;
+      if (before && !after) return before.y;
+      if (before && after){
+        if (before.x === after.x) return before.y;
+        const t = (x - before.x) / (after.x - before.x);
+        return before.y + (after.y - before.y) * t;
+      }
+      return pts[0]?.y ?? null;
+    }
+    
+    // Find two nearest series vertically at mouse x position
+    function findNearestTwoSeries(mx, my){
+      if (state.series.length < 2) return null;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      const candidates = [];
+      for (const s of state.series){
+        const val = getValueAtX(s, mouseX);
+        if (val == null) continue;
+        const y = mapY(val);
+        if (y < M.top || y > H - M.bottom) continue;
+        const dist = Math.abs(my - y);
+        candidates.push({ series: s, y, val, dist });
+      }
+      if (candidates.length < 2) return null;
+      candidates.sort((a,b) => a.dist - b.dist);
+      return {
+        top: candidates[0].y < candidates[1].y ? candidates[0] : candidates[1],
+        bottom: candidates[0].y < candidates[1].y ? candidates[1] : candidates[0],
+        x: mx,
+        mouseX
+      };
+    }
+    function setData(series){ state.series = series.map(s=>({...s, points: [...s.points].sort((a,b)=>a.t-b.t)})); const xs=[], ys=[]; for (const s of state.series){ for (const p of s.points){ xs.push(p.x); ys.push(p.y); } } state.x=extent(xs,d=>d); state.y=extent(ys,d=>d); draw(); }
     function mapX(x){ const [a,b]=(state.zoomX||state.x); return M.left + ((x-a)/(b-a||1))*(W-(M.left+M.right)); }
     function mapY(y){ const [a,b]=(state.zoomY||state.y); return H - M.bottom - ((y-a)/(b-a||1))*(H-(M.top+M.bottom)); }
     function clampToPlot(px,py){ const x=Math.max(M.left,Math.min(W-M.right,px)); const y=Math.max(M.top,Math.min(H-M.bottom,py)); return [x,y]; }
@@ -851,15 +1129,115 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       for (let i=0;i<=yticks;i++){ const y=H-M.bottom - i*(H-(M.top+M.bottom))/yticks; const v=yDomain[0]+i*(yDomain[1]-yDomain[0])/yticks; ctx.fillText(fmt2(v), 10, y+4); }
       ctx.fillStyle='#e8eaed'; ctx.font='bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial'; ctx.fillText('Time', W/2-20, H-6); ctx.save(); ctx.translate(12,H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Followers',0,0); ctx.restore();
     }
-    function drawSeries(){ const s=state.series[0]; if (!s) return; ctx.strokeStyle=s.color||'#ffd166'; ctx.lineWidth=1.6; ctx.beginPath(); const pts=[...s.points].sort((a,b)=>a.t-b.t); for (let i=0;i<pts.length;i++){ const p=pts[i]; const x=mapX(p.x), y=mapY(p.y); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); } ctx.stroke(); for (const p of pts){ const x=mapX(p.x), y=mapY(p.y); ctx.fillStyle=s.color||'#ffd166'; ctx.beginPath(); ctx.arc(x,y,2.4,0,Math.PI*2); ctx.fill(); }
+    function drawComparisonLine(){
+      if (!state.comparisonLine) return;
+      const cl = state.comparisonLine;
+      const x = Math.max(M.left, Math.min(W - M.right, cl.x));
+      const topY = Math.max(M.top, Math.min(H - M.bottom, cl.top.y));
+      const bottomY = Math.max(M.top, Math.min(H - M.bottom, cl.bottom.y));
+      ctx.save();
+      const topColor = cl.top.series.color || '#ffd166';
+      const bottomColor = cl.bottom.series.color || '#ffd166';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]); // No dash pattern, we'll draw segments manually
+      
+      // Calculate line length and segment size
+      const lineLength = Math.abs(bottomY - topY);
+      const dashLength = 4;
+      const gapLength = 4;
+      const segmentLength = dashLength + gapLength;
+      const numSegments = Math.ceil(lineLength / segmentLength);
+      
+      // Draw alternating colored dashes
+      const startY = Math.min(topY, bottomY);
+      for (let i = 0; i < numSegments; i++) {
+        const yStart = startY + (i * segmentLength);
+        const yEnd = Math.min(startY + (i * segmentLength) + dashLength, startY + lineLength);
+        
+        if (yStart >= startY + lineLength) break;
+        
+        // Alternate colors: even segments use top color, odd use bottom color
+        ctx.strokeStyle = (i % 2 === 0) ? topColor : bottomColor;
+        ctx.beginPath();
+        ctx.moveTo(x, yStart);
+        ctx.lineTo(x, yEnd);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
-    function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); }
+    
+    function drawSeries(){
+      const muted='#38424c'; const anyHover=!!state.hoverSeries;
+      for (const s of state.series){
+        const color=(anyHover && state.hoverSeries!==s.id)?muted:s.color;
+        if (s.points.length>1){
+          ctx.strokeStyle=color||'#ffd166'; ctx.lineWidth=1.6; ctx.beginPath();
+          for (let i=0;i<s.points.length;i++){
+            const p=s.points[i]; const x=mapX(p.x), y=mapY(p.y);
+            if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+          }
+          ctx.stroke();
+        }
+        for (const p of s.points){
+          const x=mapX(p.x), y=mapY(p.y);
+          const isHover=state.hover && state.hover.id===s.id && state.hover.t===p.t;
+          ctx.fillStyle=color||'#ffd166'; ctx.beginPath(); ctx.arc(x,y,isHover?4.2:2.4,0,Math.PI*2); ctx.fill();
+          if (isHover){
+            ctx.strokeStyle='#ffffffaa'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.stroke();
+          }
+        }
+      }
+    }
+    function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); drawComparisonLine(); }
     const tooltip = $('#followersTooltip');
-    function nearest(mx,my){ const s=state.series[0]; if (!s) return null; let best=null,bd=Infinity; for (const p of s.points){ const x=mapX(p.x), y=mapY(p.y); if (x<M.left||x>W-M.right||y<M.top||y>H-M.bottom) continue; const d=Math.hypot(mx-x,my-y); if (d<bd && d<16){ bd=d; best={ x:p.x, y:p.y, t:p.t, color:s.color }; } } return best; }
-    function showTooltip(h,cx,cy){
+    let rafPending = null;
+    let lastHover = null;
+    
+    function nearest(mx,my){
+      let best=null,bd=Infinity;
+      for (const s of state.series){
+        for (const p of s.points){
+          const x=mapX(p.x), y=mapY(p.y);
+          if (x<M.left||x>W-M.right||y<M.top||y>H-M.bottom) continue;
+          const d=Math.hypot(mx-x,my-y);
+          if (d<bd && d<16){
+            bd=d;
+            best={ id:s.id, label:s.label||s.id, x:p.x, y:p.y, t:p.t, color:s.color };
+          }
+        }
+      }
+      return best;
+    }
+    function showTooltip(h,cx,cy,comparisonData){
+      if (comparisonData){
+        const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
+        const diffRounded = Math.ceil(diff);
+        const topColor = comparisonData.top.series.color || '#ffd166';
+        const bottomColor = comparisonData.bottom.series.color || '#ffd166';
+        tooltip.style.display='block';
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+          <div style="position:relative;width:20px;height:20px;">
+            <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
+            <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
+          </div>
+          <strong>${fmt(diffRounded)} follower gap</strong>
+        </div>`;
+        const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+        const width = tooltip.offsetWidth || 0;
+        let left = cx + 12;
+        if (left + width > vw - 8){
+          left = cx - 12 - width;
+          if (left < 8) left = 8;
+        }
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = (cy + 12) + 'px';
+        return;
+      }
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>Followers</strong></div>`+`<div>${fmtDateTime(h.x)} • Followers: ${fmt2(h.y)}</div>`;
+      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(h.label||'Followers')}</strong></div>`;
+      const body = `<div>${fmtDateTime(h.x)} • Followers: ${fmt2(h.y)}</div>`;
+      tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = cx + 12;
@@ -870,8 +1248,44 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       tooltip.style.left = left + 'px';
       tooltip.style.top = (cy + 12) + 'px';
     }
-    let drag=null; canvas.addEventListener('mousemove',(e)=>{ const rect=canvas.getBoundingClientRect(); const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); return; } const h=nearest(mx,my); state.hover=h; draw(); showTooltip(h,e.clientX,e.clientY); });
-    canvas.addEventListener('mouseleave', ()=>{ state.hover=null; draw(); showTooltip(null); });
+    
+    function handleMouseMove(e){
+      if (rafPending) return;
+      rafPending = requestAnimationFrame(()=>{
+        rafPending = null;
+        const rect=canvas.getBoundingClientRect();
+        const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
+        if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
+        
+        // Check if we're in comparison mode (2+ series) and find nearest two
+        const comparison = state.series.length >= 2 ? findNearestTwoSeries(mx, my) : null;
+        if (comparison && mx >= M.left && mx <= W - M.right){
+          state.comparisonLine = comparison;
+          draw();
+          showTooltip(null, e.clientX, e.clientY, comparison);
+          return;
+        }
+        
+        state.comparisonLine = null;
+        const h=nearest(mx,my);
+        const hoverKey = h ? `${h.id}-${h.t}` : null;
+        if (hoverKey === lastHover) {
+          showTooltip(h, e.clientX, e.clientY);
+          return;
+        }
+        lastHover = hoverKey;
+        const prev=state.hoverSeries;
+        state.hover=h;
+        state.hoverSeries=h?.id||null;
+        if (hoverCb && prev!==state.hoverSeries) hoverCb(state.hoverSeries);
+        draw();
+        showTooltip(h,e.clientX,e.clientY);
+      });
+    }
+    
+    let drag=null;
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
     canvas.addEventListener('mousedown',(e)=>{ const rect=canvas.getBoundingClientRect(); let x0=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y0=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; drag={x0,y0,x1:null,y1:null}; });
     window.addEventListener('mouseup',(e)=>{ if (!drag) return; const rect=canvas.getBoundingClientRect(); let x1=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y1=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; const [cx0,cy0]=clampToPlot(drag.x0,drag.y0); const [cx1,cy1]=clampToPlot(x1,y1); drag.x1=cx1; drag.y1=cy1; const minW=10,minH=10; const w=Math.abs(cx1-cx0), h=Math.abs(cy1-cy0); if (w>minW && h>minH){ const [X0,X1]=[cx0,cx1].sort((a,b)=>a-b); const [Y0,Y1]=[cy0,cy1].sort((a,b)=>a-b); const invMapX=(px)=>{ const [a,b]=(state.zoomX||state.x); return a + ((px-M.left)/(W-(M.left+M.right)))*(b-a); }; const invMapY=(py)=>{ const [a,b]=(state.zoomY||state.y); return a + (((H-M.bottom)-py)/(H-(M.top+M.bottom)))*(b-a); }; state.zoomX=[invMapX(X0),invMapX(X1)]; state.zoomY=[invMapY(Y1),invMapY(Y0)]; } drag=null; draw(); showTooltip(null); });
     function drawDragRect(d){ if (!d||d.x1==null||d.y1==null) return; ctx.save(); ctx.strokeStyle='#7dc4ff'; ctx.fillStyle='#7dc4ff22'; ctx.lineWidth=1; ctx.setLineDash([4,3]); const x0=Math.max(M.left,Math.min(W-M.right,d.x0)); const y0=Math.max(M.top,Math.min(H-M.bottom,d.y0)); const x1=Math.max(M.left,Math.min(W-M.right,d.x1)); const y1=Math.max(M.top,Math.min(H-M.bottom,d.y1)); const x=Math.min(x0,x1), y=Math.min(y0,y1), w=Math.abs(x1-x0), h=Math.abs(y1-y0); ctx.strokeRect(x,y,w,h); ctx.fillRect(x,y,w,h); ctx.restore(); }
@@ -879,9 +1293,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     window.addEventListener('resize', resize);
     resize();
     function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
+    function setHoverSeries(id){ state.hoverSeries=id||null; draw(); }
+    function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    return { setData, resetZoom, getZoom, setZoom };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
   // Legend removed — left list serves as legend
@@ -898,6 +1314,710 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href=url; a.download='sora_metrics.csv'; a.click();
     setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  }
+
+  // Escape CSV field (handle commas, quotes, newlines)
+  function escapeCSV(str) {
+    if (str == null) return '';
+    const s = String(str);
+    if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  // Format timestamp for CSV
+  function fmtTimestamp(ts) {
+    if (!ts) return '';
+    const t = toTs(ts);
+    if (!t) return '';
+    try {
+      return new Date(t).toISOString();
+    } catch {
+      return String(t);
+    }
+  }
+
+  async function exportAllDataCSV(){
+    try {
+      const metrics = await loadMetrics();
+      const allLines = [];
+      
+      // === SHEET 1: Posts Summary (one row per post with latest snapshot) ===
+      const postsHeader = [
+        'User Key', 'User Handle', 'User ID', 
+        'Post ID', 'Post URL', 'Post Time', 'Post Time (ISO)', 'Caption',
+        'Thumbnail URL', 'Parent Post ID', 'Root Post ID', 'Last Seen Timestamp',
+        'Owner Key', 'Owner Handle', 'Owner ID',
+        'Latest Snapshot Timestamp', 'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
+        'Interaction Rate %', 'Remix Rate %', 'Like Rate %',
+        'Snapshot Count', 'First Snapshot Timestamp', 'Last Snapshot Timestamp'
+      ];
+      allLines.push('=== POSTS SUMMARY (Latest Snapshot Per Post) ===');
+      allLines.push(postsHeader.map(escapeCSV).join(','));
+      
+      for (const [userKey, user] of Object.entries(metrics.users || {})){
+        const handle = user.handle || '';
+        const userId = user.id || '';
+        
+        for (const [pid, post] of Object.entries(user.posts || {})){
+          const latest = latestSnapshot(post.snapshots);
+          const postTimeRaw = getPostTimeStrict(post);
+          const postTime = fmtTimestamp(postTimeRaw);
+          const postTimeISO = postTimeRaw ? new Date(postTimeRaw).toISOString() : '';
+          const latestTime = latest ? fmtTimestamp(latest.t) : '';
+          
+          const uv = latest?.uv ?? '';
+          const views = latest?.views ?? '';
+          const likes = latest?.likes ?? '';
+          const comments = latest?.comments ?? latest?.reply_count ?? '';
+          const remixes = latest?.remix_count ?? latest?.remixes ?? '';
+          
+          const ir = interactionRate(latest);
+          const rr = remixRate(likes, remixes);
+          const lr = likeRate(likes, uv);
+          
+          const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const thumb = post.thumb || '';
+          const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
+          const ownerKey = post.ownerKey || userKey;
+          const ownerHandle = post.ownerHandle || handle;
+          const ownerId = post.ownerId || userId;
+          const parentPostId = post.parent_post_id || '';
+          const rootPostId = post.root_post_id || '';
+          const lastSeen = post.lastSeen ? fmtTimestamp(post.lastSeen) : '';
+          
+          const snaps = Array.isArray(post.snapshots) ? post.snapshots : [];
+          const snapshotCount = snaps.length;
+          const firstSnapshot = snaps.length > 0 ? fmtTimestamp(snaps[0]?.t) : '';
+          const lastSnapshot = latest ? fmtTimestamp(latest.t) : '';
+          
+          allLines.push([
+            userKey, handle, userId,
+            pid, url, postTime, postTimeISO, caption,
+            thumb, parentPostId, rootPostId, lastSeen,
+            ownerKey, ownerHandle, ownerId,
+            latestTime, uv, views, likes, comments, remixes,
+            ir != null ? ir.toFixed(2) : '', rr != null ? rr : '', lr != null ? lr.toFixed(2) : '',
+            snapshotCount, firstSnapshot, lastSnapshot
+          ].map(escapeCSV).join(','));
+        }
+      }
+      
+      // === SHEET 2: Post Snapshots (all historical data) ===
+      allLines.push('');
+      allLines.push('=== POST SNAPSHOTS (Complete Historical Timeline) ===');
+      const snapshotsHeader = [
+        'User Key', 'User Handle', 'User ID',
+        'Post ID', 'Post URL', 'Post Caption', 'Post Time',
+        'Owner Key', 'Owner Handle', 'Owner ID',
+        'Snapshot Timestamp', 'Snapshot Timestamp (ISO)', 'Snapshot Age (minutes)',
+        'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
+        'Interaction Rate %', 'Remix Rate %', 'Like Rate %',
+        'Views Change', 'Likes Change', 'Comments Change', 'Remixes Change'
+      ];
+      allLines.push(snapshotsHeader.map(escapeCSV).join(','));
+      
+      for (const [userKey, user] of Object.entries(metrics.users || {})){
+        const handle = user.handle || '';
+        const userId = user.id || '';
+        
+        for (const [pid, post] of Object.entries(user.posts || {})){
+          const snaps = Array.isArray(post.snapshots) ? post.snapshots : [];
+          const postTimeRaw = getPostTimeStrict(post);
+          const postTime = fmtTimestamp(postTimeRaw);
+          const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
+          const ownerKey = post.ownerKey || userKey;
+          const ownerHandle = post.ownerHandle || handle;
+          const ownerId = post.ownerId || userId;
+          
+          let prevViews = null, prevLikes = null, prevComments = null, prevRemixes = null;
+          
+          for (const snap of snaps){
+            const t = snap.t ? Number(snap.t) : null;
+            const tFormatted = t ? fmtTimestamp(t) : '';
+            const tISO = t ? new Date(t).toISOString() : '';
+            const ageMin = t && postTimeRaw ? Math.floor((t - postTimeRaw) / 60000) : '';
+            
+            const uv = snap.uv ?? '';
+            const views = snap.views ?? '';
+            const likes = snap.likes ?? '';
+            const comments = snap.comments ?? snap.reply_count ?? '';
+            const remixes = snap.remix_count ?? snap.remixes ?? '';
+            
+            const ir = interactionRate(snap);
+            const rr = remixRate(likes, remixes);
+            const lr = likeRate(likes, uv);
+            
+            const viewsChange = prevViews != null && views !== '' ? (Number(views) - Number(prevViews)) : '';
+            const likesChange = prevLikes != null && likes !== '' ? (Number(likes) - Number(prevLikes)) : '';
+            const commentsChange = prevComments != null && comments !== '' ? (Number(comments) - Number(prevComments)) : '';
+            const remixesChange = prevRemixes != null && remixes !== '' ? (Number(remixes) - Number(prevRemixes)) : '';
+            
+            allLines.push([
+              userKey, handle, userId,
+              pid, url, caption, postTime,
+              ownerKey, ownerHandle, ownerId,
+              tFormatted, tISO, ageMin,
+              uv, views, likes, comments, remixes,
+              ir != null ? ir.toFixed(2) : '', rr != null ? rr : '', lr != null ? lr.toFixed(2) : '',
+              viewsChange, likesChange, commentsChange, remixesChange
+            ].map(escapeCSV).join(','));
+            
+            if (views !== '') prevViews = Number(views);
+            if (likes !== '') prevLikes = Number(likes);
+            if (comments !== '') prevComments = Number(comments);
+            if (remixes !== '') prevRemixes = Number(remixes);
+          }
+        }
+      }
+      
+      // === SHEET 3: User Followers History ===
+      allLines.push('');
+      allLines.push('=== USER FOLLOWERS HISTORY (Complete Timeline) ===');
+      const followersHeader = [
+        'User Key', 'User Handle', 'User ID', 
+        'Timestamp', 'Timestamp (ISO)', 'Follower Count', 'Follower Change', 'Days Since First'
+      ];
+      allLines.push(followersHeader.map(escapeCSV).join(','));
+      
+      for (const [userKey, user] of Object.entries(metrics.users || {})){
+        const handle = user.handle || '';
+        const userId = user.id || '';
+        const followers = Array.isArray(user.followers) ? user.followers : [];
+        
+        let firstTimestamp = null;
+        let prevCount = null;
+        
+        for (const entry of followers){
+          const t = entry.t ? Number(entry.t) : null;
+          const tFormatted = t ? fmtTimestamp(t) : '';
+          const tISO = t ? new Date(t).toISOString() : '';
+          const count = entry.count ?? '';
+          
+          if (firstTimestamp === null && t) firstTimestamp = t;
+          const daysSinceFirst = firstTimestamp && t ? ((t - firstTimestamp) / (24 * 60 * 60 * 1000)).toFixed(2) : '';
+          const followerChange = prevCount != null && count !== '' ? (Number(count) - Number(prevCount)) : '';
+          
+          allLines.push([
+            userKey, handle, userId,
+            tFormatted, tISO, count, followerChange, daysSinceFirst
+          ].map(escapeCSV).join(','));
+          
+          if (count !== '') prevCount = Number(count);
+        }
+      }
+      
+      // === SHEET 4: User Cameos History ===
+      allLines.push('');
+      allLines.push('=== USER CAMEOS HISTORY (Complete Timeline) ===');
+      const cameosHeader = [
+        'User Key', 'User Handle', 'User ID',
+        'Timestamp', 'Timestamp (ISO)', 'Cameo Count', 'Cameo Change', 'Days Since First'
+      ];
+      allLines.push(cameosHeader.map(escapeCSV).join(','));
+      
+      for (const [userKey, user] of Object.entries(metrics.users || {})){
+        const handle = user.handle || '';
+        const userId = user.id || '';
+        const cameos = Array.isArray(user.cameos) ? user.cameos : [];
+        
+        let firstTimestamp = null;
+        let prevCount = null;
+        
+        for (const entry of cameos){
+          const t = entry.t ? Number(entry.t) : null;
+          const tFormatted = t ? fmtTimestamp(t) : '';
+          const tISO = t ? new Date(t).toISOString() : '';
+          const count = entry.count ?? '';
+          
+          if (firstTimestamp === null && t) firstTimestamp = t;
+          const daysSinceFirst = firstTimestamp && t ? ((t - firstTimestamp) / (24 * 60 * 60 * 1000)).toFixed(2) : '';
+          const cameoChange = prevCount != null && count !== '' ? (Number(count) - Number(prevCount)) : '';
+          
+          allLines.push([
+            userKey, handle, userId,
+            tFormatted, tISO, count, cameoChange, daysSinceFirst
+          ].map(escapeCSV).join(','));
+          
+          if (count !== '') prevCount = Number(count);
+        }
+      }
+      
+      // === SHEET 5: Users Summary ===
+      allLines.push('');
+      allLines.push('=== USERS SUMMARY (Aggregated Totals) ===');
+      const usersHeader = [
+        'User Key', 'User Handle', 'User ID', 
+        'Post Count', 'Total Snapshots',
+        'Latest Follower Count', 'Latest Follower Timestamp', 'Follower History Points',
+        'Latest Cameo Count', 'Latest Cameo Timestamp', 'Cameo History Points',
+        'Total Views (Latest)', 'Total Likes (Latest)', 'Total Comments (Latest)', 'Total Remixes (Latest)',
+        'Total Interactions (Latest)', 'Average Interaction Rate %', 'Average Remix Rate %',
+        'First Post Time', 'Last Post Time', 'Post Time Span (days)'
+      ];
+      allLines.push(usersHeader.map(escapeCSV).join(','));
+      
+      for (const [userKey, user] of Object.entries(metrics.users || {})){
+        const handle = user.handle || '';
+        const userId = user.id || '';
+        const postCount = Object.keys(user.posts || {}).length;
+        
+        let totalSnapshots = 0;
+        let firstPostTime = null;
+        let lastPostTime = null;
+        let totalIR = 0;
+        let irCount = 0;
+        let totalRR = 0;
+        let rrCount = 0;
+        
+        for (const [pid, post] of Object.entries(user.posts || {})){
+          const snaps = Array.isArray(post.snapshots) ? post.snapshots : [];
+          totalSnapshots += snaps.length;
+          
+          const postTime = getPostTimeStrict(post);
+          if (postTime) {
+            if (!firstPostTime || postTime < firstPostTime) firstPostTime = postTime;
+            if (!lastPostTime || postTime > lastPostTime) lastPostTime = postTime;
+          }
+          
+          const latest = latestSnapshot(snaps);
+          if (latest) {
+            const ir = interactionRate(latest);
+            if (ir != null) { totalIR += ir; irCount++; }
+            
+            const likes = latest.likes;
+            const remixes = latest.remix_count ?? latest.remixes;
+            const rr = remixRate(likes, remixes);
+            if (rr != null) { totalRR += Number(rr); rrCount++; }
+          }
+        }
+        
+        const followers = Array.isArray(user.followers) ? user.followers : [];
+        const latestFollowers = followers.length > 0 ? (followers[followers.length - 1]?.count ?? '') : '';
+        const latestFollowersTime = followers.length > 0 ? fmtTimestamp(followers[followers.length - 1]?.t) : '';
+        const followerHistoryPoints = followers.length;
+        
+        const cameos = Array.isArray(user.cameos) ? user.cameos : [];
+        const latestCameos = cameos.length > 0 ? (cameos[cameos.length - 1]?.count ?? '') : '';
+        const latestCameosTime = cameos.length > 0 ? fmtTimestamp(cameos[cameos.length - 1]?.t) : '';
+        const cameoHistoryPoints = cameos.length;
+        
+        const totals = computeTotalsForUser(user);
+        const avgIR = irCount > 0 ? (totalIR / irCount).toFixed(2) : '';
+        const avgRR = rrCount > 0 ? (totalRR / rrCount).toFixed(2) : '';
+        
+        const firstPostTimeFormatted = firstPostTime ? fmtTimestamp(firstPostTime) : '';
+        const lastPostTimeFormatted = lastPostTime ? fmtTimestamp(lastPostTime) : '';
+        const postTimeSpan = firstPostTime && lastPostTime ? ((lastPostTime - firstPostTime) / (24 * 60 * 60 * 1000)).toFixed(2) : '';
+        
+        allLines.push([
+          userKey, handle, userId,
+          postCount, totalSnapshots,
+          latestFollowers, latestFollowersTime, followerHistoryPoints,
+          latestCameos, latestCameosTime, cameoHistoryPoints,
+          totals.views, totals.likes, totals.replies, totals.remixes,
+          totals.interactions, avgIR, avgRR,
+          firstPostTimeFormatted, lastPostTimeFormatted, postTimeSpan
+        ].map(escapeCSV).join(','));
+      }
+      
+      // Create and download CSV
+      const csvContent = allLines.join('\n');
+      const blob = new Blob([csvContent], {type:'text/csv;charset=utf-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      a.download = `sora_all_data_export_${timestamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      console.error('[Dashboard] Export all data failed', e);
+      alert('Export failed. Please check the console for details.');
+    }
+  }
+
+  // Parse CSV line handling quoted fields
+  function parseCSVLine(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const nextChar = line[i + 1];
+      
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          current += '"';
+          i++; // Skip next quote
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  }
+
+  // Convert ISO timestamp string back to milliseconds timestamp
+  function parseTimestamp(tsStr) {
+    if (!tsStr || tsStr === '') return null;
+    const d = Date.parse(tsStr);
+    if (!isNaN(d)) return d;
+    return toTs(tsStr);
+  }
+
+  async function importDataCSV(file) {
+    try {
+      const text = await file.text();
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+      
+      if (lines.length === 0) {
+        alert('CSV file is empty.');
+        return;
+      }
+
+      // Load existing metrics
+      const existingMetrics = await loadMetrics();
+      const metrics = {
+        users: JSON.parse(JSON.stringify(existingMetrics.users || {}))
+      };
+
+      let currentSection = null;
+      let headerRow = null;
+      let sectionStartIdx = 0;
+      const stats = {
+        postsAdded: 0,
+        postsUpdated: 0,
+        snapshotsAdded: 0,
+        snapshotsSkipped: 0,
+        followersAdded: 0,
+        followersSkipped: 0,
+        cameosAdded: 0,
+        cameosSkipped: 0,
+        usersAdded: 0,
+        usersUpdated: 0
+      };
+
+      // Process each line
+      let dataStartIdx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Check for section headers
+        if (line.startsWith('===') && line.endsWith('===')) {
+          // Process previous section if any
+          if (currentSection && headerRow && dataStartIdx >= 0 && i > dataStartIdx) {
+            const sectionRows = lines.slice(dataStartIdx, i).filter(r => r && r.trim());
+            await processSection(currentSection, headerRow, sectionRows, metrics, stats);
+          }
+          
+          // Determine new section
+          if (line.includes('POSTS SUMMARY')) {
+            currentSection = 'posts_summary';
+          } else if (line.includes('POST SNAPSHOTS')) {
+            currentSection = 'snapshots';
+          } else if (line.includes('USER FOLLOWERS HISTORY')) {
+            currentSection = 'followers';
+          } else if (line.includes('USER CAMEOS HISTORY')) {
+            currentSection = 'cameos';
+          } else if (line.includes('USERS SUMMARY')) {
+            currentSection = 'users_summary';
+          } else {
+            currentSection = null;
+          }
+          
+          headerRow = null;
+          dataStartIdx = -1;
+          continue;
+        }
+        
+        // First non-header line after section marker is the header
+        if (currentSection && !headerRow && !line.startsWith('===')) {
+          headerRow = parseCSVLine(line);
+          dataStartIdx = i + 1; // Data starts after header
+          continue;
+        }
+      }
+      
+      // Process last section
+      if (currentSection && headerRow && dataStartIdx >= 0) {
+        const sectionRows = lines.slice(dataStartIdx).filter(r => r && r.trim());
+        await processSection(currentSection, headerRow, sectionRows, metrics, stats);
+      }
+
+      // Save merged metrics
+      await chrome.storage.local.set({ metrics });
+      
+      // Show success message with stats
+      const message = `Import completed!\n\n` +
+        `Posts: ${stats.postsAdded} added, ${stats.postsUpdated} updated\n` +
+        `Snapshots: ${stats.snapshotsAdded} added, ${stats.snapshotsSkipped} skipped (duplicates)\n` +
+        `Followers: ${stats.followersAdded} added, ${stats.followersSkipped} skipped (duplicates)\n` +
+        `Cameos: ${stats.cameosAdded} added, ${stats.cameosSkipped} skipped (duplicates)\n` +
+        `Users: ${stats.usersAdded} added, ${stats.usersUpdated} updated`;
+      
+      alert(message);
+      
+      // Reload the dashboard
+      window.location.reload();
+      
+    } catch (e) {
+      console.error('[Dashboard] Import failed', e);
+      alert('Import failed: ' + (e.message || 'Unknown error. Please check the console for details.'));
+    }
+  }
+
+  async function processSection(section, header, rows, metrics, stats) {
+    if (!header || header.length === 0) return;
+    
+    // Create column index map
+    const colIdx = {};
+    header.forEach((col, idx) => {
+      colIdx[col.toLowerCase()] = idx;
+    });
+
+    const getUserKeyIdx = () => colIdx['user key'] ?? colIdx['userkey'];
+    const getHandleIdx = () => colIdx['user handle'] ?? colIdx['userhandle'];
+    const getUserIdIdx = () => colIdx['user id'] ?? colIdx['userid'];
+    const getPostIdIdx = () => colIdx['post id'] ?? colIdx['postid'];
+    
+    for (const row of rows) {
+      if (!row || row.trim() === '') continue;
+      
+      const cols = parseCSVLine(row);
+      if (cols.length < header.length) continue; // Skip incomplete rows
+      
+      const getCol = (name) => {
+        const idx = colIdx[name.toLowerCase()];
+        return idx != null && idx < cols.length ? cols[idx] : '';
+      };
+      
+      const userKeyIdx = getUserKeyIdx();
+      const handleIdx = getHandleIdx();
+      const userIdIdx = getUserIdIdx();
+      
+      if (userKeyIdx == null) continue;
+      
+      const userKey = cols[userKeyIdx] || 'unknown';
+      const handle = handleIdx != null ? cols[handleIdx] : '';
+      const userId = userIdIdx != null ? cols[userIdIdx] : '';
+      
+      // Ensure user exists
+      if (!metrics.users[userKey]) {
+        metrics.users[userKey] = {
+          handle: handle || null,
+          id: userId || null,
+          posts: {},
+          followers: [],
+          cameos: []
+        };
+        stats.usersAdded++;
+      } else {
+        // Update handle/id if missing
+        if (!metrics.users[userKey].handle && handle) metrics.users[userKey].handle = handle;
+        if (!metrics.users[userKey].id && userId) metrics.users[userKey].id = userId;
+        stats.usersUpdated++;
+      }
+      
+      const user = metrics.users[userKey];
+      
+      if (section === 'posts_summary') {
+        const postIdIdx = getPostIdIdx();
+        if (postIdIdx == null) continue;
+        
+        const postId = cols[postIdIdx];
+        if (!postId) continue;
+        
+        const url = getCol('Post URL') || `${SITE_ORIGIN}/p/${postId}`;
+        const caption = getCol('Caption') || '';
+        const thumb = getCol('Thumbnail URL') || '';
+        const postTimeISO = getCol('Post Time (ISO)') || getCol('Post Time');
+        const postTime = parseTimestamp(postTimeISO);
+        const ownerKey = getCol('Owner Key') || userKey;
+        const ownerHandle = getCol('Owner Handle') || handle;
+        const ownerId = getCol('Owner ID') || userId;
+        const parentPostId = getCol('Parent Post ID') || '';
+        const rootPostId = getCol('Root Post ID') || '';
+        const lastSeenISO = getCol('Last Seen Timestamp');
+        const lastSeen = parseTimestamp(lastSeenISO);
+        
+        // Latest snapshot data
+        const snapshotTimeISO = getCol('Latest Snapshot Timestamp');
+        const snapshotTime = parseTimestamp(snapshotTimeISO);
+        const uv = getCol('Unique Views');
+        const views = getCol('Total Views');
+        const likes = getCol('Likes');
+        const comments = getCol('Comments');
+        const remixes = getCol('Remixes');
+        
+        if (!user.posts[postId]) {
+          user.posts[postId] = {
+            url: url,
+            thumb: thumb,
+            caption: caption || null,
+            snapshots: [],
+            ownerKey: ownerKey,
+            ownerHandle: ownerHandle,
+            ownerId: ownerId || null,
+            parent_post_id: parentPostId || null,
+            root_post_id: rootPostId || null,
+            lastSeen: lastSeen || null
+          };
+          stats.postsAdded++;
+        } else {
+          // Update existing post metadata
+          const post = user.posts[postId];
+          if (!post.url && url) post.url = url;
+          if (!post.thumb && thumb) post.thumb = thumb;
+          if (!post.caption && caption) post.caption = caption;
+          if (!post.ownerKey && ownerKey) post.ownerKey = ownerKey;
+          if (!post.ownerHandle && ownerHandle) post.ownerHandle = ownerHandle;
+          if (!post.ownerId && ownerId) post.ownerId = ownerId;
+          if (!post.parent_post_id && parentPostId) post.parent_post_id = parentPostId;
+          if (!post.root_post_id && rootPostId) post.root_post_id = rootPostId;
+          if (!post.lastSeen && lastSeen) post.lastSeen = lastSeen;
+          stats.postsUpdated++;
+        }
+        
+        // Set post_time if available
+        if (postTime && !user.posts[postId].post_time) {
+          user.posts[postId].post_time = postTime;
+        }
+        
+        // Add snapshot if timestamp and data available
+        if (snapshotTime && (uv !== '' || views !== '' || likes !== '' || comments !== '' || remixes !== '')) {
+          const post = user.posts[postId];
+          const existingSnap = post.snapshots.find(s => s.t === snapshotTime);
+          if (!existingSnap) {
+            const snap = { t: snapshotTime };
+            if (uv !== '') snap.uv = Number(uv) || 0;
+            if (views !== '') snap.views = Number(views) || 0;
+            if (likes !== '') snap.likes = Number(likes) || 0;
+            if (comments !== '') snap.comments = Number(comments) || 0;
+            if (remixes !== '') snap.remix_count = Number(remixes) || 0;
+            post.snapshots.push(snap);
+            stats.snapshotsAdded++;
+          } else {
+            stats.snapshotsSkipped++;
+          }
+        }
+        
+      } else if (section === 'snapshots') {
+        const postIdIdx = getPostIdIdx();
+        if (postIdIdx == null) continue;
+        
+        const postId = cols[postIdIdx];
+        if (!postId) continue;
+        
+        // Ensure post exists
+        if (!user.posts[postId]) {
+          const url = getCol('Post URL') || `${SITE_ORIGIN}/p/${postId}`;
+          const caption = getCol('Post Caption') || '';
+          const postTimeISO = getCol('Post Time');
+          const postTime = parseTimestamp(postTimeISO);
+          const ownerKey = getCol('Owner Key') || userKey;
+          const ownerHandle = getCol('Owner Handle') || handle;
+          const ownerId = getCol('Owner ID') || userId;
+          
+          user.posts[postId] = {
+            url: url,
+            thumb: '',
+            caption: caption || null,
+            snapshots: [],
+            ownerKey: ownerKey,
+            ownerHandle: ownerHandle,
+            ownerId: ownerId || null
+          };
+          if (postTime) user.posts[postId].post_time = postTime;
+          stats.postsAdded++;
+        }
+        
+        const snapshotTimeISO = getCol('Snapshot Timestamp (ISO)') || getCol('Snapshot Timestamp');
+        const snapshotTime = parseTimestamp(snapshotTimeISO);
+        if (!snapshotTime) continue;
+        
+        const post = user.posts[postId];
+        const existingSnap = post.snapshots.find(s => s.t === snapshotTime);
+        if (!existingSnap) {
+          const snap = { t: snapshotTime };
+          const uv = getCol('Unique Views');
+          const views = getCol('Total Views');
+          const likes = getCol('Likes');
+          const comments = getCol('Comments');
+          const remixes = getCol('Remixes');
+          
+          if (uv !== '') snap.uv = Number(uv) || 0;
+          if (views !== '') snap.views = Number(views) || 0;
+          if (likes !== '') snap.likes = Number(likes) || 0;
+          if (comments !== '') snap.comments = Number(comments) || 0;
+          if (remixes !== '') snap.remix_count = Number(remixes) || 0;
+          
+          post.snapshots.push(snap);
+          stats.snapshotsAdded++;
+        } else {
+          stats.snapshotsSkipped++;
+        }
+        
+      } else if (section === 'followers') {
+        const timestampISO = getCol('Timestamp (ISO)') || getCol('Timestamp');
+        const timestamp = parseTimestamp(timestampISO);
+        if (!timestamp) continue;
+        
+        const count = getCol('Follower Count');
+        if (count === '') continue;
+        
+        const existingEntry = user.followers.find(f => f.t === timestamp);
+        if (!existingEntry) {
+          user.followers.push({ t: timestamp, count: Number(count) || 0 });
+          stats.followersAdded++;
+        } else {
+          stats.followersSkipped++;
+        }
+        
+      } else if (section === 'cameos') {
+        const timestampISO = getCol('Timestamp (ISO)') || getCol('Timestamp');
+        const timestamp = parseTimestamp(timestampISO);
+        if (!timestamp) continue;
+        
+        const count = getCol('Cameo Count');
+        if (count === '') continue;
+        
+        const existingEntry = user.cameos.find(c => c.t === timestamp);
+        if (!existingEntry) {
+          user.cameos.push({ t: timestamp, count: Number(count) || 0 });
+          stats.cameosAdded++;
+        } else {
+          stats.cameosSkipped++;
+        }
+      }
+      // Note: users_summary section is informational only, we don't need to process it
+    }
+    
+    // Sort snapshots, followers, and cameos by timestamp after processing
+    for (const user of Object.values(metrics.users)) {
+      if (Array.isArray(user.followers)) {
+        user.followers.sort((a, b) => (a.t || 0) - (b.t || 0));
+      }
+      if (Array.isArray(user.cameos)) {
+        user.cameos.sort((a, b) => (a.t || 0) - (b.t || 0));
+      }
+      for (const post of Object.values(user.posts || {})) {
+        if (Array.isArray(post.snapshots)) {
+          post.snapshots.sort((a, b) => (a.t || 0) - (b.t || 0));
+        }
+      }
+    }
   }
 
   async function main(){
@@ -924,14 +2044,213 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const st = await chrome.storage.local.get('visibilityByUser');
       visibilityByUser = st.visibilityByUser || {};
     } catch {}
+    
+    // Compare users state
+    const compareUsers = new Set();
+    const MAX_COMPARE_USERS = 10;
 
     function persistVisibility(){
       visibilityByUser[currentUserKey] = Array.from(visibleSet);
       try { chrome.storage.local.set({ visibilityByUser }); } catch {}
     }
 
+    function renderComparePills(){
+      const container = $('#comparePills');
+      if (!container) return;
+      container.innerHTML = '';
+      const users = Array.from(compareUsers);
+      users.forEach((userKey, idx)=>{
+        const user = metrics.users[userKey];
+        const handle = user?.handle || userKey;
+        const color = COLORS[idx % COLORS.length];
+        const pill = document.createElement('div');
+        pill.className = 'compare-pill';
+        pill.dataset.userKey = userKey;
+        pill.style.background = color;
+        pill.style.borderColor = color;
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'compare-pill-name';
+        nameSpan.textContent = handle;
+        nameSpan.style.color = '#fff';
+        const removeBtn = document.createElement('span');
+        removeBtn.className = 'compare-pill-remove';
+        removeBtn.textContent = '×';
+        removeBtn.style.opacity = '1';
+        removeBtn.style.pointerEvents = 'auto';
+        removeBtn.style.color = '#fff';
+        removeBtn.style.textShadow = '0 1px 2px rgba(0,0,0,0.5)';
+        removeBtn.onclick = (e)=>{
+          e.stopPropagation();
+          compareUsers.delete(userKey);
+          // If compare section becomes empty, add current user to show who we're looking at
+          if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+            addCompareUser(currentUserKey);
+          } else {
+            renderComparePills();
+            buildCompareDropdown();
+            updateCompareCharts();
+          }
+        };
+        pill.appendChild(nameSpan);
+        pill.appendChild(removeBtn);
+        container.appendChild(pill);
+      });
+      if (compareUsers.size < MAX_COMPARE_USERS){
+        const addBtn = document.createElement('button');
+        addBtn.className = 'compare-add-btn';
+        addBtn.textContent = '+';
+        addBtn.title = 'Add user';
+        addBtn.onclick = ()=>{
+          $('#compareSearch').focus();
+        };
+        container.appendChild(addBtn);
+      }
+      const searchInput = $('#compareSearch');
+      if (searchInput) searchInput.disabled = compareUsers.size >= MAX_COMPARE_USERS;
+    }
+
+    function addCompareUser(userKey){
+      if (compareUsers.size >= MAX_COMPARE_USERS) return;
+      if (!metrics.users[userKey]) return;
+      if (compareUsers.has(userKey)) return;
+      compareUsers.add(userKey);
+      renderComparePills();
+      buildCompareDropdown();
+      updateCompareCharts();
+      $('#compareSearch').value = '';
+      $('#compareSuggestions').style.display = 'none';
+    }
+
+    function updateCompareCharts(){
+      const userKeys = Array.from(compareUsers);
+      if (userKeys.length === 0){
+        refreshUserUI();
+        return;
+      }
+      
+      // Update allViewsChart
+      try {
+        const allSeries = [];
+        userKeys.forEach((userKey, idx)=>{
+          const user = metrics.users[userKey];
+          if (!user) return;
+          const pts = (function(){
+            const events = [];
+            for (const [pid, p] of Object.entries(user.posts||{})){
+              for (const s of (p.snapshots||[])){
+                const t = Number(s.t), v = Number(s.views);
+                if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+              }
+            }
+            events.sort((a,b)=> a.t - b.t);
+            const latest = new Map();
+            let total = 0;
+            const out = [];
+            for (const e of events){
+              const prev = latest.get(e.pid) || 0;
+              if (e.v !== prev){
+                latest.set(e.pid, e.v);
+                total += (e.v - prev);
+                out.push({ x: e.t, y: total, t: e.t });
+              }
+            }
+            return out;
+          })();
+          if (pts.length){
+            const color = COLORS[idx % COLORS.length];
+            const handle = user.handle || userKey;
+            allSeries.push({ id: userKey, label: `@${handle}'s Views`, color, points: pts });
+          }
+        });
+        allViewsChart.setData(allSeries);
+      } catch {}
+
+      // Update allLikesChart
+      try {
+        const allSeries = [];
+        userKeys.forEach((userKey, idx)=>{
+          const user = metrics.users[userKey];
+          if (!user) return;
+          const ptsLikes = (function(){
+            const events = [];
+            for (const [pid, p] of Object.entries(user.posts||{})){
+              for (const s of (p.snapshots||[])){
+                const t = Number(s.t), v = Number(s.likes);
+                if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+              }
+            }
+            events.sort((a,b)=> a.t - b.t);
+            const latest = new Map();
+            let total = 0;
+            const out = [];
+            for (const e of events){
+              const prev = latest.get(e.pid) || 0;
+              if (e.v !== prev){
+                latest.set(e.pid, e.v);
+                total += (e.v - prev);
+                out.push({ x: e.t, y: total, t: e.t });
+              }
+            }
+            return out;
+          })();
+          if (ptsLikes.length){
+            const color = COLORS[idx % COLORS.length];
+            const handle = user.handle || userKey;
+            allSeries.push({ id: userKey, label: `@${handle}'s Likes`, color, points: ptsLikes });
+          }
+        });
+        allLikesChart.setData(allSeries);
+      } catch {}
+
+      // Update cameosChart
+      try {
+        const allSeries = [];
+        userKeys.forEach((userKey, idx)=>{
+          const user = metrics.users[userKey];
+          if (!user) return;
+          const arr = Array.isArray(user.cameos) ? user.cameos : [];
+          const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+          if (pts.length){
+            const color = COLORS[idx % COLORS.length];
+            const handle = user.handle || userKey;
+            allSeries.push({ id: userKey, label: `@${handle}'s Cameos`, color, points: pts });
+          }
+        });
+        cameosChart.setData(allSeries);
+      } catch {}
+
+      // Update followersChart
+      try {
+        const allSeries = [];
+        userKeys.forEach((userKey, idx)=>{
+          const user = metrics.users[userKey];
+          if (!user) return;
+          const arr = Array.isArray(user.followers) ? user.followers : [];
+          const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+          if (pts.length){
+            const color = COLORS[idx % COLORS.length];
+            const handle = user.handle || userKey;
+            allSeries.push({ id: userKey, label: `@${handle}'s Followers`, color, points: pts });
+          }
+        });
+        followersChart.setData(allSeries);
+      } catch {}
+
+      // Update metric cards with aggregated totals across all compared users
+      try {
+        const totals = computeTotalsForUsers(userKeys, metrics);
+        const allViewsEl = $('#allViewsTotal'); if (allViewsEl) allViewsEl.textContent = fmt2(totals.views);
+        const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(totals.likes);
+        const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(totals.replies);
+        const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(totals.remixes);
+        const allInterEl = $('#allInteractionsTotal'); if (allInterEl) allInterEl.textContent = fmt2(totals.interactions);
+        const allCameosEl = $('#allCameosTotal'); if (allCameosEl) allCameosEl.textContent = fmtK2OrInt(totals.cameos);
+        const followersEl = $('#followersTotal'); if (followersEl) followersEl.textContent = fmtK2OrInt(totals.followers);
+      } catch {}
+    }
+
     async function refreshUserUI(opts={}){
-      const { preserveEmpty=false } = opts;
+      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
       const user = metrics.users[currentUserKey];
       if (!user){
         buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
@@ -966,21 +2285,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
       }
       buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); } });
-      // Update unfiltered totals cards
-      try {
-        const t = computeTotalsForUser(user);
-        const allViewsEl = $('#allViewsTotal'); if (allViewsEl) allViewsEl.textContent = fmt2(t.views);
-        const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(t.likes);
-        const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(t.replies);
-        const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(t.remixes);
-        const allInterEl = $('#allInteractionsTotal'); if (allInterEl) allInterEl.textContent = fmt2(t.interactions);
-        const allCameosEl = $('#allCameosTotal');
-        if (allCameosEl) {
-          const arr = Array.isArray(user.cameos) ? user.cameos : [];
-          const last = arr[arr.length - 1];
-          allCameosEl.textContent = last ? fmtK2OrInt(last.count) : '0';
-        }
-      } catch {}
       const series = computeSeriesForUser(user, [], colorFor)
         .filter(s=>visibleSet.has(s.id))
         .map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) }));
@@ -992,97 +2296,116 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
-      // All posts cumulative likes (unfiltered): aggregate across all posts
-      try {
-        const ptsLikes = (function(){
-          const events = [];
-          for (const [pid, p] of Object.entries(user.posts||{})){
-            for (const s of (p.snapshots||[])){
-              const t = Number(s.t), v = Number(s.likes);
-              if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
-            }
+      // Only update compare charts if no compare users are selected
+      if (compareUsers.size === 0){
+        // Update unfiltered totals cards for single user
+        try {
+          const t = computeTotalsForUser(user);
+          const allViewsEl = $('#allViewsTotal'); if (allViewsEl) allViewsEl.textContent = fmt2(t.views);
+          const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(t.likes);
+          const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(t.replies);
+          const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(t.remixes);
+          const allInterEl = $('#allInteractionsTotal'); if (allInterEl) allInterEl.textContent = fmt2(t.interactions);
+          const allCameosEl = $('#allCameosTotal');
+          if (allCameosEl) {
+            const arr = Array.isArray(user.cameos) ? user.cameos : [];
+            const last = arr[arr.length - 1];
+            allCameosEl.textContent = last ? fmtK2OrInt(last.count) : '0';
           }
-          events.sort((a,b)=> a.t - b.t);
-          const latest = new Map();
-          let total = 0;
-          const out = [];
-          for (const e of events){
-            const prev = latest.get(e.pid) || 0;
-            if (e.v !== prev){
-              latest.set(e.pid, e.v);
-              total += (e.v - prev);
-              out.push({ x: e.t, y: total, t: e.t });
-            }
+          const followersEl = $('#followersTotal');
+          if (followersEl){
+            const arr = Array.isArray(user.followers) ? user.followers : [];
+            const last = arr[arr.length - 1];
+            followersEl.textContent = last ? fmtK2OrInt(last.count) : '0';
           }
-          return out;
+        } catch {}
+        // All posts cumulative likes (unfiltered): aggregate across all posts
+        try {
+          const ptsLikes = (function(){
+            const events = [];
+            for (const [pid, p] of Object.entries(user.posts||{})){
+              for (const s of (p.snapshots||[])){
+                const t = Number(s.t), v = Number(s.likes);
+                if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+              }
+            }
+            events.sort((a,b)=> a.t - b.t);
+            const latest = new Map();
+            let total = 0;
+            const out = [];
+            for (const e of events){
+              const prev = latest.get(e.pid) || 0;
+              if (e.v !== prev){
+                latest.set(e.pid, e.v);
+                total += (e.v - prev);
+                out.push({ x: e.t, y: total, t: e.t });
+              }
+            }
+            return out;
+          })();
+          const colorLikes = '#ff8a7a';
+          const seriesLikes = ptsLikes.length ? [{ id: 'all_posts_likes', label: 'Likes', color: colorLikes, points: ptsLikes }] : [];
+          allLikesChart.setData(seriesLikes);
+        } catch {}
+        // All posts cumulative views (unfiltered): aggregate across all posts
+        try {
+          const pts = (function(){
+            const events = [];
+            for (const [pid, p] of Object.entries(user.posts||{})){
+              for (const s of (p.snapshots||[])){
+                const t = Number(s.t), v = Number(s.views);
+                if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
+              }
+            }
+            events.sort((a,b)=> a.t - b.t);
+            const latest = new Map();
+            let total = 0;
+            const out = [];
+            for (const e of events){
+              const prev = latest.get(e.pid) || 0;
+              if (e.v !== prev){
+                latest.set(e.pid, e.v);
+                total += (e.v - prev);
+                out.push({ x: e.t, y: total, t: e.t });
+              }
+            }
+            return out;
+          })();
+          const color = '#7dc4ff';
+          const series = pts.length ? [{ id: 'all_posts', label: 'Views', color, points: pts }] : [];
+          allViewsChart.setData(series);
+        } catch {}
+        // Cameos chart: use user-level cameo count history when available
+        const cSeries = (function(){
+          const arr = Array.isArray(user.cameos) ? user.cameos : [];
+          const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+          const color = '#95e06c';
+          return pts.length ? [{ id: 'cameos', label: 'Cameos', color, points: pts }] : [];
         })();
-        const colorLikes = '#ff8a7a';
-        const seriesLikes = ptsLikes.length ? [{ id: 'all_posts_likes', color: colorLikes, points: ptsLikes }] : [];
-        allLikesChart.setData(seriesLikes);
-      } catch {}
-      // All posts cumulative views (unfiltered): aggregate across all posts
-      try {
-        const pts = (function(){
-          const events = [];
-          for (const [pid, p] of Object.entries(user.posts||{})){
-            for (const s of (p.snapshots||[])){
-              const t = Number(s.t), v = Number(s.views);
-              if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
-            }
-          }
-          events.sort((a,b)=> a.t - b.t);
-          const latest = new Map();
-          let total = 0;
-          const out = [];
-          for (const e of events){
-            const prev = latest.get(e.pid) || 0;
-            if (e.v !== prev){
-              latest.set(e.pid, e.v);
-              total += (e.v - prev);
-              out.push({ x: e.t, y: total, t: e.t });
-            }
-          }
-          return out;
-        })();
-        const color = '#7dc4ff';
-        const series = pts.length ? [{ id: 'all_posts', color, points: pts }] : [];
-        allViewsChart.setData(series);
-      } catch {}
-      // Cameos chart: use user-level cameo count history when available
-      const cSeries = (function(){
-        const arr = Array.isArray(user.cameos) ? user.cameos : [];
-        const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
-        const color = '#95e06c';
-        return pts.length ? [{ id: 'cameos', color, points: pts }] : [];
-      })();
-      cameosChart.setData(cSeries);
-      // Update Total Followers card
-      try {
-        const fEl = $('#followersTotal');
-        if (fEl){
+        cameosChart.setData(cSeries);
+        // Followers chart: use user-level follower history when available
+        const fSeries = (function(){
           const arr = Array.isArray(user.followers) ? user.followers : [];
-          const last = arr[arr.length - 1];
-          fEl.textContent = last ? fmtK2OrInt(last.count) : '0';
-        }
-      } catch {}
-      // Followers chart: use user-level follower history when available
-      const fSeries = (function(){
-        const arr = Array.isArray(user.followers) ? user.followers : [];
-        const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
-        const color = '#ffd166';
-        return pts.length ? [{ id: 'followers', color, points: pts }] : [];
-      })();
-      followersChart.setData(fSeries);
-      // Restore any saved zoom for this user
-      try {
-        const z = zoomStates[currentUserKey] || {};
-        if (z.scatter) chart.setZoom(z.scatter);
-        if (z.views) viewsChart.setZoom(z.views);
-        if (z.likesAll) allLikesChart.setZoom(z.likesAll);
-        if (z.cameos) cameosChart.setZoom(z.cameos);
-        if (z.followers) followersChart.setZoom(z.followers);
-        if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
-      } catch {}
+          const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
+          const color = '#ffd166';
+          return pts.length ? [{ id: 'followers', label: 'Followers', color, points: pts }] : [];
+        })();
+        followersChart.setData(fSeries);
+      } else {
+        updateCompareCharts();
+      }
+      // Restore any saved zoom for this user (unless skipRestoreZoom is true)
+      if (!skipRestoreZoom) {
+        try {
+          const z = zoomStates[currentUserKey] || {};
+          if (z.scatter) chart.setZoom(z.scatter);
+          if (z.views) viewsChart.setZoom(z.views);
+          if (z.likesAll) allLikesChart.setZoom(z.likesAll);
+          if (z.cameos) cameosChart.setZoom(z.cameos);
+          if (z.followers) followersChart.setZoom(z.followers);
+          if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
+        } catch {}
+      }
       // Sync chart hover back to list
       chart.onHover((pid)=>{
         const wrap = $('#posts');
@@ -1154,6 +2477,26 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     $('#userSelect').addEventListener('change', async (e)=>{
       currentUserKey = e.target.value; visibleSet.clear();
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+      // Reset to "Show All" when selecting a new user
+      const u = metrics.users[currentUserKey];
+      if (u) {
+        Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
+        chart.resetZoom();
+        viewsChart.resetZoom();
+        followersChart.resetZoom();
+        allViewsChart.resetZoom();
+        allLikesChart.resetZoom();
+        cameosChart.resetZoom();
+      }
+      // If exactly one user in compare, replace it with the new selection
+      if (compareUsers.size === 1 && currentUserKey && metrics.users[currentUserKey]){
+        compareUsers.clear();
+        addCompareUser(currentUserKey);
+      }
+      // If compare section is empty, add current user to show who we're looking at
+      else if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+        addCompareUser(currentUserKey);
+      }
       refreshUserUI({ preserveEmpty: true });
       persistVisibility();
     });
@@ -1170,12 +2513,470 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       $$('#suggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{
           currentUserKey = it.dataset.key; visibleSet.clear(); $('#search').value = ''; suggestions.style.display='none';
-          const sel = $('#userSelect'); sel.value = currentUserKey; refreshUserUI();
+          const sel = $('#userSelect'); sel.value = currentUserKey;
+          // Reset to "Show All" when selecting a new user
+          const u = metrics.users[currentUserKey];
+          if (u) {
+            Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
+            chart.resetZoom();
+            viewsChart.resetZoom();
+            followersChart.resetZoom();
+            allViewsChart.resetZoom();
+            allLikesChart.resetZoom();
+            cameosChart.resetZoom();
+          }
+          // If exactly one user in compare, replace it with the new selection
+          if (compareUsers.size === 1 && currentUserKey && metrics.users[currentUserKey]){
+            compareUsers.clear();
+            addCompareUser(currentUserKey);
+          }
+          // If compare section is empty, add current user to show who we're looking at
+          else if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+            addCompareUser(currentUserKey);
+          }
+          refreshUserUI();
           try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
         });
       });
     });
     document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker')) $('#suggestions').style.display='none'; });
+
+    function buildCompareDropdown(){
+      const sel = $('#compareUserSelect');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">Select user to add…</option>';
+      const entries = Object.entries(metrics.users);
+      const users = entries
+        .filter(([key])=>!compareUsers.has(key))
+        .sort((a,b)=>{
+          const A = (a[1].handle||a[0]||'').toLowerCase();
+          const B = (b[1].handle||b[0]||'').toLowerCase();
+          return A.localeCompare(B);
+        });
+      users.forEach(([key, u])=>{
+        const opt = document.createElement('option');
+        opt.value = key;
+        const postCount = Object.keys(u.posts||{}).length;
+        opt.textContent = `${u.handle || key} (${postCount})`;
+        sel.appendChild(opt);
+      });
+      sel.disabled = compareUsers.size >= MAX_COMPARE_USERS || users.length === 0;
+    }
+
+    // Compare dropdown change handler
+    $('#compareUserSelect').addEventListener('change', (e)=>{
+      const userKey = e.target.value;
+      if (userKey && !compareUsers.has(userKey)){
+        addCompareUser(userKey);
+        e.target.value = '';
+      }
+    });
+
+    // Compare search typeahead
+    $('#compareSearch').addEventListener('input', (e)=>{
+      const suggestions = $('#compareSuggestions');
+      const list = filterUsersByQuery(metrics, e.target.value)
+        .filter(([key])=>!compareUsers.has(key))
+        .slice(0, 20);
+      suggestions.innerHTML = list.map(([key,u])=>{
+        const count = Object.keys(u.posts||{}).length;
+        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+      }).join('');
+      suggestions.style.display = list.length ? 'block' : 'none';
+      $$('#compareSuggestions .item').forEach(it=>{
+        it.addEventListener('click', ()=>{
+          addCompareUser(it.dataset.key);
+        });
+      });
+    });
+    document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker-compare')) $('#compareSuggestions').style.display='none'; });
+
+    // Initialize compare pills and dropdown
+    renderComparePills();
+    buildCompareDropdown();
+
+    // Purge Menu functionality
+    const purgeModal = $('#purgeModal');
+    const purgeConfirmDialog = $('#purgeConfirmDialog');
+    const dateRangeSlider = $('#dateRangeSlider');
+    const postCountSlider = $('#postCountSlider');
+    const followerCountSlider = $('#followerCountSlider');
+    const dateRangeValue = $('#dateRangeValue');
+    const postCountValue = $('#postCountValue');
+    const followerCountValue = $('#followerCountValue');
+    const purgeReviewText = $('#purgeReviewText');
+    const purgeConfirmText = $('#purgeConfirmText');
+    const dateRangeFill = $('#dateRangeFill');
+    const postCountFill = $('#postCountFill');
+    const followerCountFill = $('#followerCountFill');
+    
+    // Exemptions state
+    const exemptedUsers = new Set();
+    const MAX_EXEMPTED_USERS = 50;
+    const EXEMPTIONS_STORAGE_KEY = 'purgeExemptions';
+
+    async function loadExemptedUsers(){
+      try {
+        const { [EXEMPTIONS_STORAGE_KEY]: saved = [] } = await chrome.storage.local.get(EXEMPTIONS_STORAGE_KEY);
+        if (Array.isArray(saved)) {
+          // Validate that users still exist in metrics
+          const valid = saved.filter(userKey => metrics.users && metrics.users[userKey]);
+          return new Set(valid);
+        }
+      } catch {}
+      return new Set();
+    }
+
+    async function saveExemptedUsers(){
+      try {
+        await chrome.storage.local.set({ [EXEMPTIONS_STORAGE_KEY]: Array.from(exemptedUsers) });
+      } catch {}
+    }
+
+    function getPurgeDescription(){
+      const days = Number(dateRangeSlider.value);
+      const minPosts = Number(postCountSlider.value);
+      const minFollowers = Number(followerCountSlider.value);
+      
+      let description = '';
+      const daysText = days === 365 ? '1 year' : `${days} ${days === 1 ? 'day' : 'days'}`;
+      
+      if (days === 365 && minPosts === 0 && minFollowers === 0) {
+        description = 'all data outside the last 1 year';
+      } else if (days < 365 && minPosts > 0 && minFollowers > 0) {
+        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
+        const followersText = fmt(minFollowers);
+        description = `all data outside the last ${daysText} for users with less than ${postsText} and less than ${followersText} followers`;
+      } else if (days === 365 && minPosts > 0 && minFollowers > 0) {
+        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
+        const followersText = fmt(minFollowers);
+        description = `all data outside the last 1 year for users with less than ${postsText} and less than ${followersText} followers`;
+      } else if (days < 365 && minPosts > 0) {
+        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
+        description = `all data outside the last ${daysText} for users with less than ${postsText}`;
+      } else if (days === 365 && minPosts > 0) {
+        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
+        description = `all data outside the last 1 year for users with less than ${postsText}`;
+      } else if (days < 365 && minFollowers > 0) {
+        const followersText = fmt(minFollowers);
+        description = `all data outside the last ${daysText} for users with less than ${followersText} followers`;
+      } else if (days === 365 && minFollowers > 0) {
+        const followersText = fmt(minFollowers);
+        description = `all data outside the last 1 year for users with less than ${followersText} followers`;
+      } else if (days < 365) {
+        description = `all data outside the last ${daysText}`;
+      } else {
+        description = 'all data outside the last 1 year';
+      }
+      
+      // Add exemptions clause
+      if (exemptedUsers.size > 0) {
+        const exemptedHandles = Array.from(exemptedUsers).map(userKey => {
+          const user = metrics.users[userKey];
+          return user?.handle || userKey;
+        });
+        let exemptText = '';
+        if (exemptedHandles.length === 1) {
+          exemptText = `except for any data from ${exemptedHandles[0]}`;
+        } else if (exemptedHandles.length === 2) {
+          exemptText = `except for any data from ${exemptedHandles[0]} and ${exemptedHandles[1]}`;
+        } else {
+          exemptText = `except for any data from ${exemptedHandles.slice(0, -1).join(', ')}, and ${exemptedHandles[exemptedHandles.length - 1]}`;
+        }
+        description += ' ' + exemptText;
+      }
+      
+      return description;
+    }
+
+    function updatePurgeReview(){
+      const description = getPurgeDescription();
+      purgeReviewText.textContent = 'You are about to purge ' + description + '.';
+    }
+
+    function updateSliderFills(){
+      const days = Number(dateRangeSlider.value);
+      const minPosts = Number(postCountSlider.value);
+      const minFollowers = Number(followerCountSlider.value);
+      
+      // Date range: fill represents how much we're keeping (higher = more kept)
+      const datePct = (days / 365) * 100;
+      dateRangeFill.style.width = Math.min(100, Math.max(0, datePct)) + '%';
+      
+      // Post count: fill represents threshold (higher = more kept)
+      const postPct = (minPosts / 100) * 100;
+      postCountFill.style.width = Math.min(100, Math.max(0, postPct)) + '%';
+      
+      // Follower count: fill represents threshold (higher = more kept)
+      const followerPct = (minFollowers / 10000) * 100;
+      followerCountFill.style.width = Math.min(100, Math.max(0, followerPct)) + '%';
+    }
+
+    function updateSliderValues(){
+      const days = Number(dateRangeSlider.value);
+      const minPosts = Number(postCountSlider.value);
+      const minFollowers = Number(followerCountSlider.value);
+      
+      dateRangeValue.textContent = days === 365 ? '1 year' : `${days} ${days === 1 ? 'day' : 'days'}`;
+      postCountValue.textContent = `${minPosts} ${minPosts === 1 ? 'post' : 'posts'}`;
+      followerCountValue.textContent = `${fmt(minFollowers)} followers`;
+      
+      updateSliderFills();
+      updatePurgeReview();
+    }
+
+    $('#purgeModalClose').addEventListener('click', ()=>{
+      purgeModal.style.display = 'none';
+      purgeConfirmDialog.style.display = 'none';
+    });
+
+    purgeModal.addEventListener('mousedown', (e)=>{
+      if (e.target === purgeModal) {
+        purgeModal.style.display = 'none';
+        purgeConfirmDialog.style.display = 'none';
+      }
+    });
+
+    dateRangeSlider.addEventListener('input', updateSliderValues);
+    postCountSlider.addEventListener('input', updateSliderValues);
+    followerCountSlider.addEventListener('input', updateSliderValues);
+
+    // Exemptions functionality
+    function buildExemptionsDropdown(){
+      const sel = $('#exemptionsUserSelect');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">Select user to exempt…</option>';
+      const entries = Object.entries(metrics.users);
+      const users = entries
+        .filter(([key])=>!exemptedUsers.has(key))
+        .sort((a,b)=>{
+          const A = (a[1].handle||a[0]||'').toLowerCase();
+          const B = (b[1].handle||b[0]||'').toLowerCase();
+          return A.localeCompare(B);
+        });
+      users.forEach(([key, u])=>{
+        const opt = document.createElement('option');
+        opt.value = key;
+        const postCount = Object.keys(u.posts||{}).length;
+        opt.textContent = `${u.handle || key} (${postCount})`;
+        sel.appendChild(opt);
+      });
+      sel.disabled = exemptedUsers.size >= MAX_EXEMPTED_USERS || users.length === 0;
+    }
+
+    function renderExemptionPills(){
+      const container = $('#exemptionsPills');
+      if (!container) return;
+      container.innerHTML = '';
+      const users = Array.from(exemptedUsers);
+      users.forEach((userKey)=>{
+        const user = metrics.users[userKey];
+        const handle = user?.handle || userKey;
+        const pill = document.createElement('div');
+        pill.className = 'exemption-pill';
+        pill.dataset.userKey = userKey;
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'exemption-pill-name';
+        nameSpan.textContent = handle;
+        const removeBtn = document.createElement('span');
+        removeBtn.className = 'exemption-pill-remove';
+        removeBtn.textContent = '×';
+        removeBtn.onclick = async (e)=>{
+          e.stopPropagation();
+          exemptedUsers.delete(userKey);
+          await saveExemptedUsers();
+          renderExemptionPills();
+          buildExemptionsDropdown();
+          updatePurgeReview();
+        };
+        pill.appendChild(nameSpan);
+        pill.appendChild(removeBtn);
+        container.appendChild(pill);
+      });
+      if (exemptedUsers.size < MAX_EXEMPTED_USERS){
+        const addBtn = document.createElement('button');
+        addBtn.className = 'exemptions-add-btn';
+        addBtn.textContent = '+';
+        addBtn.title = 'Add user';
+        addBtn.onclick = ()=>{
+          $('#exemptionsSearch').focus();
+        };
+        container.appendChild(addBtn);
+      }
+      const searchInput = $('#exemptionsSearch');
+      if (searchInput) searchInput.disabled = exemptedUsers.size >= MAX_EXEMPTED_USERS;
+    }
+
+    async function addExemptedUser(userKey){
+      if (exemptedUsers.size >= MAX_EXEMPTED_USERS) return;
+      if (!metrics.users[userKey]) return;
+      if (exemptedUsers.has(userKey)) return;
+      exemptedUsers.add(userKey);
+      await saveExemptedUsers();
+      renderExemptionPills();
+      buildExemptionsDropdown();
+      updatePurgeReview();
+      $('#exemptionsSearch').value = '';
+      $('#exemptionsSuggestions').style.display = 'none';
+    }
+
+    $('#exemptionsUserSelect').addEventListener('change', async (e)=>{
+      const userKey = e.target.value;
+      if (userKey && !exemptedUsers.has(userKey)){
+        await addExemptedUser(userKey);
+        e.target.value = '';
+      }
+    });
+
+    $('#exemptionsSearch').addEventListener('input', (e)=>{
+      const suggestions = $('#exemptionsSuggestions');
+      const list = filterUsersByQuery(metrics, e.target.value)
+        .filter(([key])=>!exemptedUsers.has(key))
+        .slice(0, 20);
+      suggestions.innerHTML = list.map(([key,u])=>{
+        const count = Object.keys(u.posts||{}).length;
+        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+      }).join('');
+      suggestions.style.display = list.length ? 'block' : 'none';
+      $$('#exemptionsSuggestions .item').forEach(it=>{
+        it.addEventListener('click', async ()=>{
+          await addExemptedUser(it.dataset.key);
+        });
+      });
+    });
+    document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker-exemptions')) $('#exemptionsSuggestions').style.display='none'; });
+
+    $('#purgeMenu').addEventListener('click', async ()=>{
+      purgeModal.style.display = 'block';
+      // Load saved exemptions
+      const saved = await loadExemptedUsers();
+      exemptedUsers.clear();
+      saved.forEach(key => exemptedUsers.add(key));
+      renderExemptionPills();
+      buildExemptionsDropdown();
+      updateSliderValues();
+    });
+
+    $('#purgeExecute').addEventListener('click', ()=>{
+      const description = getPurgeDescription();
+      purgeConfirmText.textContent = `Are you sure you want to purge ${description}?`;
+      purgeConfirmDialog.style.display = 'flex';
+    });
+
+    $('#purgeConfirmNo').addEventListener('click', ()=>{
+      purgeConfirmDialog.style.display = 'none';
+    });
+
+    $('#purgeConfirmYes').addEventListener('click', async ()=>{
+      const days = Number(dateRangeSlider.value);
+      const minPosts = Number(postCountSlider.value);
+      const minFollowers = Number(followerCountSlider.value);
+      
+      const cutoffTime = Date.now() - (days * 24 * 60 * 60 * 1000);
+      
+      try {
+        metrics = await loadMetrics();
+        let purgedUsers = 0;
+        let purgedPosts = 0;
+        
+        // Process each user
+        for (const [userKey, user] of Object.entries(metrics.users || {})){
+          // Skip exempted users
+          if (exemptedUsers.has(userKey)) continue;
+          
+          // Ensure posts object exists
+          if (!user.posts) user.posts = {};
+          
+          // Get follower count for later use
+          const followersArr = Array.isArray(user.followers) ? user.followers : [];
+          const latestFollowers = followersArr.length > 0 ? Number(followersArr[followersArr.length - 1]?.count) : 0;
+          
+          // ALWAYS purge posts by date first (if days is set and <= 365)
+          // This ensures all old posts are removed regardless of minPosts/minFollowers settings
+          let postsToKeep = {};
+          if (days <= 365) {
+            // Purge posts older than cutoff time
+            for (const [pid, post] of Object.entries(user.posts || {})){
+              const postTime = getPostTimeStrict(post);
+              // Keep posts that have a timestamp AND are within the cutoff time
+              // Posts without timestamps are purged (considered old/unknown)
+              if (postTime > 0 && postTime >= cutoffTime){
+                postsToKeep[pid] = post;
+              } else {
+                purgedPosts++;
+              }
+            }
+          } else {
+            // If days > 365, keep all posts (no date-based purging)
+            postsToKeep = { ...user.posts };
+          }
+          
+          // Update user's posts with purged list
+          user.posts = postsToKeep;
+          
+          // Now check if user should be kept based on minPosts/minFollowers criteria
+          const postCountAfterPurge = Object.keys(postsToKeep).length;
+          
+          // ALWAYS remove users with no posts left after purge, regardless of other criteria
+          if (postCountAfterPurge === 0) {
+            delete metrics.users[userKey];
+            purgedUsers++;
+            continue;
+          }
+          
+          const hasLowFollowers = minFollowers > 0 && (!isFinite(latestFollowers) || latestFollowers < minFollowers);
+          const hasLowPosts = minPosts > 0 && (minPosts === 1 ? postCountAfterPurge <= minPosts : postCountAfterPurge < minPosts);
+          
+          // Determine if user should be removed based on minPosts/minFollowers criteria:
+          // - If both minPosts and minFollowers are set: user must meet BOTH to be removed
+          // - If only one is set: user must meet that one to be removed
+          // - If neither is set: keep the user (they have posts, so they're kept)
+          let shouldRemoveUser = false;
+          if (minPosts > 0 && minFollowers > 0) {
+            shouldRemoveUser = hasLowPosts && hasLowFollowers;
+          } else if (minPosts > 0) {
+            shouldRemoveUser = hasLowPosts;
+          } else if (minFollowers > 0) {
+            shouldRemoveUser = hasLowFollowers;
+          }
+          // else: no criteria set, keep user since they have posts
+          
+          // Remove user if they should be purged
+          if (shouldRemoveUser){
+            delete metrics.users[userKey];
+            purgedUsers++;
+          }
+        }
+        
+        // Save purged metrics
+        await chrome.storage.local.set({ metrics });
+        
+        // Refresh UI
+        metrics = await loadMetrics();
+        const prev = currentUserKey;
+        const def = buildUserOptions(metrics);
+        if (!metrics.users[prev]) currentUserKey = def;
+        $('#userSelect').value = currentUserKey || '';
+        
+        // Clean up compare users that no longer exist
+        for (const key of Array.from(compareUsers)){
+          if (!metrics.users[key]) compareUsers.delete(key);
+        }
+        renderComparePills();
+        buildCompareDropdown();
+        refreshUserUI();
+        
+        // Close modals
+        purgeModal.style.display = 'none';
+        purgeConfirmDialog.style.display = 'none';
+        
+        // Show success message
+        alert(`Purge complete!\n\nRemoved ${purgedUsers} user(s) and ${purgedPosts} post(s).`);
+      } catch (e) {
+        console.error('[Dashboard] Purge failed', e);
+        alert('Purge failed. Please check the console for details.');
+      }
+    });
 
     $('#refresh').addEventListener('click', async ()=>{
       // capture zoom states
@@ -1190,6 +2991,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (!metrics.users[prev]) currentUserKey = def;
       $('#userSelect').value = currentUserKey || '';
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+      // Clean up compare users that no longer exist
+      for (const key of Array.from(compareUsers)){
+        if (!metrics.users[key]) compareUsers.delete(key);
+      }
+      renderComparePills();
+      buildCompareDropdown();
       refreshUserUI();
       // restore zoom states
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
@@ -1199,7 +3006,20 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
       try { if (zViewsAll) allViewsChart.setZoom(zViewsAll); } catch {}
     });
-    $('#export').addEventListener('click', ()=>{ const u=metrics.users[currentUserKey]; if (u) exportCSV(u); });
+    $('#export').addEventListener('click', async ()=>{
+      await exportAllDataCSV();
+    });
+    $('#import').addEventListener('click', ()=>{
+      $('#importFile').click();
+    });
+    $('#importFile').addEventListener('change', async (e)=>{
+      const file = e.target.files[0];
+      if (file) {
+        await importDataCSV(file);
+        // Reset file input so same file can be imported again if needed
+        e.target.value = '';
+      }
+    });
     // Persist zoom on full page reload/navigation
     function persistZoom(){
       const z = zoomStates[currentUserKey] || (zoomStates[currentUserKey] = {});
@@ -1212,10 +3032,130 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI(); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI(); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true }); persistVisibility(); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
+      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      $('#last5').addEventListener('click', ()=>{
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: getPostTimeStrict(p) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
+        const noTs = mapped.filter(x=>x.postTime<=0).sort((a,b)=>{
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        const sorted = withTs.concat(noTs);
+        visibleSet.clear();
+        sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+      });
+      $('#last10').addEventListener('click', ()=>{
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: getPostTimeStrict(p) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
+        const noTs = mapped.filter(x=>x.postTime<=0).sort((a,b)=>{
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        const sorted = withTs.concat(noTs);
+        visibleSet.clear();
+        sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+      });
+      $('#top5').addEventListener('click', ()=>{
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            views: num(last?.views)
+          };
+        });
+        const sorted = mapped.sort((a,b)=>b.views - a.views);
+        visibleSet.clear();
+        sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+      });
+      $('#top10').addEventListener('click', ()=>{
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            views: num(last?.views)
+          };
+        });
+        const sorted = mapped.sort((a,b)=>b.views - a.views);
+        visibleSet.clear();
+        sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+      });
+      $('#bottom5').addEventListener('click', ()=>{
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
+          const postTime = getPostTimeStrict(p) || 0;
+          const ageMs = postTime ? now - postTime : Infinity;
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            postTime,
+            views: num(last?.views),
+            ageMs
+          };
+        });
+        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
+        visibleSet.clear();
+        sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI(); persistVisibility();
+      });
+      $('#bottom10').addEventListener('click', ()=>{
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
+          const postTime = getPostTimeStrict(p) || 0;
+          const ageMs = postTime ? now - postTime : Infinity;
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            postTime,
+            views: num(last?.views),
+            ageMs
+          };
+        });
+        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
+        visibleSet.clear();
+        sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+      });
 
+    // If compare section is empty on initial load, add current user to show who we're looking at
+    if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+      addCompareUser(currentUserKey);
+    }
     refreshUserUI();
   }
 
