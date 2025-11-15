@@ -8,16 +8,14 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Sora Metrics</div>
+    <div class="brand">Sora Creator Tools – Dashboard Mode</div>
     <div class="actions">
-      <div class="user-picker">
-        <input id="search" type="search" placeholder="Type to find user…" autocomplete="off" />
-        <div id="suggestions" class="suggestions"></div>
-      </div>
-      <select id="userSelect" title="All users"></select>
-      <button id="refresh">Refresh</button>
-      <button id="export">Export CSV</button>
       <button id="resetZoom" title="Reset zoom to fit">Reset Zoom</button>
+      <button id="refresh">Refresh Data</button>
+      <button id="export" title="Export all collected data to CSV">Export Data</button>
+      <button id="import" title="Import data from previously exported CSV">Import Data</button>
+      <input type="file" id="importFile" accept=".csv" style="display: none;" />
+      <button id="purgeMenu" title="Purge data">Purge Data Menu</button>
     </div>
   </header>
 
@@ -27,13 +25,25 @@
       <div class="list-actions">
         <button id="showAll" title="Show all posts">Show All</button>
         <button id="hideAll" title="Hide all posts">Hide All</button>
+        <button id="last5" title="Show last 5 posts by time">Last 5</button>
+        <button id="last10" title="Show last 10 posts by time">Last 10</button>
+        <button id="top5" title="Show top 5 posts by views">Top 5</button>
+        <button id="top10" title="Show top 10 posts by views">Top 10</button>
+        <button id="bottom5" title="Show 5 least viewed posts (excluding last 24 hours)">Bottom 5</button>
+        <button id="bottom10" title="Show 10 least viewed posts (excluding last 24 hours)">Bottom 10</button>
       </div>
       <div id="posts" class="posts"></div>
     </aside>
     <section class="content">
-      <div class="chart-wrap">
-        <canvas id="chart" width="900" height="540"></canvas>
-        <div id="tooltip" class="tooltip"></div>
+      <h3 class="section-title section-title-first">Individual Metrics</h3>
+      <div class="user-select-section">
+        <div class="user-select-header">
+          <div class="user-picker">
+            <input id="search" type="search" placeholder="Type to find user…" autocomplete="off" />
+            <div id="suggestions" class="suggestions"></div>
+          </div>
+          <select id="userSelect" title="All users" class="user-select-dropdown"></select>
+        </div>
       </div>
       <div id="viewsSummary" class="metric-card" title="Sum of latest views for visible posts">
         <span class="label">Views</span>
@@ -55,11 +65,29 @@
         <span class="label">Interactions</span>
         <span id="interactionsTotal" class="value">0.00</span>
       </div>
+      <div class="chart-wrap">
+        <canvas id="chart" width="900" height="540"></canvas>
+        <div id="tooltip" class="tooltip"></div>
+      </div>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="viewsChart" width="900" height="540"></canvas>
         <div id="viewsTooltip" class="tooltip"></div>
       </div>
-      <h3 class="section-title">All Posts (unfiltered)</h3>
+      <h3 class="section-title">Compare Metrics</h3>
+      <div class="compare-section">
+        <div class="compare-header">
+          <div class="compare-controls">
+            <div class="compare-search-row">
+              <div class="user-picker-compare">
+                <input id="compareSearch" type="search" placeholder="Type to find user to compare…" autocomplete="off" />
+                <div id="compareSuggestions" class="suggestions"></div>
+              </div>
+              <select id="compareUserSelect" title="Select user to add" class="compare-select-dropdown"></select>
+            </div>
+            <div id="comparePills" class="compare-pills"></div>
+          </div>
+        </div>
+      </div>
       <div id="allViewsSummary" class="metric-card" title="Sum of latest views across all posts (ignores visibility)">
         <span class="label">Total views</span>
         <span id="allViewsTotal" class="value">0</span>
@@ -105,13 +133,115 @@
         <div id="cameosTooltip" class="tooltip"></div>
       </div>
       
-      <div class="help">Y: Interaction rate (%) • X: Unique viewers • Drag to zoom • Hover to focus series • Click point to open post • Toggle visibility in the left list</div>
-      <div class="help">Below: Cumulative Views by Time • Y: Views • X: Time • Drag to zoom • Hover to focus series • Click point to open post</div>
-      <div class="help">Below: Cumulative Followers by Time • Y: Followers • X: Time • Drag to zoom</div>
-      <div class="help">Below: Cumulative Likes by Time • Y: Likes • X: Time • Drag to zoom • Hover to focus series • Click point to open post</div>
-      <div class="help">Below: Cumulative Cameos by Time • Y: Cameos • X: Time • Drag to zoom</div>
+      <div class="help">Drag to zoom • Hover to focus series • Click point to open post • Double-click to reset zoom • Toggle visibility in sidebar</div>
     </section>
   </main>
+
+  <!-- Purge Menu Modal -->
+  <div id="purgeModal" class="purge-modal-overlay" style="display: none;">
+    <div class="purge-modal-panel">
+      <div class="purge-modal-header">
+        <h2>Purge Data</h2>
+        <button id="purgeModalClose" class="purge-modal-close">×</button>
+      </div>
+      
+      <div class="purge-modal-content">
+        <!-- Date Range Slider -->
+        <div class="purge-control-group">
+          <div class="purge-control-label">
+            <span>Keep posts within last</span>
+            <span id="dateRangeValue" class="purge-value-display">1 year</span>
+          </div>
+          <div class="purge-slider-container">
+            <div class="purge-slider-track">
+              <div class="purge-slider-fill" id="dateRangeFill"></div>
+              <input type="range" id="dateRangeSlider" min="1" max="365" value="365" step="1" />
+            </div>
+            <div class="purge-slider-labels">
+              <span>1 day</span>
+              <span>365 days</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Post Count Slider -->
+        <div class="purge-control-group">
+          <div class="purge-control-label">
+            <span>Keep everyone with</span>
+            <span id="postCountValue" class="purge-value-display">0 posts</span>
+          </div>
+          <div class="purge-slider-container">
+            <div class="purge-slider-track">
+              <div class="purge-slider-fill" id="postCountFill"></div>
+              <input type="range" id="postCountSlider" min="0" max="100" value="0" step="1" />
+            </div>
+            <div class="purge-slider-labels">
+              <span>0 posts</span>
+              <span>100+ posts</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Follower Count Slider -->
+        <div class="purge-control-group">
+          <div class="purge-control-label">
+            <span>Keep everyone with</span>
+            <span id="followerCountValue" class="purge-value-display">0 followers</span>
+          </div>
+          <div class="purge-slider-container">
+            <div class="purge-slider-track">
+              <div class="purge-slider-fill" id="followerCountFill"></div>
+              <input type="range" id="followerCountSlider" min="0" max="10000" value="0" step="100" />
+            </div>
+            <div class="purge-slider-labels">
+              <span>0 followers</span>
+              <span>10K+ followers</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Exemptions Section -->
+        <div class="purge-exemptions-section">
+          <div class="purge-exemptions-label">Exemptions</div>
+          <div class="purge-exemptions-controls">
+            <div class="purge-exemptions-search-row">
+              <div class="user-picker-exemptions">
+                <input id="exemptionsSearch" type="search" placeholder="Add user to exempt…" autocomplete="off" />
+                <div id="exemptionsSuggestions" class="suggestions"></div>
+              </div>
+              <select id="exemptionsUserSelect" title="Select user to exempt" class="exemptions-select-dropdown"></select>
+            </div>
+            <div id="exemptionsPills" class="exemptions-pills"></div>
+          </div>
+        </div>
+
+        <!-- Review Section -->
+        <div class="purge-review-section">
+          <div class="purge-review-label">Preview:</div>
+          <div id="purgeReviewText" class="purge-review-text">
+            You are about to purge all data outside the last 1 year.
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="purge-actions">
+          <button id="purgeExecute" class="purge-execute-btn">Purge</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirmation Dialog -->
+    <div id="purgeConfirmDialog" class="purge-confirm-dialog" style="display: none;">
+      <div class="purge-confirm-content">
+        <h3>⚠️ This cannot be undone!</h3>
+        <p id="purgeConfirmText">Are you sure you want to proceed with purging data based on your selected criteria?</p>
+        <div class="purge-confirm-actions">
+          <button id="purgeConfirmYes" class="purge-confirm-yes">Yes, Purge</button>
+          <button id="purgeConfirmNo" class="purge-confirm-no">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="dashboard.js"></script>
 </body>
