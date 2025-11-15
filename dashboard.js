@@ -333,13 +333,17 @@
     const sel = $('#userSelect');
     sel.innerHTML = '';
     let entries = Object.entries(metrics.users);
-    // Sort alphabetical, pushing 'unknown' to the end
+    // Sort by post count (most to least), pushing 'unknown' to the end
     const users = entries.sort((a,b)=>{
-      const A = (a[1].handle||a[0]||'').toLowerCase();
-      const B = (b[1].handle||b[0]||'').toLowerCase();
       const ax = a[0]==='unknown' ? 1 : 0;
       const bx = b[0]==='unknown' ? 1 : 0;
       if (ax !== bx) return ax - bx;
+      const aCount = Object.keys(a[1].posts||{}).length;
+      const bCount = Object.keys(b[1].posts||{}).length;
+      if (aCount !== bCount) return bCount - aCount; // Descending order
+      // If same post count, sort alphabetically
+      const A = (a[1].handle||a[0]||'').toLowerCase();
+      const B = (b[1].handle||b[0]||'').toLowerCase();
       return A.localeCompare(B);
     });
     for (const [key, u] of users){
@@ -359,7 +363,13 @@
       const name = (u.handle || key || '').toLowerCase();
       if (!needle || name.includes(needle)) res.push([key,u]);
     }
-    res.sort((a,b)=> (a[1].handle||a[0]||'').localeCompare(b[1].handle||b[0]||''));
+    res.sort((a,b)=>{
+      const aCount = Object.keys(a[1].posts||{}).length;
+      const bCount = Object.keys(b[1].posts||{}).length;
+      if (aCount !== bCount) return bCount - aCount; // Descending order
+      // If same post count, sort alphabetically
+      return (a[1].handle||a[0]||'').localeCompare(b[1].handle||b[0]||'');
+    });
     return res;
   }
 
@@ -631,6 +641,76 @@
     let rafPending = null;
     let lastHover = null;
     
+    // Calculate distance from point to line segment
+    function pointToLineDistance(px, py, x1, y1, x2, y2) {
+      const A = px - x1;
+      const B = py - y1;
+      const C = x2 - x1;
+      const D = y2 - y1;
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      let param = -1;
+      if (lenSq !== 0) param = dot / lenSq;
+      let xx, yy;
+      if (param < 0) {
+        xx = x1;
+        yy = y1;
+      } else if (param > 1) {
+        xx = x2;
+        yy = y2;
+      } else {
+        xx = x1 + param * C;
+        yy = y1 + param * D;
+      }
+      const dx = px - xx;
+      const dy = py - yy;
+      return Math.hypot(dx, dy);
+    }
+
+    function nearestLine(mx, my) {
+      let best = null, bd = Infinity;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      for (const s of state.series) {
+        if (s.points.length < 2) continue;
+        for (let i = 0; i < s.points.length - 1; i++) {
+          const p1 = s.points[i];
+          const p2 = s.points[i + 1];
+          const x1 = mapX(p1.x), y1 = mapY(p1.y);
+          const x2 = mapX(p2.x), y2 = mapY(p2.y);
+          // Skip if both points are outside plot
+          if ((x1 < M.left && x2 < M.left) || (x1 > W - M.right && x2 > W - M.right) ||
+              (y1 < M.top && y2 < M.top) || (y1 > H - M.bottom && y2 > H - M.bottom)) continue;
+          const d = pointToLineDistance(mx, my, x1, y1, x2, y2);
+          if (d < bd && d < 6) {
+            bd = d;
+            // Interpolate value at mouse x position
+            let interpX = mouseX;
+            let interpY = null;
+            if (mouseX >= Math.min(p1.x, p2.x) && mouseX <= Math.max(p1.x, p2.x)) {
+              if (p1.x === p2.x) {
+                interpY = p1.y;
+              } else {
+                const t = (mouseX - p1.x) / (p2.x - p1.x);
+                interpY = p1.y + (p2.y - p1.y) * t;
+              }
+            } else if (mouseX < Math.min(p1.x, p2.x)) {
+              interpX = Math.min(p1.x, p2.x);
+              interpY = p1.x < p2.x ? p1.y : p2.y;
+            } else {
+              interpX = Math.max(p1.x, p2.x);
+              interpY = p1.x > p2.x ? p1.y : p2.y;
+            }
+            best = { pid: s.id, label: s.label || s.id, x: interpX, y: interpY, t: interpX, color: s.color, highlighted: s.highlighted, url: s.url, profileUrl: s.profileUrl, isLineHover: true };
+          }
+        }
+      }
+      return best;
+    }
+
     function nearest(mx,my){
       let best=null, bd=Infinity;
       for (const s of state.series){
@@ -639,7 +719,7 @@
           // ignore points outside plot
           if (x < M.left || x > W - M.right || y < M.top || y > H - M.bottom) continue;
           const d = Math.hypot(mx-x,my-y);
-          if (d<bd && d<16) { bd=d; best = { pid: s.id, label: s.label || s.id, x:p.x, y:p.y, t:p.t, color:s.color, highlighted:s.highlighted, url: s.url }; }
+          if (d<bd && d<16) { bd=d; best = { pid: s.id, label: s.label || s.id, x:p.x, y:p.y, t:p.t, color:s.color, highlighted:s.highlighted, url: s.url, profileUrl: s.profileUrl }; }
         }
       }
       return best;
@@ -671,18 +751,32 @@
         const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
         if (drag){ drag.x1 = mx; drag.y1 = my; draw(); drawDragRect(drag); showTooltip(null); return; }
         const h = nearest(mx,my);
-        const hoverKey = h ? `${h.pid}-${h.t}` : null;
-        if (hoverKey === lastHover) {
-          showTooltip(h, e.clientX, e.clientY);
+        let lineHover = null;
+        if (!h) {
+          lineHover = nearestLine(mx, my);
+        }
+        const hoverKey = h ? `${h.pid}-${h.t}` : (lineHover ? `${lineHover.pid}-line` : null);
+        const prev = state.hoverSeries;
+        state.hover = h || lineHover;
+        // If no point hover, check for line hover
+        if (!h) {
+          state.hoverSeries = lineHover?.pid || null;
+        } else {
+          state.hoverSeries = h?.pid || null;
+        }
+        // Clear hoverSeries if not hovering over anything
+        if (!h && !lineHover) {
+          state.hoverSeries = null;
+        }
+        // Only skip redraw if both hover key and hoverSeries haven't changed
+        if (hoverKey === lastHover && prev === state.hoverSeries) {
+          showTooltip(h || lineHover, e.clientX, e.clientY);
           return;
         }
         lastHover = hoverKey;
-        const prev = state.hoverSeries;
-        state.hover = h;
-        state.hoverSeries = h?.pid || null;
         if (hoverCb && prev !== state.hoverSeries) hoverCb(state.hoverSeries);
         draw();
-        showTooltip(h, e.clientX, e.clientY);
+        showTooltip(h || lineHover, e.clientX, e.clientY);
       });
     }
 
@@ -691,8 +785,20 @@
 
     canvas.addEventListener('mousemove', handleMouseMove);
     canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
-    canvas.addEventListener('click', ()=>{
-      if (state.hover && state.hover.url) window.open(state.hover.url, '_blank');
+    canvas.addEventListener('click', (e)=>{
+      if (state.hover && state.hover.url) {
+        window.open(state.hover.url, '_blank');
+        return;
+      }
+      // If no point was clicked, check for line clicks
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
+      const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
+      const lineHit = nearestLine(mx, my);
+      if (lineHit) {
+        const url = lineHit.url || lineHit.profileUrl;
+        if (url) window.open(url, '_blank');
+      }
     });
 
     canvas.addEventListener('mousedown', (e)=>{
@@ -875,6 +981,76 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       };
     }
     
+    // Calculate distance from point to line segment
+    function pointToLineDistance(px, py, x1, y1, x2, y2) {
+      const A = px - x1;
+      const B = py - y1;
+      const C = x2 - x1;
+      const D = y2 - y1;
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      let param = -1;
+      if (lenSq !== 0) param = dot / lenSq;
+      let xx, yy;
+      if (param < 0) {
+        xx = x1;
+        yy = y1;
+      } else if (param > 1) {
+        xx = x2;
+        yy = y2;
+      } else {
+        xx = x1 + param * C;
+        yy = y1 + param * D;
+      }
+      const dx = px - xx;
+      const dy = py - yy;
+      return Math.hypot(dx, dy);
+    }
+
+    function nearestLine(mx, my) {
+      let best = null, bd = Infinity;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      for (const s of state.series) {
+        if (s.points.length < 2) continue;
+        for (let i = 0; i < s.points.length - 1; i++) {
+          const p1 = s.points[i];
+          const p2 = s.points[i + 1];
+          const x1 = mapX(p1.x), y1 = mapY(p1.y);
+          const x2 = mapX(p2.x), y2 = mapY(p2.y);
+          // Skip if both points are outside plot
+          if ((x1 < M.left && x2 < M.left) || (x1 > W - M.right && x2 > W - M.right) ||
+              (y1 < M.top && y2 < M.top) || (y1 > H - M.bottom && y2 > H - M.bottom)) continue;
+          const d = pointToLineDistance(mx, my, x1, y1, x2, y2);
+          if (d < bd && d < 6) {
+            bd = d;
+            // Interpolate value at mouse x position
+            let interpX = mouseX;
+            let interpY = null;
+            if (mouseX >= Math.min(p1.x, p2.x) && mouseX <= Math.max(p1.x, p2.x)) {
+              if (p1.x === p2.x) {
+                interpY = p1.y;
+              } else {
+                const t = (mouseX - p1.x) / (p2.x - p1.x);
+                interpY = p1.y + (p2.y - p1.y) * t;
+              }
+            } else if (mouseX < Math.min(p1.x, p2.x)) {
+              interpX = Math.min(p1.x, p2.x);
+              interpY = p1.x < p2.x ? p1.y : p2.y;
+            } else {
+              interpX = Math.max(p1.x, p2.x);
+              interpY = p1.x > p2.x ? p1.y : p2.y;
+            }
+            best = { pid: s.id, label: s.label || s.id, x: interpX, y: interpY, t: interpX, color: s.color, url: s.url, profileUrl: s.profileUrl, isLineHover: true };
+          }
+        }
+      }
+      return best;
+    }
+
     function nearest(mx,my){
       let best=null, bd=Infinity;
       for (const s of state.series){
@@ -884,7 +1060,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const d = Math.hypot(mx-x,my-y);
           if (d < bd && d < 16){
             bd = d;
-            best = { pid: s.id, label: s.label || s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url };
+            best = { pid: s.id, label: s.label || s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url, profileUrl: s.profileUrl };
           }
         }
       }
@@ -923,10 +1099,24 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
-      const unit = yAxisLabel || 'Views';
-      const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${yFmt(h.y)}</div>`;
-      tooltip.innerHTML = header + body;
+      // Check if this is a profile line (has profileUrl)
+      if (h.profileUrl) {
+        // Extract handle from label (e.g., "@handle's Views" -> "@handle")
+        let handle = h.label || h.pid || '';
+        handle = handle.replace(/'s (Views|Likes|Cameos|Followers)$/i, '').trim();
+        if (!handle.startsWith('@')) handle = '@' + handle;
+        const unit = yAxisLabel || 'Views';
+        const unitLower = unit.toLowerCase();
+        const dateStr = fmtDateTime(h.x);
+        // Format number with commas
+        const numStr = Math.round(h.y).toLocaleString();
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(handle)} ${numStr} ${unitLower}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">on ${dateStr}</div>`;
+      } else {
+        const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+        const unit = yAxisLabel || 'Views';
+        const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${yFmt(h.y)}</div>`;
+        tooltip.innerHTML = header + body;
+      }
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = clientX + 12;
@@ -946,29 +1136,51 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
         if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
         
+        const h = nearest(mx,my);
+        let lineHover = null;
+        if (!h) {
+          lineHover = nearestLine(mx, my);
+        }
+        const hoverKey = h ? `${h.pid}-${h.t}` : (lineHover ? `${lineHover.pid}-line` : null);
+        const prev=state.hoverSeries;
+        state.hover=h || lineHover;
+        
+        // Always check for line hover to update hoverSeries for dimming effect
+        if (!h) {
+          state.hoverSeries = lineHover?.pid || null;
+        } else {
+          state.hoverSeries = h?.pid || null;
+        }
+        // Clear hoverSeries if not hovering over anything
+        if (!h && !lineHover) {
+          state.hoverSeries = null;
+        }
+        
         // Check if we're in comparison mode (2+ series) and find nearest two
-        const comparison = state.series.length >= 2 ? findNearestTwoSeries(mx, my) : null;
+        // Only show comparison line if NOT hovering over a specific point or line
+        const comparison = (!h && !lineHover && state.series.length >= 2) ? findNearestTwoSeries(mx, my) : null;
         if (comparison && mx >= M.left && mx <= W - M.right){
           state.comparisonLine = comparison;
+          // Redraw if hoverSeries changed to update dimming
+          if (prev !== state.hoverSeries) {
+            if (hoverCb) hoverCb(state.hoverSeries);
+          }
           draw();
           showTooltip(null, e.clientX, e.clientY, comparison);
+          lastHover = hoverKey;
           return;
         }
         
         state.comparisonLine = null;
-        const h = nearest(mx,my);
-        const hoverKey = h ? `${h.pid}-${h.t}` : null;
-        if (hoverKey === lastHover) {
-          showTooltip(h, e.clientX, e.clientY);
+        // Only skip redraw if both hover key and hoverSeries haven't changed
+        if (hoverKey === lastHover && prev === state.hoverSeries) {
+          showTooltip(h || lineHover, e.clientX, e.clientY);
           return;
         }
         lastHover = hoverKey;
-        const prev=state.hoverSeries;
-        state.hover=h;
-        state.hoverSeries=h?.pid||null;
         if (hoverCb && prev!==state.hoverSeries) hoverCb(state.hoverSeries);
         draw();
-        showTooltip(h,e.clientX,e.clientY);
+        showTooltip(h || lineHover, e.clientX, e.clientY);
       });
     }
     
@@ -978,9 +1190,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     // Track recent double-click to avoid opening posts while resetting zoom
     let lastDblClickTs = 0;
     canvas.addEventListener('dblclick', ()=>{ lastDblClickTs = Date.now(); state.zoomX=null; state.zoomY=null; draw(); });
-    canvas.addEventListener('click', ()=>{
+    canvas.addEventListener('click', (e)=>{
       if (Date.now() - lastDblClickTs < 250) return; // ignore clicks immediately after dblclick
-      if (state.hover && state.hover.url) window.open(state.hover.url,'_blank');
+      if (state.hover && state.hover.url) {
+        window.open(state.hover.url,'_blank');
+        return;
+      }
+      // If no point was clicked, check for line clicks
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
+      const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
+      const lineHit = nearestLine(mx, my);
+      if (lineHit) {
+        const url = lineHit.url || lineHit.profileUrl;
+        if (url) window.open(url, '_blank');
+      }
     });
     canvas.addEventListener('mousedown',(e)=>{
       const rect=canvas.getBoundingClientRect(); let x0=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y0=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; drag={x0,y0,x1:null,y1:null};
@@ -1193,6 +1417,76 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let rafPending = null;
     let lastHover = null;
     
+    // Calculate distance from point to line segment
+    function pointToLineDistance(px, py, x1, y1, x2, y2) {
+      const A = px - x1;
+      const B = py - y1;
+      const C = x2 - x1;
+      const D = y2 - y1;
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      let param = -1;
+      if (lenSq !== 0) param = dot / lenSq;
+      let xx, yy;
+      if (param < 0) {
+        xx = x1;
+        yy = y1;
+      } else if (param > 1) {
+        xx = x2;
+        yy = y2;
+      } else {
+        xx = x1 + param * C;
+        yy = y1 + param * D;
+      }
+      const dx = px - xx;
+      const dy = py - yy;
+      return Math.hypot(dx, dy);
+    }
+
+    function nearestLine(mx, my) {
+      let best = null, bd = Infinity;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      for (const s of state.series) {
+        if (s.points.length < 2) continue;
+        for (let i = 0; i < s.points.length - 1; i++) {
+          const p1 = s.points[i];
+          const p2 = s.points[i + 1];
+          const x1 = mapX(p1.x), y1 = mapY(p1.y);
+          const x2 = mapX(p2.x), y2 = mapY(p2.y);
+          // Skip if both points are outside plot
+          if ((x1 < M.left && x2 < M.left) || (x1 > W - M.right && x2 > W - M.right) ||
+              (y1 < M.top && y2 < M.top) || (y1 > H - M.bottom && y2 > H - M.bottom)) continue;
+          const d = pointToLineDistance(mx, my, x1, y1, x2, y2);
+          if (d < bd && d < 6) {
+            bd = d;
+            // Interpolate value at mouse x position
+            let interpX = mouseX;
+            let interpY = null;
+            if (mouseX >= Math.min(p1.x, p2.x) && mouseX <= Math.max(p1.x, p2.x)) {
+              if (p1.x === p2.x) {
+                interpY = p1.y;
+              } else {
+                const t = (mouseX - p1.x) / (p2.x - p1.x);
+                interpY = p1.y + (p2.y - p1.y) * t;
+              }
+            } else if (mouseX < Math.min(p1.x, p2.x)) {
+              interpX = Math.min(p1.x, p2.x);
+              interpY = p1.x < p2.x ? p1.y : p2.y;
+            } else {
+              interpX = Math.max(p1.x, p2.x);
+              interpY = p1.x > p2.x ? p1.y : p2.y;
+            }
+            best = { id: s.id, label: s.label || s.id, x: interpX, y: interpY, t: interpX, color: s.color, url: s.url, profileUrl: s.profileUrl, isLineHover: true };
+          }
+        }
+      }
+      return best;
+    }
+
     function nearest(mx,my){
       let best=null,bd=Infinity;
       for (const s of state.series){
@@ -1202,7 +1496,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const d=Math.hypot(mx-x,my-y);
           if (d<bd && d<16){
             bd=d;
-            best={ id:s.id, label:s.label||s.id, x:p.x, y:p.y, t:p.t, color:s.color };
+            best={ id:s.id, label:s.label||s.id, x:p.x, y:p.y, t:p.t, color:s.color, url: s.url, profileUrl: s.profileUrl };
           }
         }
       }
@@ -1235,9 +1529,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(h.label||'Followers')}</strong></div>`;
-      const body = `<div>${fmtDateTime(h.x)} • Followers: ${fmt2(h.y)}</div>`;
-      tooltip.innerHTML = header + body;
+      // Check if this is a profile line (has profileUrl)
+      if (h.profileUrl) {
+        // Extract handle from label (e.g., "@handle's Followers" -> "@handle")
+        let handle = h.label || h.id || '';
+        handle = handle.replace(/'s Followers$/i, '').trim();
+        if (!handle.startsWith('@')) handle = '@' + handle;
+        const dateStr = fmtDateTime(h.x);
+        // Format number with commas
+        const numStr = Math.round(h.y).toLocaleString();
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(handle)} ${numStr} followers</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">on ${dateStr}</div>`;
+      } else {
+        const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(h.label||'Followers')}</strong></div>`;
+        const body = `<div>${fmtDateTime(h.x)} • Followers: ${fmt2(h.y)}</div>`;
+        tooltip.innerHTML = header + body;
+      }
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
       let left = cx + 12;
@@ -1257,29 +1563,51 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
         if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
         
+        const h=nearest(mx,my);
+        let lineHover = null;
+        if (!h) {
+          lineHover = nearestLine(mx, my);
+        }
+        const hoverKey = h ? `${h.id}-${h.t}` : (lineHover ? `${lineHover.id}-line` : null);
+        const prev=state.hoverSeries;
+        state.hover=h || lineHover;
+        
+        // Always check for line hover to update hoverSeries for dimming effect
+        if (!h) {
+          state.hoverSeries = lineHover?.id || null;
+        } else {
+          state.hoverSeries = h?.id || null;
+        }
+        // Clear hoverSeries if not hovering over anything
+        if (!h && !lineHover) {
+          state.hoverSeries = null;
+        }
+        
         // Check if we're in comparison mode (2+ series) and find nearest two
-        const comparison = state.series.length >= 2 ? findNearestTwoSeries(mx, my) : null;
+        // Only show comparison line if NOT hovering over a specific point or line
+        const comparison = (!h && !lineHover && state.series.length >= 2) ? findNearestTwoSeries(mx, my) : null;
         if (comparison && mx >= M.left && mx <= W - M.right){
           state.comparisonLine = comparison;
+          // Redraw if hoverSeries changed to update dimming
+          if (prev !== state.hoverSeries) {
+            if (hoverCb) hoverCb(state.hoverSeries);
+          }
           draw();
           showTooltip(null, e.clientX, e.clientY, comparison);
+          lastHover = hoverKey;
           return;
         }
         
         state.comparisonLine = null;
-        const h=nearest(mx,my);
-        const hoverKey = h ? `${h.id}-${h.t}` : null;
-        if (hoverKey === lastHover) {
-          showTooltip(h, e.clientX, e.clientY);
+        // Only skip redraw if both hover key and hoverSeries haven't changed
+        if (hoverKey === lastHover && prev === state.hoverSeries) {
+          showTooltip(h || lineHover, e.clientX, e.clientY);
           return;
         }
         lastHover = hoverKey;
-        const prev=state.hoverSeries;
-        state.hover=h;
-        state.hoverSeries=h?.id||null;
         if (hoverCb && prev!==state.hoverSeries) hoverCb(state.hoverSeries);
         draw();
-        showTooltip(h,e.clientX,e.clientY);
+        showTooltip(h || lineHover, e.clientX, e.clientY);
       });
     }
     
@@ -1290,6 +1618,25 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     window.addEventListener('mouseup',(e)=>{ if (!drag) return; const rect=canvas.getBoundingClientRect(); let x1=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y1=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; const [cx0,cy0]=clampToPlot(drag.x0,drag.y0); const [cx1,cy1]=clampToPlot(x1,y1); drag.x1=cx1; drag.y1=cy1; const minW=10,minH=10; const w=Math.abs(cx1-cx0), h=Math.abs(cy1-cy0); if (w>minW && h>minH){ const [X0,X1]=[cx0,cx1].sort((a,b)=>a-b); const [Y0,Y1]=[cy0,cy1].sort((a,b)=>a-b); const invMapX=(px)=>{ const [a,b]=(state.zoomX||state.x); return a + ((px-M.left)/(W-(M.left+M.right)))*(b-a); }; const invMapY=(py)=>{ const [a,b]=(state.zoomY||state.y); return a + (((H-M.bottom)-py)/(H-(M.top+M.bottom)))*(b-a); }; state.zoomX=[invMapX(X0),invMapX(X1)]; state.zoomY=[invMapY(Y1),invMapY(Y0)]; } drag=null; draw(); showTooltip(null); });
     function drawDragRect(d){ if (!d||d.x1==null||d.y1==null) return; ctx.save(); ctx.strokeStyle='#7dc4ff'; ctx.fillStyle='#7dc4ff22'; ctx.lineWidth=1; ctx.setLineDash([4,3]); const x0=Math.max(M.left,Math.min(W-M.right,d.x0)); const y0=Math.max(M.top,Math.min(H-M.bottom,d.y0)); const x1=Math.max(M.left,Math.min(W-M.right,d.x1)); const y1=Math.max(M.top,Math.min(H-M.bottom,d.y1)); const x=Math.min(x0,x1), y=Math.min(y0,y1), w=Math.abs(x1-x0), h=Math.abs(y1-y0); ctx.strokeRect(x,y,w,h); ctx.fillRect(x,y,w,h); ctx.restore(); }
     canvas.addEventListener('dblclick', ()=>{ state.zoomX=null; state.zoomY=null; draw(); });
+    canvas.addEventListener('click', (e)=>{
+      if (state.hover && state.hover.url) {
+        window.open(state.hover.url, '_blank');
+        return;
+      }
+      if (state.hover && state.hover.profileUrl) {
+        window.open(state.hover.profileUrl, '_blank');
+        return;
+      }
+      // If no point was clicked, check for line clicks
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
+      const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
+      const lineHit = nearestLine(mx, my);
+      if (lineHit) {
+        const url = lineHit.url || lineHit.profileUrl;
+        if (url) window.open(url, '_blank');
+      }
+    });
     window.addEventListener('resize', resize);
     resize();
     function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
@@ -2159,7 +2506,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (pts.length){
             const color = COLORS[idx % COLORS.length];
             const handle = user.handle || userKey;
-            allSeries.push({ id: userKey, label: `@${handle}'s Views`, color, points: pts });
+            const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
+            allSeries.push({ id: userKey, label: `@${handle}'s Views`, color, points: pts, profileUrl });
           }
         });
         allViewsChart.setData(allSeries);
@@ -2196,7 +2544,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (ptsLikes.length){
             const color = COLORS[idx % COLORS.length];
             const handle = user.handle || userKey;
-            allSeries.push({ id: userKey, label: `@${handle}'s Likes`, color, points: ptsLikes });
+            const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
+            allSeries.push({ id: userKey, label: `@${handle}'s Likes`, color, points: ptsLikes, profileUrl });
           }
         });
         allLikesChart.setData(allSeries);
@@ -2213,7 +2562,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (pts.length){
             const color = COLORS[idx % COLORS.length];
             const handle = user.handle || userKey;
-            allSeries.push({ id: userKey, label: `@${handle}'s Cameos`, color, points: pts });
+            const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
+            allSeries.push({ id: userKey, label: `@${handle}'s Cameos`, color, points: pts, profileUrl });
           }
         });
         cameosChart.setData(allSeries);
@@ -2230,7 +2580,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (pts.length){
             const color = COLORS[idx % COLORS.length];
             const handle = user.handle || userKey;
-            allSeries.push({ id: userKey, label: `@${handle}'s Followers`, color, points: pts });
+            const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
+            allSeries.push({ id: userKey, label: `@${handle}'s Followers`, color, points: pts, profileUrl });
           }
         });
         followersChart.setData(allSeries);
@@ -2549,6 +2900,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const users = entries
         .filter(([key])=>!compareUsers.has(key))
         .sort((a,b)=>{
+          const aCount = Object.keys(a[1].posts||{}).length;
+          const bCount = Object.keys(b[1].posts||{}).length;
+          if (aCount !== bCount) return bCount - aCount; // Descending order
+          // If same post count, sort alphabetically
           const A = (a[1].handle||a[0]||'').toLowerCase();
           const B = (b[1].handle||b[0]||'').toLowerCase();
           return A.localeCompare(B);
@@ -2750,6 +3105,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const users = entries
         .filter(([key])=>!exemptedUsers.has(key))
         .sort((a,b)=>{
+          const aCount = Object.keys(a[1].posts||{}).length;
+          const bCount = Object.keys(b[1].posts||{}).length;
+          if (aCount !== bCount) return bCount - aCount; // Descending order
+          // If same post count, sort alphabetically
           const A = (a[1].handle||a[0]||'').toLowerCase();
           const B = (b[1].handle||b[0]||'').toLowerCase();
           return A.localeCompare(B);
