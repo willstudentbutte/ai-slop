@@ -614,7 +614,7 @@
 
     const newKey = JSON.stringify([viewsStr, irStr, rrStr, timeEmojiStr, pillBg]);
     if (badge.dataset.key === newKey) {
-      badge.style.boxShadow = isSuperHot ? '0 0 10px 3px hsla(0, 100%, 50%, 0.7)' : 'none';
+      badge.style.boxShadow = 'none';
       return;
     }
     badge.dataset.key = newKey;
