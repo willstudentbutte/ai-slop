@@ -73,6 +73,34 @@
         <canvas id="viewsChart" width="900" height="540"></canvas>
         <div id="viewsTooltip" class="tooltip"></div>
       </div>
+      <div class="chart-wrap" style="margin-top:10px">
+        <canvas id="first24HoursChart" width="900" height="540"></canvas>
+        <div id="first24HoursTooltip" class="tooltip"></div>
+        <div style="margin-top: 10px; padding: 4px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <label style="color: var(--muted); font-size: 12px; min-width: 100px; flex-shrink: 0;">Time Window</label>
+            <input type="range" id="first24HoursSlider" min="15" max="1440" value="1440" step="15" style="flex: 1; height: 6px; background: var(--grid); border-radius: 3px; outline: none;" />
+            <span id="first24HoursSliderValue" style="color: var(--fg); font-size: 12px; min-width: 70px; text-align: right; flex-shrink: 0;">24 hrs</span>
+          </div>
+        </div>
+      </div>
+      <h3 class="section-title">BEST TIME TO POST</h3>
+      <div id="bestTimeToPostSection" style="margin-bottom: 32px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
+          <div class="best-time-metric-card">
+            <div class="best-time-metric-header">For Views...</div>
+            <div id="bestTimeViewsGrid" class="best-time-grid"></div>
+          </div>
+          <div class="best-time-metric-card">
+            <div class="best-time-metric-header">For Likes...</div>
+            <div id="bestTimeLikesGrid" class="best-time-grid"></div>
+          </div>
+          <div class="best-time-metric-card">
+            <div class="best-time-metric-header">For Remixes...</div>
+            <div id="bestTimeRemixesGrid" class="best-time-grid"></div>
+          </div>
+        </div>
+      </div>
       <h3 class="section-title">Compare Metrics</h3>
       <div class="compare-section">
         <div class="compare-header">
