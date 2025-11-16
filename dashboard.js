@@ -913,13 +913,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const xticks=5, yticks=5;
       const tickVals = [];
       for (let i=0;i<=xticks;i++) tickVals.push(Math.round(xDomain[0] + i*(xDomain[1]-xDomain[0])/xticks));
-      const dayKeys = tickVals.map(t=>{ try{ const d=new Date(t); return d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate(); } catch { return String(t);} });
-      const counts = new Map(); dayKeys.forEach(k=>counts.set(k,(counts.get(k)||0)+1));
-      const hasDupDays = Array.from(counts.values()).some(c=>c>1);
       for (let i=0;i<=xticks;i++){
         const x = M.left + i*(W-(M.left+M.right))/xticks; const v = tickVals[i];
-        const label = hasDupDays ? fmtDateTime(v) : fmtDate(v);
-        const off = hasDupDays ? 36 : 24;
+        const label = fmtDate(v);
+        const off = 24;
         ctx.fillText(label, x-off, H - (M.bottom - 18));
       }
       for (let i=0;i<=yticks;i++){
@@ -1276,6 +1273,416 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
+  // First 24 hours views chart (x-axis = minutes since post creation, y-axis = views)
+  function makeFirst24HoursChart(canvas, tooltipSelector = '#first24HoursTooltip', yAxisLabel = 'Views', yFmt = fmt){
+    const ctx = canvas.getContext('2d');
+    const DPR = Math.max(1, window.devicePixelRatio||1);
+    let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
+    const M = { left:58, top:20, right:30, bottom:40 };
+    function resize(){
+      W = canvas.clientWidth||canvas.width; H = canvas.clientHeight||canvas.height;
+      canvas.width = Math.floor(W*DPR); canvas.height = Math.floor(H*DPR); ctx.setTransform(DPR,0,0,DPR,0,0);
+      draw();
+    }
+    const state = { series:[], x:[0,1], y:[0,1], zoomX:null, zoomY:null, hover:null, hoverSeries:null, comparisonLine:null, timeWindowMinutes:1440 };
+    let hoverCb = null;
+
+    function setData(series, timeWindowMinutes = 1440){
+      state.timeWindowMinutes = timeWindowMinutes;
+      // Filter and transform points: x = minutes since post creation, y = views
+      state.series = series.map(s=>({
+        ...s,
+        points: s.points
+          .filter(p => {
+            if (!s.postTime || !p.t) return false;
+            const minutesSinceCreation = (p.t - s.postTime) / (60 * 1000);
+            return minutesSinceCreation >= 0 && minutesSinceCreation <= timeWindowMinutes;
+          })
+          .map(p => {
+            const minutesSinceCreation = (p.t - s.postTime) / (60 * 1000);
+            return { x: minutesSinceCreation, y: p.y, t: p.t, originalX: p.x };
+          })
+          .sort((a,b)=>a.x-b.x)
+      }));
+      const xs=[], ys=[];
+      for (const s of state.series){
+        for (const p of s.points){ xs.push(p.x); ys.push(p.y); }
+      }
+      state.x = extent(xs, d=>d);
+      state.y = extent(ys, d=>d);
+      if (state.x[0] === Infinity) state.x = [0, timeWindowMinutes];
+      if (state.y[0] === Infinity) state.y = [0, 1];
+      draw();
+    }
+
+    function mapX(x){ const [a,b]=(state.zoomX||state.x); return M.left + ( (x-a)/(b-a||1) ) * (W - (M.left+M.right)); }
+    function mapY(y){ const [a,b]=(state.zoomY||state.y); return H - M.bottom - ( (y-a)/(b-a||1) ) * (H - (M.top+M.bottom)); }
+    function clampToPlot(px, py){
+      const x = Math.max(M.left, Math.min(W - M.right, px));
+      const y = Math.max(M.top, Math.min(H - M.bottom, py));
+      return [x,y];
+    }
+    function grid(){
+      ctx.strokeStyle = '#25303b'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+      for (let i=0;i<6;i++){ const x = M.left + i*(W-(M.left+M.right))/5; ctx.beginPath(); ctx.moveTo(x, M.top); ctx.lineTo(x, H - M.bottom); ctx.stroke(); }
+      for (let i=0;i<6;i++){ const y = M.top + i*(H-(M.top+M.bottom))/5; ctx.beginPath(); ctx.moveTo(M.left, y); ctx.lineTo(W - M.right, y); ctx.stroke(); }
+      ctx.setLineDash([]);
+    }
+    function fmtTime(minutes){
+      if (minutes < 60) return `${Math.round(minutes)}m`;
+      const hours = Math.floor(minutes / 60);
+      const mins = Math.round(minutes % 60);
+      if (mins === 0) return `${hours}h`;
+      return `${hours}h ${mins}m`;
+    }
+    function axes(){
+      const xDomain = state.zoomX || state.x;
+      const yDomain = state.zoomY || state.y;
+      ctx.strokeStyle = '#607080'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(M.left,M.top); ctx.lineTo(M.left,H-M.bottom); ctx.lineTo(W-M.right,H-M.bottom); ctx.stroke();
+      ctx.fillStyle = '#a7b0ba'; ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      const xticks=5, yticks=5;
+      const tickVals = [];
+      for (let i=0;i<=xticks;i++) tickVals.push(xDomain[0] + i*(xDomain[1]-xDomain[0])/xticks);
+      for (let i=0;i<=xticks;i++){
+        const x = M.left + i*(W-(M.left+M.right))/xticks; const v = tickVals[i];
+        const label = fmtTime(v);
+        const off = label.length * 6;
+        ctx.fillText(label, x-off/2, H - (M.bottom - 18));
+      }
+      for (let i=0;i<=yticks;i++){
+        const y = H - M.bottom - i*(H-(M.top+M.bottom))/yticks; const v = yDomain[0] + i*(yDomain[1]-yDomain[0])/yticks;
+        ctx.fillText(yFmt(v), 10, y+4);
+      }
+      ctx.fillStyle = '#e8eaed'; ctx.font = 'bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      ctx.fillText('Time Since Creation', W/2-60, H-6);
+      ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText(yAxisLabel || 'Unique Views', 0,0); ctx.restore();
+    }
+    // Interpolate/extrapolate value for a series at a given x (time)
+    function getValueAtX(series, x){
+      if (!series.points || series.points.length === 0) return null;
+      const pts = series.points;
+      let before = null, after = null;
+      for (let i = 0; i < pts.length; i++){
+        if (pts[i].x <= x) before = pts[i];
+        if (pts[i].x >= x && !after) after = pts[i];
+      }
+      if (!before && after) return after.y;
+      if (before && !after) return before.y;
+      if (before && after){
+        if (before.x === after.x) return before.y;
+        const t = (x - before.x) / (after.x - before.x);
+        return before.y + (after.y - before.y) * t;
+      }
+      return pts[0]?.y ?? null;
+    }
+    
+    // Find two nearest series vertically at mouse x position
+    function findNearestTwoSeries(mx, my){
+      if (state.series.length < 2) return null;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      const candidates = [];
+      for (const s of state.series){
+        const val = getValueAtX(s, mouseX);
+        if (val == null) continue;
+        const y = mapY(val);
+        if (y < M.top || y > H - M.bottom) continue;
+        const dist = Math.abs(my - y);
+        candidates.push({ series: s, y, val, dist });
+      }
+      if (candidates.length < 2) return null;
+      candidates.sort((a,b) => a.dist - b.dist);
+      return {
+        top: candidates[0].y < candidates[1].y ? candidates[0] : candidates[1],
+        bottom: candidates[0].y < candidates[1].y ? candidates[1] : candidates[0],
+        x: mx,
+        mouseX
+      };
+    }
+    
+    // Calculate distance from point to line segment
+    function pointToLineDistance(px, py, x1, y1, x2, y2) {
+      const A = px - x1;
+      const B = py - y1;
+      const C = x2 - x1;
+      const D = y2 - y1;
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      let param = -1;
+      if (lenSq !== 0) param = dot / lenSq;
+      let xx, yy;
+      if (param < 0) {
+        xx = x1;
+        yy = y1;
+      } else if (param > 1) {
+        xx = x2;
+        yy = y2;
+      } else {
+        xx = x1 + param * C;
+        yy = y1 + param * D;
+      }
+      const dx = px - xx;
+      const dy = py - yy;
+      return Math.hypot(dx, dy);
+    }
+
+    function nearestLine(mx, my) {
+      let best = null, bd = Infinity;
+      const invMapX = (px) => {
+        const [a,b] = (state.zoomX||state.x);
+        return a + ((px - M.left)/(W - (M.left+M.right))) * (b-a);
+      };
+      const mouseX = invMapX(mx);
+      for (const s of state.series) {
+        if (s.points.length < 2) continue;
+        for (let i = 0; i < s.points.length - 1; i++) {
+          const p1 = s.points[i];
+          const p2 = s.points[i + 1];
+          const x1 = mapX(p1.x), y1 = mapY(p1.y);
+          const x2 = mapX(p2.x), y2 = mapY(p2.y);
+          if ((x1 < M.left && x2 < M.left) || (x1 > W - M.right && x2 > W - M.right) ||
+              (y1 < M.top && y2 < M.top) || (y1 > H - M.bottom && y2 > H - M.bottom)) continue;
+          const d = pointToLineDistance(mx, my, x1, y1, x2, y2);
+          if (d < bd && d < 6) {
+            bd = d;
+            let interpX = mouseX;
+            let interpY = null;
+            if (mouseX >= Math.min(p1.x, p2.x) && mouseX <= Math.max(p1.x, p2.x)) {
+              if (p1.x === p2.x) {
+                interpY = p1.y;
+              } else {
+                const t = (mouseX - p1.x) / (p2.x - p1.x);
+                interpY = p1.y + (p2.y - p1.y) * t;
+              }
+            } else if (mouseX < Math.min(p1.x, p2.x)) {
+              interpX = Math.min(p1.x, p2.x);
+              interpY = p1.x < p2.x ? p1.y : p2.y;
+            } else {
+              interpX = Math.max(p1.x, p2.x);
+              interpY = p1.x > p2.x ? p1.y : p2.y;
+            }
+            best = { pid: s.id, label: s.label || s.id, x: interpX, y: interpY, t: interpX, color: s.color, url: s.url, profileUrl: s.profileUrl, isLineHover: true, minutesSinceCreation: interpX, originalTime: s.postTime ? s.postTime + interpX * 60 * 1000 : null };
+          }
+        }
+      }
+      return best;
+    }
+
+    function nearest(mx,my){
+      let best=null, bd=Infinity;
+      for (const s of state.series){
+        for (const p of s.points){
+          const x = mapX(p.x), y = mapY(p.y);
+          if (x < M.left || x > W - M.right || y < M.top || y > H - M.bottom) continue;
+          const d = Math.hypot(mx-x,my-y);
+          if (d < bd && d < 16){
+            bd = d;
+            best = { pid: s.id, label: s.label || s.id, x: p.x, y: p.y, t: p.t, color: s.color, url: s.url, profileUrl: s.profileUrl, minutesSinceCreation: p.x, originalTime: p.t };
+          }
+        }
+      }
+      return best;
+    }
+    const tooltip = $(tooltipSelector);
+    let rafPending = null;
+    let lastHover = null;
+    
+    function showTooltip(h, clientX, clientY, comparisonData){
+      if (comparisonData){
+        const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
+        const diffRounded = Math.ceil(diff);
+        const unit = yAxisLabel || 'Views';
+        const unitLower = singularize(unit.toLowerCase());
+        const topColor = comparisonData.top.series.color || '#7dc4ff';
+        const bottomColor = comparisonData.bottom.series.color || '#7dc4ff';
+        tooltip.style.display='block';
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+          <div style="position:relative;width:20px;height:20px;">
+            <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
+            <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
+          </div>
+          <strong>${fmt(diffRounded)} ${unitLower} gap</strong>
+        </div>`;
+        const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+        const width = tooltip.offsetWidth || 0;
+        let left = clientX + 12;
+        if (left + width > vw - 8){
+          left = clientX - 12 - width;
+          if (left < 8) left = 8;
+        }
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = (clientY + 12) + 'px';
+        return;
+      }
+      if (!h){ tooltip.style.display='none'; return; }
+      tooltip.style.display='block';
+      if (h.profileUrl) {
+        let handle = h.label || h.pid || '';
+        handle = handle.replace(/'s (Views|Likes|Cameos|Followers)$/i, '').trim();
+        if (!handle.startsWith('@')) handle = '@' + handle;
+        const unit = yAxisLabel || 'Unique Views';
+        const unitLower = unit.toLowerCase();
+        const timeStr = fmtTime(h.minutesSinceCreation || 0);
+        const numStr = Math.round(h.y).toLocaleString();
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(handle)} ${numStr} ${unitLower}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">${timeStr} after creation</div>`;
+      } else {
+        const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+        const unit = yAxisLabel || 'Unique Views';
+        const timeStr = fmtTime(h.minutesSinceCreation || 0);
+        const body = `<div>${timeStr} after creation • ${unit}: ${yFmt(h.y)}</div>`;
+        tooltip.innerHTML = header + body;
+      }
+      const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+      const width = tooltip.offsetWidth || 0;
+      let left = clientX + 12;
+      if (left + width > vw - 8){
+        left = clientX - 12 - width;
+        if (left < 8) left = 8;
+      }
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = (clientY + 12) + 'px';
+    }
+    
+    function handleMouseMove(e){
+      if (rafPending) return;
+      rafPending = requestAnimationFrame(()=>{
+        rafPending = null;
+        const rect=canvas.getBoundingClientRect();
+        const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
+        if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
+        
+        const h = nearest(mx,my);
+        let lineHover = null;
+        if (!h) {
+          lineHover = nearestLine(mx, my);
+        }
+        const hoverKey = h ? `${h.pid}-${h.t}` : (lineHover ? `${lineHover.pid}-line` : null);
+        const prev=state.hoverSeries;
+        state.hover=h || lineHover;
+        
+        if (!h) {
+          state.hoverSeries = lineHover?.pid || null;
+        } else {
+          state.hoverSeries = h?.pid || null;
+        }
+        if (!h && !lineHover) {
+          state.hoverSeries = null;
+        }
+        
+        const comparison = (!h && !lineHover && state.series.length >= 2) ? findNearestTwoSeries(mx, my) : null;
+        if (comparison && mx >= M.left && mx <= W - M.right){
+          state.comparisonLine = comparison;
+          if (prev !== state.hoverSeries) {
+            if (hoverCb) hoverCb(state.hoverSeries);
+          }
+          draw();
+          showTooltip(null, e.clientX, e.clientY, comparison);
+          lastHover = hoverKey;
+          return;
+        }
+        
+        state.comparisonLine = null;
+        if (hoverKey === lastHover && prev === state.hoverSeries) {
+          showTooltip(h || lineHover, e.clientX, e.clientY);
+          return;
+        }
+        lastHover = hoverKey;
+        if (hoverCb && prev!==state.hoverSeries) hoverCb(state.hoverSeries);
+        draw();
+        showTooltip(h || lineHover, e.clientX, e.clientY);
+      });
+    }
+    
+    let drag=null;
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    let lastDblClickTs = 0;
+    canvas.addEventListener('dblclick', ()=>{ lastDblClickTs = Date.now(); state.zoomX=null; state.zoomY=null; draw(); });
+    canvas.addEventListener('click', (e)=>{
+      if (Date.now() - lastDblClickTs < 250) return;
+      if (state.hover && state.hover.url) {
+        window.open(state.hover.url,'_blank');
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
+      const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
+      const lineHit = nearestLine(mx, my);
+      if (lineHit) {
+        const url = lineHit.url || lineHit.profileUrl;
+        if (url) window.open(url, '_blank');
+      }
+    });
+    canvas.addEventListener('mousedown',(e)=>{
+      const rect=canvas.getBoundingClientRect(); let x0=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y0=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; drag={x0,y0,x1:null,y1:null};
+    });
+    window.addEventListener('mouseup',(e)=>{
+      if (!drag) return; const rect=canvas.getBoundingClientRect(); let x1=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y1=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
+      const [cx0,cy0]=clampToPlot(drag.x0,drag.y0); const [cx1,cy1]=clampToPlot(x1,y1);
+      drag.x1=cx1; drag.y1=cy1; const minW=10,minH=10; const w=Math.abs(cx1-cx0), h=Math.abs(cy1-cy0);
+      if (w>minW && h>minH){ const [X0,X1]=[cx0,cx1].sort((a,b)=>a-b); const [Y0,Y1]=[cy0,cy1].sort((a,b)=>a-b);
+        const invMapX=(px)=>{ const [a,b]=(state.zoomX||state.x); return a + ((px-M.left)/(W-(M.left+M.right)))*(b-a); };
+        const invMapY=(py)=>{ const [a,b]=(state.zoomY||state.y); return a + (((H-M.bottom)-py)/(H-(M.top+M.bottom)))*(b-a); };
+        state.zoomX=[invMapX(X0),invMapX(X1)]; state.zoomY=[invMapY(Y1),invMapY(Y0)]; }
+      drag=null; draw(); showTooltip(null);
+    });
+    function drawDragRect(d){ if (!d||d.x1==null||d.y1==null) return; ctx.save(); ctx.strokeStyle='#7dc4ff'; ctx.fillStyle='#7dc4ff22'; ctx.lineWidth=1; ctx.setLineDash([4,3]);
+      const x0=Math.max(M.left,Math.min(W-M.right,d.x0)); const y0=Math.max(M.top,Math.min(H-M.bottom,d.y0)); const x1=Math.max(M.left,Math.min(W-M.right,d.x1)); const y1=Math.max(M.top,Math.min(H-M.bottom,d.y1));
+      const x=Math.min(x0,x1), y=Math.min(y0,y1), w=Math.abs(x1-x0), h=Math.abs(y1-y0); ctx.strokeRect(x,y,w,h); ctx.fillRect(x,y,w,h); ctx.restore(); }
+    function drawComparisonLine(){
+      if (!state.comparisonLine) return;
+      const cl = state.comparisonLine;
+      const x = Math.max(M.left, Math.min(W - M.right, cl.x));
+      const topY = Math.max(M.top, Math.min(H - M.bottom, cl.top.y));
+      const bottomY = Math.max(M.top, Math.min(H - M.bottom, cl.bottom.y));
+      ctx.save();
+      const topColor = cl.top.series.color || '#7dc4ff';
+      const bottomColor = cl.bottom.series.color || '#7dc4ff';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      
+      const lineLength = Math.abs(bottomY - topY);
+      const dashLength = 4;
+      const gapLength = 4;
+      const segmentLength = dashLength + gapLength;
+      const numSegments = Math.ceil(lineLength / segmentLength);
+      
+      const startY = Math.min(topY, bottomY);
+      for (let i = 0; i < numSegments; i++) {
+        const yStart = startY + (i * segmentLength);
+        const yEnd = Math.min(startY + (i * segmentLength) + dashLength, startY + lineLength);
+        
+        if (yStart >= startY + lineLength) break;
+        
+        ctx.strokeStyle = (i % 2 === 0) ? topColor : bottomColor;
+        ctx.beginPath();
+        ctx.moveTo(x, yStart);
+        ctx.lineTo(x, yEnd);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    
+    function drawSeries(){
+      const muted='#38424c'; const anyHover=!!state.hoverSeries;
+      for (const s of state.series){ const color=(anyHover && state.hoverSeries!==s.id)?muted:s.color; if (s.points.length>1){ ctx.strokeStyle=color; ctx.lineWidth=1.4; ctx.beginPath();
+        for (let i=0;i<s.points.length;i++){ const p=s.points[i]; const x=mapX(p.x), y=mapY(p.y); if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);} ctx.stroke(); }
+        for (const p of s.points){ const x=mapX(p.x), y=mapY(p.y); const isHover=state.hover && state.hover.pid===s.id && state.hover.i===p.t; ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,isHover?4.2:2.4,0,Math.PI*2); ctx.fill(); if (isHover){ ctx.strokeStyle='#ffffffaa'; ctx.lineWidth=1; ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.stroke(); } }
+      }
+    }
+    function draw(){ ctx.clearRect(0,0,canvas.width,canvas.height); grid(); axes(); drawSeries(); drawComparisonLine(); }
+    window.addEventListener('resize', resize); resize();
+    function resetZoom(){ state.zoomX=null; state.zoomY=null; draw(); }
+    function setHoverSeries(pid){ state.hoverSeries=pid||null; draw(); }
+    function onHover(cb){ hoverCb=cb; }
+    function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
+  }
+
   // Followers time chart (multi-series, Y-axis = Followers)
   function makeFollowersChart(canvas){
     const ctx = canvas.getContext('2d');
@@ -1344,11 +1751,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       ctx.fillStyle='#a7b0ba'; ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
       const xticks=5, yticks=5;
       const tickVals=[]; for (let i=0;i<=xticks;i++){ tickVals.push(Math.round(xDomain[0]+i*(xDomain[1]-xDomain[0])/xticks)); }
-      const dayKeys = tickVals.map(t=>{ try{ const d=new Date(t); return d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate(); } catch { return String(t);} });
-      const counts = new Map(); dayKeys.forEach(k=>counts.set(k,(counts.get(k)||0)+1));
-      const hasDupDays = Array.from(counts.values()).some(c=>c>1);
       for (let i=0;i<=xticks;i++){
-        const x=M.left+i*(W-(M.left+M.right))/xticks; const v=tickVals[i]; const label = hasDupDays ? fmtDateTime(v) : fmtDate(v); const off = hasDupDays ? 36 : 24; ctx.fillText(label, x-off, H-(M.bottom-18));
+        const x=M.left+i*(W-(M.left+M.right))/xticks; const v=tickVals[i]; const label = fmtDate(v); const off = 24; ctx.fillText(label, x-off, H-(M.bottom-18));
       }
       for (let i=0;i<=yticks;i++){ const y=H-M.bottom - i*(H-(M.top+M.bottom))/yticks; const v=yDomain[0]+i*(yDomain[1]-yDomain[0])/yticks; ctx.fillText(fmt2(v), 10, y+4); }
       ctx.fillStyle='#e8eaed'; ctx.font='bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial'; ctx.fillText('Time', W/2-20, H-6); ctx.save(); ctx.translate(12,H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Followers',0,0); ctx.restore();
@@ -2378,6 +2782,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     const chart = makeChart($('#chart'));
     const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Views', fmt);
+    const first24HoursChart = makeFirst24HoursChart($('#first24HoursChart'), '#first24HoursTooltip', 'Unique Views', fmt);
     const followersChart = makeFollowersChart($('#followersChart'));
     const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Views', fmt2);
     const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
@@ -2600,6 +3005,666 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       } catch {}
     }
 
+    // Function to calculate best time to post from ALL users' data (runs once on load)
+    // Returns an object with three time-bound calculations: year, month, week
+    function calculateBestPostTimeFromAllUsers(){
+      if (!metrics || !metrics.users) return { year: null, month: null, week: null };
+      
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const now = Date.now();
+      
+      // Helper function to calculate best time for a given time range
+      function calculateBestTimeForRange(daysBack){
+        const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
+        const timeStats = new Map(); // "hour:minuteBucket" -> { count, totalViews, dayOfWeek: Map, times: [] }
+        const timeWindowMinutes = 1440; // 24 hours
+        const bucketSizeMinutes = 15; // Group posts into 15-minute buckets for more meaningful results
+        let totalPostsUsed = 0; // Track total posts used in calculation
+        
+        // Iterate through ALL users and ALL posts within the time range
+        for (const [userKey, user] of Object.entries(metrics.users||{})){
+          for (const [pid, p] of Object.entries(user.posts||{})){
+            const postTime = getPostTimeStrict(p);
+            // Only include posts that are within the time range (postTime >= cutoffTime means post is newer than cutoff)
+            if (!postTime || postTime < cutoffTime) continue;
+            
+            // Find unique views at the end of 24 hours
+            const windowEndTime = postTime + (timeWindowMinutes * 60 * 1000);
+            let maxViews = 0;
+            for (const s of (p.snapshots||[])){
+              if (s.t <= windowEndTime && s.uv != null){
+                maxViews = Math.max(maxViews, Number(s.uv));
+              }
+            }
+            
+            if (maxViews > 0){
+              totalPostsUsed++; // Count this post
+              const postDate = new Date(postTime);
+              const hour = postDate.getHours();
+              const minute = postDate.getMinutes();
+              const dayOfWeek = postDate.getDay();
+              
+              // Round to nearest bucket (e.g., 3:07 -> 3:00, 3:22 -> 3:15, 3:38 -> 3:30)
+              const minuteBucket = Math.floor(minute / bucketSizeMinutes) * bucketSizeMinutes;
+              const timeKey = `${hour}:${minuteBucket}`;
+              
+              if (!timeStats.has(timeKey)){
+                timeStats.set(timeKey, { 
+                  count: 0, 
+                  totalViews: 0,
+                  dayOfWeek: new Map(), // dayOfWeek -> count
+                  times: [] // Store actual times for calculating median
+                });
+              }
+              const stats = timeStats.get(timeKey);
+              stats.count++;
+              stats.totalViews += maxViews;
+              stats.times.push({ hour, minute, dayOfWeek });
+              
+              // Track day of week for this time
+              if (!stats.dayOfWeek.has(dayOfWeek)){
+                stats.dayOfWeek.set(dayOfWeek, 0);
+              }
+              stats.dayOfWeek.set(dayOfWeek, stats.dayOfWeek.get(dayOfWeek) + 1);
+            }
+          }
+        }
+        
+        if (timeStats.size === 0) return null;
+        
+        // Find top 3 time buckets with highest average views
+        const timeBuckets = Array.from(timeStats.entries())
+          .map(([timeKey, stats]) => ({
+            timeKey,
+            avg: stats.totalViews / stats.count,
+            count: stats.count,
+            stats
+          }))
+          .sort((a, b) => b.avg - a.avg)
+          .slice(0, 3);
+
+        if (timeBuckets.length === 0) return null;
+
+        // Create time range from top buckets - use tighter range for better accuracy
+        const times = timeBuckets.flatMap(bucket => bucket.stats.times)
+          .sort((a, b) => {
+            if (a.hour !== b.hour) return a.hour - b.hour;
+            return a.minute - b.minute;
+          });
+
+        // Format as time range
+        const formatTime = (hour, minute) => {
+          const hour12 = hour % 12 || 12;
+          const minuteStr = String(minute).padStart(2, '0');
+          const ampm = hour >= 12 ? 'PM' : 'AM';
+          return `${hour12}:${minuteStr} ${ampm}`;
+        };
+
+        // Calculate median time for more accurate best time
+        const medianIdx = Math.floor(times.length / 2);
+        const medianTime = times[medianIdx];
+        const bestHour = medianTime.hour;
+        const bestMinute = medianTime.minute;
+
+        let timeRangeStr;
+        if (times.length <= 5) {
+          // If few posts, show single time
+          timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
+        } else {
+          // Use interquartile range (25th to 75th percentile) for tighter, more accurate range
+          const q1Idx = Math.floor(times.length * 0.25);
+          const q3Idx = Math.floor(times.length * 0.75);
+          const q1Time = times[q1Idx];
+          const q3Time = times[q3Idx];
+          
+          // If the range is still too broad (>3 hours), use median ±1 hour
+          const q1Minutes = q1Time.hour * 60 + q1Time.minute;
+          const q3Minutes = q3Time.hour * 60 + q3Time.minute;
+          const rangeMinutes = q3Minutes - q1Minutes;
+          
+          if (rangeMinutes > 180) { // More than 3 hours
+            // Use median ±1 hour for tighter range
+            const medianMinutes = bestHour * 60 + bestMinute;
+            const startMinutes = Math.max(0, medianMinutes - 60);
+            const endMinutes = Math.min(1439, medianMinutes + 60);
+            const startHour = Math.floor(startMinutes / 60) % 24;
+            const startMin = startMinutes % 60;
+            const endHour = Math.floor(endMinutes / 60) % 24;
+            const endMin = endMinutes % 60;
+            timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
+          } else {
+            // Use interquartile range
+            timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
+          }
+        }
+
+        // Find most common day of week across all top buckets
+        const dayOfWeekMap = new Map();
+        for (const bucket of timeBuckets) {
+          for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
+            dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
+          }
+        }
+
+        let bestDayOfWeek = null;
+        let bestDayCount = 0;
+        for (const [day, count] of dayOfWeekMap.entries()){
+          if (count > bestDayCount){
+            bestDayCount = count;
+            bestDayOfWeek = day;
+          }
+        }
+        
+        // Format time in user's local timezone
+        const date = new Date();
+        date.setHours(bestHour, bestMinute, 0, 0);
+        
+        // Get timezone abbreviation (ET, PT, etc.)
+        const tzStr = date.toLocaleTimeString('en-US', {
+          timeZoneName: 'short'
+        }).split(' ').pop();
+
+        const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
+
+        return {
+          timeStr: `${timeRangeStr} ${tzStr}`,
+          dayStr: dayStr ? ` on ${dayStr}` : '',
+          postCount: totalPostsUsed
+        };
+      }
+      
+      // Calculate for year (365 days), month (30 days), and week (7 days)
+      const yearResult = calculateBestTimeForRange(365);
+      const monthResult = calculateBestTimeForRange(30);
+      const weekResult = calculateBestTimeForRange(7);
+      
+      return {
+        year: yearResult,
+        month: monthResult,
+        week: weekResult
+      };
+    }
+
+    // Function to calculate best time to post for LIKES from ALL users' data
+    function calculateBestPostTimeForLikes(){
+      if (!metrics || !metrics.users) return { year: null, month: null, week: null };
+      
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const now = Date.now();
+      
+      function calculateBestTimeForRange(daysBack){
+        const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
+        const timeStats = new Map();
+        const timeWindowMinutes = 1440;
+        const bucketSizeMinutes = 15;
+        let totalPostsUsed = 0;
+        
+        for (const [userKey, user] of Object.entries(metrics.users||{})){
+          for (const [pid, p] of Object.entries(user.posts||{})){
+            const postTime = getPostTimeStrict(p);
+            if (!postTime || postTime < cutoffTime) continue;
+            
+            const windowEndTime = postTime + (timeWindowMinutes * 60 * 1000);
+            let maxLikes = 0;
+            for (const s of (p.snapshots||[])){
+              if (s.t <= windowEndTime && s.likes != null){
+                maxLikes = Math.max(maxLikes, Number(s.likes));
+              }
+            }
+            
+            if (maxLikes > 0){
+              totalPostsUsed++;
+              const postDate = new Date(postTime);
+              const hour = postDate.getHours();
+              const minute = postDate.getMinutes();
+              const dayOfWeek = postDate.getDay();
+              
+              const minuteBucket = Math.floor(minute / bucketSizeMinutes) * bucketSizeMinutes;
+              const timeKey = `${hour}:${minuteBucket}`;
+              
+              if (!timeStats.has(timeKey)){
+                timeStats.set(timeKey, { 
+                  count: 0, 
+                  totalLikes: 0,
+                  dayOfWeek: new Map(),
+                  times: []
+                });
+              }
+              const stats = timeStats.get(timeKey);
+              stats.count++;
+              stats.totalLikes += maxLikes;
+              stats.times.push({ hour, minute, dayOfWeek });
+              
+              if (!stats.dayOfWeek.has(dayOfWeek)){
+                stats.dayOfWeek.set(dayOfWeek, 0);
+              }
+              stats.dayOfWeek.set(dayOfWeek, stats.dayOfWeek.get(dayOfWeek) + 1);
+            }
+          }
+        }
+        
+        if (timeStats.size === 0) return null;
+        
+        // Find top 3 time buckets with highest average likes
+        const timeBuckets = Array.from(timeStats.entries())
+          .map(([timeKey, stats]) => ({
+            timeKey,
+            avg: stats.totalLikes / stats.count,
+            count: stats.count,
+            stats
+          }))
+          .sort((a, b) => b.avg - a.avg)
+          .slice(0, 3);
+
+        if (timeBuckets.length === 0) return null;
+
+        // Create time range from top buckets - use tighter range for better accuracy
+        const times = timeBuckets.flatMap(bucket => bucket.stats.times)
+          .sort((a, b) => {
+            if (a.hour !== b.hour) return a.hour - b.hour;
+            return a.minute - b.minute;
+          });
+
+        // Format as time range
+        const formatTime = (hour, minute) => {
+          const hour12 = hour % 12 || 12;
+          const minuteStr = String(minute).padStart(2, '0');
+          const ampm = hour >= 12 ? 'PM' : 'AM';
+          return `${hour12}:${minuteStr} ${ampm}`;
+        };
+
+        // Calculate median time for more accurate best time
+        const medianIdx = Math.floor(times.length / 2);
+        const medianTime = times[medianIdx];
+        const bestHour = medianTime.hour;
+        const bestMinute = medianTime.minute;
+
+        let timeRangeStr;
+        if (times.length <= 5) {
+          // If few posts, show single time
+          timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
+        } else {
+          // Use interquartile range (25th to 75th percentile) for tighter, more accurate range
+          const q1Idx = Math.floor(times.length * 0.25);
+          const q3Idx = Math.floor(times.length * 0.75);
+          const q1Time = times[q1Idx];
+          const q3Time = times[q3Idx];
+          
+          // If the range is still too broad (>3 hours), use median ±1 hour
+          const q1Minutes = q1Time.hour * 60 + q1Time.minute;
+          const q3Minutes = q3Time.hour * 60 + q3Time.minute;
+          const rangeMinutes = q3Minutes - q1Minutes;
+          
+          if (rangeMinutes > 180) { // More than 3 hours
+            // Use median ±1 hour for tighter range
+            const medianMinutes = bestHour * 60 + bestMinute;
+            const startMinutes = Math.max(0, medianMinutes - 60);
+            const endMinutes = Math.min(1439, medianMinutes + 60);
+            const startHour = Math.floor(startMinutes / 60) % 24;
+            const startMin = startMinutes % 60;
+            const endHour = Math.floor(endMinutes / 60) % 24;
+            const endMin = endMinutes % 60;
+            timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
+          } else {
+            // Use interquartile range
+            timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
+          }
+        }
+
+        // Find most common day of week across all top buckets
+        const dayOfWeekMap = new Map();
+        for (const bucket of timeBuckets) {
+          for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
+            dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
+          }
+        }
+
+        let bestDayOfWeek = null;
+        let bestDayCount = 0;
+        for (const [day, count] of dayOfWeekMap.entries()){
+          if (count > bestDayCount){
+            bestDayCount = count;
+            bestDayOfWeek = day;
+          }
+        }
+
+        const date = new Date();
+        date.setHours(bestHour, bestMinute, 0, 0);
+
+        const tzStr = date.toLocaleTimeString('en-US', {
+          timeZoneName: 'short'
+        }).split(' ').pop();
+
+        const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
+
+        return {
+          timeStr: `${timeRangeStr} ${tzStr}`,
+          dayStr: dayStr ? ` on ${dayStr}` : '',
+          postCount: totalPostsUsed
+        };
+      }
+      
+      const yearResult = calculateBestTimeForRange(365);
+      const monthResult = calculateBestTimeForRange(30);
+      const weekResult = calculateBestTimeForRange(7);
+      
+      return {
+        year: yearResult,
+        month: monthResult,
+        week: weekResult
+      };
+    }
+
+    // Function to calculate best time to post for REMIXES from ALL users' data
+    function calculateBestPostTimeForRemixes(){
+      if (!metrics || !metrics.users) return { year: null, month: null, week: null };
+      
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const now = Date.now();
+      
+      function calculateBestTimeForRange(daysBack){
+        const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
+        const timeStats = new Map();
+        const timeWindowMinutes = 1440;
+        const bucketSizeMinutes = 15;
+        let totalPostsUsed = 0;
+        
+        for (const [userKey, user] of Object.entries(metrics.users||{})){
+          for (const [pid, p] of Object.entries(user.posts||{})){
+            const postTime = getPostTimeStrict(p);
+            if (!postTime || postTime < cutoffTime) continue;
+            
+            const windowEndTime = postTime + (timeWindowMinutes * 60 * 1000);
+            let maxRemixes = 0;
+            for (const s of (p.snapshots||[])){
+              const remixCount = s.remix_count ?? s.remixes ?? null;
+              if (s.t <= windowEndTime && remixCount != null){
+                maxRemixes = Math.max(maxRemixes, Number(remixCount));
+              }
+            }
+            
+            if (maxRemixes > 0){
+              totalPostsUsed++;
+              const postDate = new Date(postTime);
+              const hour = postDate.getHours();
+              const minute = postDate.getMinutes();
+              const dayOfWeek = postDate.getDay();
+              
+              const minuteBucket = Math.floor(minute / bucketSizeMinutes) * bucketSizeMinutes;
+              const timeKey = `${hour}:${minuteBucket}`;
+              
+              if (!timeStats.has(timeKey)){
+                timeStats.set(timeKey, { 
+                  count: 0, 
+                  totalRemixes: 0,
+                  dayOfWeek: new Map(),
+                  times: []
+                });
+              }
+              const stats = timeStats.get(timeKey);
+              stats.count++;
+              stats.totalRemixes += maxRemixes;
+              stats.times.push({ hour, minute, dayOfWeek });
+              
+              if (!stats.dayOfWeek.has(dayOfWeek)){
+                stats.dayOfWeek.set(dayOfWeek, 0);
+              }
+              stats.dayOfWeek.set(dayOfWeek, stats.dayOfWeek.get(dayOfWeek) + 1);
+            }
+          }
+        }
+        
+        if (timeStats.size === 0) return null;
+        
+        // Find top 3 time buckets with highest average remixes
+        const timeBuckets = Array.from(timeStats.entries())
+          .map(([timeKey, stats]) => ({
+            timeKey,
+            avg: stats.totalRemixes / stats.count,
+            count: stats.count,
+            stats
+          }))
+          .sort((a, b) => b.avg - a.avg)
+          .slice(0, 3);
+
+        if (timeBuckets.length === 0) return null;
+
+        // Create time range from top buckets - use tighter range for better accuracy
+        const times = timeBuckets.flatMap(bucket => bucket.stats.times)
+          .sort((a, b) => {
+            if (a.hour !== b.hour) return a.hour - b.hour;
+            return a.minute - b.minute;
+          });
+
+        // Format as time range
+        const formatTime = (hour, minute) => {
+          const hour12 = hour % 12 || 12;
+          const minuteStr = String(minute).padStart(2, '0');
+          const ampm = hour >= 12 ? 'PM' : 'AM';
+          return `${hour12}:${minuteStr} ${ampm}`;
+        };
+
+        // Calculate median time for more accurate best time
+        const medianIdx = Math.floor(times.length / 2);
+        const medianTime = times[medianIdx];
+        const bestHour = medianTime.hour;
+        const bestMinute = medianTime.minute;
+
+        let timeRangeStr;
+        if (times.length <= 5) {
+          // If few posts, show single time
+          timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
+        } else {
+          // Use interquartile range (25th to 75th percentile) for tighter, more accurate range
+          const q1Idx = Math.floor(times.length * 0.25);
+          const q3Idx = Math.floor(times.length * 0.75);
+          const q1Time = times[q1Idx];
+          const q3Time = times[q3Idx];
+          
+          // If the range is still too broad (>3 hours), use median ±1 hour
+          const q1Minutes = q1Time.hour * 60 + q1Time.minute;
+          const q3Minutes = q3Time.hour * 60 + q3Time.minute;
+          const rangeMinutes = q3Minutes - q1Minutes;
+          
+          if (rangeMinutes > 180) { // More than 3 hours
+            // Use median ±1 hour for tighter range
+            const medianMinutes = bestHour * 60 + bestMinute;
+            const startMinutes = Math.max(0, medianMinutes - 60);
+            const endMinutes = Math.min(1439, medianMinutes + 60);
+            const startHour = Math.floor(startMinutes / 60) % 24;
+            const startMin = startMinutes % 60;
+            const endHour = Math.floor(endMinutes / 60) % 24;
+            const endMin = endMinutes % 60;
+            timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
+          } else {
+            // Use interquartile range
+            timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
+          }
+        }
+
+        // Find most common day of week across all top buckets
+        const dayOfWeekMap = new Map();
+        for (const bucket of timeBuckets) {
+          for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
+            dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
+          }
+        }
+
+        let bestDayOfWeek = null;
+        let bestDayCount = 0;
+        for (const [day, count] of dayOfWeekMap.entries()){
+          if (count > bestDayCount){
+            bestDayCount = count;
+            bestDayOfWeek = day;
+          }
+        }
+        
+        const date = new Date();
+        date.setHours(bestHour, bestMinute, 0, 0);
+
+        const tzStr = date.toLocaleTimeString('en-US', {
+          timeZoneName: 'short'
+        }).split(' ').pop();
+
+        const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
+
+        return {
+          timeStr: `${timeRangeStr} ${tzStr}`,
+          dayStr: dayStr ? ` on ${dayStr}` : '',
+          postCount: totalPostsUsed
+        };
+      }
+      
+      const yearResult = calculateBestTimeForRange(365);
+      const monthResult = calculateBestTimeForRange(30);
+      const weekResult = calculateBestTimeForRange(7);
+      
+      return {
+        year: yearResult,
+        month: monthResult,
+        week: weekResult
+      };
+    }
+
+    // Function to render best time grid
+    function renderBestTimeGrid(gridElement, bestTimes, postCountYear, postCountMonth, postCountWeek){
+      if (!gridElement) return;
+
+      gridElement.innerHTML = '';
+
+      const renderTimeString = (timeData) => {
+        if (!timeData) return null;
+
+        // Handle time ranges (contains dash) vs single times
+        // Format: "12:30 AM - 2:29 PM ET" or "3:03 PM ET"
+        if (timeData.timeStr.includes(' - ')) {
+          // Range format: "12:30 AM - 2:29 PM ET"
+          const parts = timeData.timeStr.split(' - ');
+          const startPart = parts[0].trim(); // "12:30 AM"
+          const endPart = parts[1].trim(); // "2:29 PM ET"
+          
+          // Parse start time: keep space between time and AM/PM
+          const startParts = startPart.split(' ');
+          const startTime = `${startParts[0]} ${startParts[1]}`; // "12:30 AM"
+          
+          // Parse end time: keep space between time and AM/PM, extract timezone
+          const endParts = endPart.split(' ');
+          const endTime = `${endParts[0]} ${endParts[1]}`; // "2:29 PM"
+          const timezone = endParts[2] || ''; // "ET" or user's timezone
+          
+          return `${startTime} - ${endTime} ${timezone}`;
+        } else {
+          // Single time format: "3:03 PM ET"
+          const parts = timeData.timeStr.split(' ');
+          const hourMinute = parts[0]; // "3:03"
+          const ampm = parts[1]; // "PM"
+          const timezone = parts[2] || ''; // "ET" or user's timezone
+          return `${hourMinute} ${ampm} ${timezone}`;
+        }
+      };
+
+      const renderDayString = (timeData) => {
+        if (!timeData) return null;
+        if (timeData.dayStr) {
+          return timeData.dayStr.replace(' on ', '');
+        }
+        return 'No strong preference';
+      };
+
+      // Create column for Week
+      const weekColumn = document.createElement('div');
+      weekColumn.className = 'best-time-column';
+      
+      if (bestTimes.week) {
+        weekColumn.innerHTML = `
+          <div class="best-time-column-label">Based on</div>
+          <div class="best-time-column-count">${postCountWeek.toLocaleString()} posts</div>
+          <div class="best-time-column-period">this week</div>
+          <div class="best-time-column-label" style="margin-top: 12px;">Post between</div>
+          <div class="best-time-column-time">${renderTimeString(bestTimes.week)}</div>
+          <div class="best-time-column-day">on ${renderDayString(bestTimes.week)}</div>
+        `;
+      } else {
+        weekColumn.innerHTML = '<div class="best-time-column-na">N/A</div>';
+      }
+      gridElement.appendChild(weekColumn);
+
+      // Create column for Month
+      const monthColumn = document.createElement('div');
+      monthColumn.className = 'best-time-column';
+      
+      if (bestTimes.month) {
+        monthColumn.innerHTML = `
+          <div class="best-time-column-label">Based on</div>
+          <div class="best-time-column-count">${postCountMonth.toLocaleString()} posts</div>
+          <div class="best-time-column-period">this month</div>
+          <div class="best-time-column-label" style="margin-top: 12px;">Post between</div>
+          <div class="best-time-column-time">${renderTimeString(bestTimes.month)}</div>
+          <div class="best-time-column-day">on ${renderDayString(bestTimes.month)}</div>
+        `;
+      } else {
+        monthColumn.innerHTML = '<div class="best-time-column-na">N/A</div>';
+      }
+      gridElement.appendChild(monthColumn);
+
+      // Create column for Year
+      const yearColumn = document.createElement('div');
+      yearColumn.className = 'best-time-column';
+      
+      if (bestTimes.year) {
+        yearColumn.innerHTML = `
+          <div class="best-time-column-label">Based on</div>
+          <div class="best-time-column-count">${postCountYear.toLocaleString()} posts</div>
+          <div class="best-time-column-period">this year</div>
+          <div class="best-time-column-label" style="margin-top: 12px;">Post between</div>
+          <div class="best-time-column-time">${renderTimeString(bestTimes.year)}</div>
+          <div class="best-time-column-day">on ${renderDayString(bestTimes.year)}</div>
+        `;
+      } else {
+        yearColumn.innerHTML = '<div class="best-time-column-na">N/A</div>';
+      }
+      gridElement.appendChild(yearColumn);
+    }
+
+    // Function to update best time to post section
+    function updateBestTimeToPostSection(){
+      const bestTimesViews = calculateBestPostTimeFromAllUsers();
+      const bestTimesLikes = calculateBestPostTimeForLikes();
+      const bestTimesRemixes = calculateBestPostTimeForRemixes();
+      
+      // Render grids
+      renderBestTimeGrid($('#bestTimeViewsGrid'), bestTimesViews, 
+        bestTimesViews.year?.postCount || 0, 
+        bestTimesViews.month?.postCount || 0, 
+        bestTimesViews.week?.postCount || 0);
+      renderBestTimeGrid($('#bestTimeLikesGrid'), bestTimesLikes,
+        bestTimesLikes.year?.postCount || 0,
+        bestTimesLikes.month?.postCount || 0,
+        bestTimesLikes.week?.postCount || 0);
+      renderBestTimeGrid($('#bestTimeRemixesGrid'), bestTimesRemixes,
+        bestTimesRemixes.year?.postCount || 0,
+        bestTimesRemixes.month?.postCount || 0,
+        bestTimesRemixes.week?.postCount || 0);
+    }
+
+    // Function to update first 24 hours chart
+    function updateFirst24HoursChart(timeWindowMinutes){
+      const user = metrics.users[currentUserKey];
+      if (!user) return;
+      const colorFor = makeColorMap(user);
+      const f24Series = (function(){
+        const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
+          if (!visibleSet.has(pid)) continue;
+          const postTime = getPostTimeStrict(p);
+          if (!postTime) continue; // Skip posts without creation time (can't calculate time since creation)
+          const pts=[]; for (const s of (p.snapshots||[])){ const t=s.t; const v=s.uv; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); }
+          const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid;
+          // Include all posts with post_time, even if they have no snapshots or no snapshots in the time window
+          out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid), postTime: postTime }); }
+        return out; })();
+      first24HoursChart.setData(f24Series, timeWindowMinutes);
+    }
+
     async function refreshUserUI(opts={}){
       const { preserveEmpty=false, skipRestoreZoom=false } = opts;
       const user = metrics.users[currentUserKey];
@@ -2635,7 +3700,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         }
       }
-      buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); } });
+      buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); } });
       const series = computeSeriesForUser(user, [], colorFor)
         .filter(s=>visibleSet.has(s.id))
         .map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) }));
@@ -2647,6 +3712,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
+      // First 24 hours chart: views over time since post creation
+      updateFirst24HoursChart(parseInt($('#first24HoursSlider')?.value) || 1440);
       // Only update compare charts if no compare users are selected
       if (compareUsers.size === 0){
         // Update unfiltered totals cards for single user
@@ -2751,6 +3818,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const z = zoomStates[currentUserKey] || {};
           if (z.scatter) chart.setZoom(z.scatter);
           if (z.views) viewsChart.setZoom(z.views);
+          if (z.first24Hours) first24HoursChart.setZoom(z.first24Hours);
           if (z.likesAll) allLikesChart.setZoom(z.likesAll);
           if (z.cameos) cameosChart.setZoom(z.cameos);
           if (z.followers) followersChart.setZoom(z.followers);
@@ -2769,12 +3837,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
         }
         viewsChart.setHoverSeries(pid);
+        first24HoursChart.setHoverSeries(pid);
       });
       viewsChart.onHover((pid)=>{
         const wrap = $('#posts'); if (!wrap) return;
         if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
         else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
         chart.setHoverSeries(pid);
+        first24HoursChart.setHoverSeries(pid);
+      });
+      first24HoursChart.onHover((pid)=>{
+        const wrap = $('#posts'); if (!wrap) return;
+        if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
+        else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
+        chart.setHoverSeries(pid);
+        viewsChart.setHoverSeries(pid);
       });
       // wire visibility toggles
       $$('#posts .toggle').forEach(btn=>{
@@ -2796,6 +3873,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             }
             return out; })();
           viewsChart.setData(vSeries);
+          // Update first 24 hours chart
+          updateFirst24HoursChart(parseInt($('#first24HoursSlider')?.value) || 1440);
           // (likes total chart is unfiltered; no need to refresh here)
           // Update metric cards to reflect current visibility
           try{
@@ -3324,6 +4403,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         renderComparePills();
         buildCompareDropdown();
         refreshUserUI();
+        updateBestTimeToPostSection();
         
         // Close modals
         purgeModal.style.display = 'none';
@@ -3341,6 +4421,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       // capture zoom states
       const zScatter = chart.getZoom();
       const zViews = viewsChart.getZoom();
+      const zFirst24Hours = first24HoursChart.getZoom();
       const zLikesAll = allLikesChart.getZoom();
       const zCameos = cameosChart.getZoom();
       const zFollowers = followersChart.getZoom();
@@ -3350,6 +4431,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (!metrics.users[prev]) currentUserKey = def;
       $('#userSelect').value = currentUserKey || '';
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+      updateBestTimeToPostSection();
+      
       // Clean up compare users that no longer exist
       for (const key of Array.from(compareUsers)){
         if (!metrics.users[key]) compareUsers.delete(key);
@@ -3357,9 +4440,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       renderComparePills();
       buildCompareDropdown();
       refreshUserUI();
+      updateBestTimeToPostSection();
       // restore zoom states
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
       try { if (zViews) viewsChart.setZoom(zViews); } catch {}
+      try { if (zFirst24Hours) first24HoursChart.setZoom(zFirst24Hours); } catch {}
       try { if (zLikesAll) allLikesChart.setZoom(zLikesAll); } catch {}
       try { if (zCameos) cameosChart.setZoom(zCameos); } catch {}
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
@@ -3379,11 +4464,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         e.target.value = '';
       }
     });
+    
     // Persist zoom on full page reload/navigation
     function persistZoom(){
       const z = zoomStates[currentUserKey] || (zoomStates[currentUserKey] = {});
       z.scatter = chart.getZoom();
       z.views = viewsChart.getZoom();
+      z.first24Hours = first24HoursChart.getZoom();
       z.likesAll = allLikesChart.getZoom();
       z.cameos = cameosChart.getZoom();
       z.followers = followersChart.getZoom();
@@ -3391,9 +4478,27 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
+      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      // First 24 hours slider
+      function fmtSliderTime(minutes){
+        if (minutes < 60) return `${minutes}m`;
+        const hours = Math.floor(minutes / 60);
+        const mins = minutes % 60;
+        if (mins === 0) return `${hours}h`;
+        return `${hours}h ${mins}m`;
+      }
+      const slider = $('#first24HoursSlider');
+      const sliderValue = $('#first24HoursSliderValue');
+      if (slider && sliderValue) {
+        slider.addEventListener('input', (e)=>{
+          const minutes = parseInt(e.target.value);
+          sliderValue.textContent = fmtSliderTime(minutes);
+          updateFirst24HoursChart(minutes);
+        });
+        sliderValue.textContent = fmtSliderTime(parseInt(slider.value) || 1440);
+      }
       $('#last5').addEventListener('click', ()=>{
         const u = metrics.users[currentUserKey];
         if (!u) return;
@@ -3516,6 +4621,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       addCompareUser(currentUserKey);
     }
     refreshUserUI();
+    updateBestTimeToPostSection();
   }
 
   document.addEventListener('DOMContentLoaded', main, { once:true });
