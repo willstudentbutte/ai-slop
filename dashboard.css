@@ -282,3 +282,69 @@ input[type=search]:focus, select:focus{border-color:rgba(255,255,255,0.20);outli
 .purge-confirm-no:hover{
   background:rgba(48,48,48,0.7);border-color:rgba(255,255,255,0.15);
 }
+
+/* Best Time to Post Styles */
+.best-time-subtext{
+  font-size:13px;color:var(--muted);line-height:1.6;
+}
+.best-time-metric-card{
+  background:var(--chip);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:20px;
+  box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);
+  margin-bottom: 8px;
+}
+.best-time-metric-header{
+  font-size:16px;font-weight:700;color:var(--fg);margin-bottom:12px;
+}
+.best-time-grid{
+  display:grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.best-time-column{
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background: rgba(48,48,48,0.2);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  text-align: center;
+}
+.best-time-column-label{
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.best-time-column-count{
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--fg);
+  margin-bottom: 2px;
+}
+.best-time-column-period{
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.best-time-column-time{
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+  line-height: 1.4;
+}
+.best-time-column-day{
+  font-size: 12px;
+  color: var(--muted);
+}
+.best-time-column-na{
+  font-size: 14px;
+  color: var(--muted);
+  padding: 20px 0;
+}
