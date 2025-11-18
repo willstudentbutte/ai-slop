@@ -18,7 +18,7 @@
   } catch {}
 
   // Debug toggles
-  const DEBUG = { feed: true, thumbs: true, analyze: true };
+  const DEBUG = { feed: true, thumbs: true, analyze: true, drafts: false };
   const dlog = (topic, ...args) => {
     try {
       if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args);
@@ -30,11 +30,14 @@
   const SESS_KEY = 'SORA_UV_GATHER_STATE_V1';
   const ANALYZE_VISITED_KEY = 'SORA_UV_ANALYZE_VISITED';
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+  const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
   const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
+  const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
   const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
+  const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
 
   // == State Maps ==
   const idToUnique = new Map();
@@ -43,6 +46,16 @@
   const idToComments = new Map();
   const idToRemixes = new Map();
   const idToMeta = new Map(); // { ageMin, userHandle }
+  const idToDuration = new Map(); // Draft duration in seconds
+  const idToPrompt = new Map(); // Draft prompt text
+  const idToDownloadUrl = new Map(); // Draft downloadable URL
+  const idToViolation = new Map(); // Draft content violation status
+
+  // == Draft UI Constants ==
+  const DRAFT_BUTTON_SIZE = 24; // px
+  const DRAFT_BUTTON_MARGIN = 6; // px from edge
+  const DRAFT_BUTTON_SPACING = 4; // px between buttons
+  const SORA_DEFAULT_FPS = 30; // Sora standard framerate (fallback if API doesn't provide fps)
 
   // == UI State ==
   let controlBar = null;
@@ -76,6 +89,17 @@
   let analyzeWindowHours = Math.min(24, Math.max(1, Number(localStorage.getItem(ANALYZE_WINDOW_KEY) || 24)));
   const ANALYZE_RUN_MS = 6500; // 6.5 seconds
 
+  // Bookmarks (Drafts page only)
+  // 0 = show all, 1 = show bookmarked only, 2 = show unbookmarked only, 3 = violations only
+  let bookmarksFilterState = 0;
+  let bookmarksBtn = null;
+
+  // Performance: Cache draft cards to avoid constant DOM queries
+  let cachedDraftCards = null;
+  let cachedDraftCardsCount = 0;
+  let processedDraftCards = new WeakSet(); // Track which cards have buttons already
+  let processedDraftCardsCount = 0; // Track how many cards are fully processed
+  let lastAppliedFilterState = -1; // Track when filter needs re-applying
 
   // Track route to detect same-tab navigation
   const routeKey = () => `${location.pathname}${location.search}`;
@@ -182,6 +206,8 @@
     const p = location.pathname;
     return p.startsWith('/storyboard') || p.startsWith('/drafts') || p.startsWith('/d/') || p.startsWith('/p/');
   };
+
+  const isDrafts = () => location.pathname.startsWith('/drafts');
 
   function currentSIdFromURL() {
     const m = location.pathname.match(/^\/p\/(s_[A-Za-z0-9]+)/i);
@@ -352,6 +378,66 @@
   const selectAllCards = () =>
     Array.from(document.querySelectorAll('a[href^="/p/s_"]')).map((a) => a.closest('article,div,section') || a);
 
+  // == Drafts helpers ==
+  const extractDraftIdFromCard = (el) => {
+    // Try to find a link with /d/ pattern
+    const link = el.querySelector('a[href^="/d/"]');
+    if (link) {
+      const m = link.getAttribute('href').match(/\/d\/([A-Za-z0-9_-]+)/i);
+      if (m) return normalizeId(m[1]);
+    }
+    // Try to find any data attribute that might contain draft ID
+    const dataId = el.dataset?.draftId || el.dataset?.id;
+    if (dataId) return normalizeId(dataId);
+    // Try to find draft ID in any child element's data attributes
+    const childWithId = el.querySelector('[data-draft-id], [data-id]');
+    if (childWithId) {
+      const id = childWithId.dataset?.draftId || childWithId.dataset?.id;
+      if (id) return normalizeId(id);
+    }
+    return null;
+  };
+  const selectAllDrafts = () => {
+    if (!isDrafts()) {
+      cachedDraftCards = null;
+      cachedDraftCardsCount = 0;
+      processedDraftCardsCount = 0;
+      return [];
+    }
+
+    // Try to find draft cards by looking for /d/ links
+    const allLinks = document.querySelectorAll('a[href^="/d/"]');
+    const currentCount = allLinks.length;
+
+    // Return cached version if count hasn't changed
+    if (cachedDraftCards && currentCount === cachedDraftCardsCount && currentCount > 0) {
+      return cachedDraftCards;
+    }
+
+    // Cache miss - do the full query
+    // Reset processed count since we're re-scanning (new cards may have appeared)
+    processedDraftCardsCount = 0;
+
+    const linksMethod = Array.from(allLinks).map((a) => a.closest('article,div,section') || a);
+    if (linksMethod.length > 0) {
+      cachedDraftCards = linksMethod;
+      cachedDraftCardsCount = currentCount;
+      return linksMethod;
+    }
+
+    // Fallback: look for common grid/list containers on drafts page
+    const containers = document.querySelectorAll('[class*="grid"] > div, [class*="flex"] > div');
+    const filtered = Array.from(containers).filter(el => {
+      // Only include elements that contain media and have a valid draft ID
+      const hasMedia = el.querySelector('video, img');
+      const hasDraftId = extractDraftIdFromCard(el);
+      return hasMedia && hasDraftId;
+    });
+    cachedDraftCards = filtered;
+    cachedDraftCardsCount = filtered.length;
+    return filtered;
+  };
+
   // == Badge & UI (Feed) ==
   function colorForAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return null;
@@ -514,6 +600,276 @@
     return badge;
   }
 
+  function ensureBookmarkButton(draftCard, draftId) {
+    if (!draftId) return null;
+
+    let bookmarkBtn = draftCard.querySelector('.sora-uv-bookmark-btn');
+    if (!bookmarkBtn) {
+      if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+      bookmarkBtn = document.createElement('button');
+      bookmarkBtn.className = 'sora-uv-bookmark-btn';
+      bookmarkBtn.type = 'button';
+      bookmarkBtn.setAttribute('aria-label', 'Toggle bookmark');
+      Object.assign(bookmarkBtn.style, {
+        position: 'absolute',
+        bottom: `${DRAFT_BUTTON_MARGIN}px`,
+        left: `${DRAFT_BUTTON_MARGIN}px`,
+        width: `${DRAFT_BUTTON_SIZE}px`,
+        height: `${DRAFT_BUTTON_SIZE}px`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.75)',
+        border: 'none',
+        color: '#fff',
+        fontSize: '14px',
+        cursor: 'pointer',
+        zIndex: 9998,
+        transition: 'all 0.2s ease',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+      });
+
+      bookmarkBtn.addEventListener('mouseenter', () => {
+        bookmarkBtn.style.background = 'rgba(0,0,0,0.9)';
+        bookmarkBtn.style.transform = 'scale(1.05)';
+      });
+      bookmarkBtn.addEventListener('mouseleave', () => {
+        bookmarkBtn.style.background = 'rgba(0,0,0,0.75)';
+        bookmarkBtn.style.transform = 'scale(1)';
+      });
+
+      bookmarkBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const nowBookmarked = toggleBookmark(draftId);
+        updateBookmarkButtonState(bookmarkBtn, nowBookmarked);
+        // Re-apply filter if active (force=true since bookmark changed)
+        if (bookmarksFilterState !== 0) {
+          applyBookmarksFilter(true);
+        }
+      });
+
+      draftCard.appendChild(bookmarkBtn);
+    }
+
+    // Update button state based on current bookmark status
+    updateBookmarkButtonState(bookmarkBtn, isBookmarked(draftId));
+    return bookmarkBtn;
+  }
+
+  function updateBookmarkButtonState(btn, bookmarked) {
+    // Create bookmark SVG icon (classic ribbon/flag shape)
+    const svg = bookmarked
+      ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+           <path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/>
+         </svg>`
+      : `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events: none;">
+           <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+         </svg>`;
+
+    btn.innerHTML = svg;
+    btn.style.color = bookmarked ? '#ffd700' : '#fff';
+    btn.setAttribute('aria-pressed', bookmarked ? 'true' : 'false');
+  }
+
+  function ensureCopyPromptButton(draftCard, draftId) {
+    if (!draftId) return null;
+
+    let copyBtn = draftCard.querySelector('.sora-uv-copy-prompt-btn');
+    if (!copyBtn) {
+      if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+      copyBtn = document.createElement('button');
+      copyBtn.className = 'sora-uv-copy-prompt-btn';
+      copyBtn.type = 'button';
+      copyBtn.setAttribute('aria-label', 'Copy prompt');
+      Object.assign(copyBtn.style, {
+        position: 'absolute',
+        bottom: `${DRAFT_BUTTON_MARGIN}px`,
+        left: `${DRAFT_BUTTON_MARGIN + DRAFT_BUTTON_SIZE + DRAFT_BUTTON_SPACING}px`,
+        width: `${DRAFT_BUTTON_SIZE}px`,
+        height: `${DRAFT_BUTTON_SIZE}px`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.75)',
+        border: 'none',
+        color: '#fff',
+        cursor: 'pointer',
+        zIndex: 9998,
+        transition: 'all 0.2s ease',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+      });
+
+      // Copy icon SVG
+      copyBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events: none;">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>`;
+
+      copyBtn.addEventListener('mouseenter', () => {
+        if (!copyBtn.disabled) {
+          copyBtn.style.background = 'rgba(0,0,0,0.9)';
+          copyBtn.style.transform = 'scale(1.05)';
+        }
+      });
+      copyBtn.addEventListener('mouseleave', () => {
+        copyBtn.style.background = 'rgba(0,0,0,0.75)';
+        copyBtn.style.transform = 'scale(1)';
+      });
+
+      copyBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const prompt = idToPrompt.get(draftId);
+        if (!prompt) return;
+
+        try {
+          await navigator.clipboard.writeText(prompt);
+          const originalHTML = copyBtn.innerHTML;
+          // Show checkmark
+          copyBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events: none;">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>`;
+          copyBtn.style.color = '#4ade80';
+          setTimeout(() => {
+            copyBtn.innerHTML = originalHTML;
+            copyBtn.style.color = '#fff';
+          }, 1500);
+        } catch (err) {
+          console.error('Failed to copy prompt:', err);
+        }
+      });
+
+      draftCard.appendChild(copyBtn);
+    }
+
+    // Update button state based on whether prompt exists
+    const hasPrompt = idToPrompt.has(draftId);
+    copyBtn.disabled = !hasPrompt;
+    copyBtn.style.opacity = hasPrompt ? '1' : '0.4';
+    copyBtn.style.cursor = hasPrompt ? 'pointer' : 'not-allowed';
+
+    return copyBtn;
+  }
+
+  function ensureDownloadButton(draftCard, draftId) {
+    if (!draftId) return null;
+
+    let downloadBtn = draftCard.querySelector('.sora-uv-download-btn');
+    if (!downloadBtn) {
+      if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+      downloadBtn = document.createElement('button');
+      downloadBtn.className = 'sora-uv-download-btn';
+      downloadBtn.type = 'button';
+      downloadBtn.setAttribute('aria-label', 'Download draft');
+      Object.assign(downloadBtn.style, {
+        position: 'absolute',
+        bottom: `${DRAFT_BUTTON_MARGIN}px`,
+        left: `${DRAFT_BUTTON_MARGIN + (DRAFT_BUTTON_SIZE + DRAFT_BUTTON_SPACING) * 2}px`,
+        width: `${DRAFT_BUTTON_SIZE}px`,
+        height: `${DRAFT_BUTTON_SIZE}px`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.75)',
+        border: 'none',
+        color: '#fff',
+        cursor: 'pointer',
+        zIndex: 9998,
+        transition: 'all 0.2s ease',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+      });
+
+      // Download icon SVG
+      downloadBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events: none;">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="7 10 12 15 17 10"></polyline>
+        <line x1="12" y1="15" x2="12" y2="3"></line>
+      </svg>`;
+
+      downloadBtn.addEventListener('mouseenter', () => {
+        if (!downloadBtn.disabled) {
+          downloadBtn.style.background = 'rgba(0,0,0,0.9)';
+          downloadBtn.style.transform = 'scale(1.05)';
+        }
+      });
+      downloadBtn.addEventListener('mouseleave', () => {
+        downloadBtn.style.background = 'rgba(0,0,0,0.75)';
+        downloadBtn.style.transform = 'scale(1)';
+      });
+
+      downloadBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const downloadUrl = idToDownloadUrl.get(draftId);
+        if (!downloadUrl) return;
+
+        try {
+          // Fetch the file and create a blob URL to force download
+          const response = await fetch(downloadUrl);
+          if (!response.ok) throw new Error('Download failed');
+
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+
+          // Determine file extension from URL or Content-Type
+          let extension = '.mp4'; // Default for Sora videos
+          try {
+            // Try to extract from URL path
+            const urlPath = new URL(downloadUrl).pathname;
+            const urlExt = urlPath.match(/\.([a-z0-9]+)$/i)?.[1];
+            if (urlExt && ALLOWED_VIDEO_EXTENSIONS.includes(urlExt.toLowerCase())) {
+              extension = `.${urlExt}`;
+            } else {
+              // Try to get from Content-Type header
+              const contentType = response.headers.get('content-type');
+              if (contentType?.includes('video/mp4')) extension = '.mp4';
+              else if (contentType?.includes('video/quicktime')) extension = '.mov';
+              else if (contentType?.includes('video/webm')) extension = '.webm';
+            }
+          } catch {}
+
+          // Create temporary anchor element to trigger download
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = `sora-draft-${draftId}${extension}`;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+
+          // Clean up the blob URL after download completes (longer delay for large video files)
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+        } catch (err) {
+          console.error('[SoraUV] Failed to download:', err);
+          // Fallback to opening in new tab if fetch fails
+          window.open(downloadUrl, '_blank');
+        }
+      });
+
+      draftCard.appendChild(downloadBtn);
+    }
+
+    // Update button state based on whether download URL exists
+    const hasDownloadUrl = idToDownloadUrl.has(draftId);
+    downloadBtn.disabled = !hasDownloadUrl;
+    downloadBtn.style.opacity = hasDownloadUrl ? '1' : '0.4';
+    downloadBtn.style.cursor = hasDownloadUrl ? 'pointer' : 'not-allowed';
+
+    return downloadBtn;
+  }
+
   function createPill(parent, text, tooltipText, tooltipEnabled = true) {
     if (!text) return null;
     const pill = document.createElement('span');
@@ -654,6 +1010,112 @@
       addBadge(card, uv, meta);
     }
     applyFilter();
+  }
+
+  function renderBookmarkButtons() {
+    if (!isDrafts()) return;
+    ensureControlBar();
+    const draftCards = selectAllDrafts();
+
+    // Early exit: if all cards are already processed, skip
+    if (draftCards.length > 0 && draftCards.length === processedDraftCardsCount) {
+      return;
+    }
+
+    let newCardsFound = 0;
+    for (const draftCard of draftCards) {
+      // Skip if we've already fully processed this card (all buttons added)
+      if (processedDraftCards.has(draftCard)) continue;
+
+      const draftId = extractDraftIdFromCard(draftCard);
+      if (!draftId) continue;
+
+      ensureBookmarkButton(draftCard, draftId);
+      // Don't mark as processed yet - renderDraftButtons needs to add other buttons too
+      newCardsFound++;
+    }
+
+    // Only apply filter if we found new cards (force=true since new cards need styling)
+    if (newCardsFound > 0) {
+      applyBookmarksFilter(true);
+    }
+  }
+
+  function formatDuration(seconds) {
+    if (!seconds || !Number.isFinite(seconds)) return null;
+    const s = Math.round(seconds);
+    if (s < 60) return `${s}s`;
+    const mins = Math.floor(s / 60);
+    const secs = s % 60;
+    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  }
+
+  function ensureDurationBadge(draftCard, draftId) {
+    if (!draftId) return null;
+
+    const duration = idToDuration.get(draftId);
+    if (!duration) return null;
+
+    let badge = draftCard.querySelector('.sora-uv-duration-badge');
+    if (!badge) {
+      if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+      badge = document.createElement('div');
+      badge.className = 'sora-uv-duration-badge';
+      Object.assign(badge.style, {
+        position: 'absolute',
+        bottom: `${DRAFT_BUTTON_MARGIN}px`,
+        right: `${DRAFT_BUTTON_MARGIN}px`,
+        padding: '4px 8px',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.75)',
+        color: '#fff',
+        fontSize: '12px',
+        fontWeight: '600',
+        lineHeight: '1',
+        zIndex: 9999,
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+        pointerEvents: 'none',
+      });
+
+      draftCard.appendChild(badge);
+    }
+
+    const formatted = formatDuration(duration);
+    if (formatted) {
+      badge.textContent = formatted;
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+
+    return badge;
+  }
+
+  function renderDraftButtons() {
+    if (!isDrafts()) return;
+
+    const draftCards = selectAllDrafts();
+
+    // Early exit: if all cards are already processed, skip
+    if (draftCards.length > 0 && draftCards.length === processedDraftCardsCount) {
+      return;
+    }
+
+    for (const draftCard of draftCards) {
+      // Skip if we've already processed this card
+      if (processedDraftCards.has(draftCard)) continue;
+
+      const draftId = extractDraftIdFromCard(draftCard);
+      if (!draftId) continue;
+
+      ensureDurationBadge(draftCard, draftId);
+      ensureCopyPromptButton(draftCard, draftId);
+      ensureDownloadButton(draftCard, draftId);
+      processedDraftCards.add(draftCard);
+      processedDraftCardsCount++; // Increment count for early exit optimization
+    }
   }
 
   // == Detail badge (post page only) ==
@@ -1044,6 +1506,14 @@
     analyzeBtn.style.display = 'none';
     buttonRow.appendChild(analyzeBtn);
 
+    // Bookmarks (Drafts only; visibility handled later)
+    bookmarksBtn = document.createElement('button');
+    bookmarksBtn.className = 'sora-uv-bookmarks-btn';
+    bookmarksBtn.dataset.active = 'false';
+    makePill(bookmarksBtn, 'Filter');
+    bookmarksBtn.style.display = 'none';
+    buttonRow.appendChild(bookmarksBtn);
+
     bar.appendChild(buttonRow);
 
     // Gather controls
@@ -1167,6 +1637,17 @@
     analyzeBtn.onclick = () => {
       if (analyzeBtn.disabled) return;
       toggleAnalyzeMode();
+    };
+
+    bookmarksBtn.onclick = () => {
+      if (bookmarksBtn.disabled) return;
+      // Cycle through states: 0 (all) -> 1 (bookmarked) -> 2 (unbookmarked) -> 3 (violations) -> 0
+      bookmarksFilterState = (bookmarksFilterState + 1) % 4;
+
+      const labels = ['Filter', 'Bookmarks', 'Unbookmarked', 'Violations'];
+      bookmarksBtn.setActive(bookmarksFilterState !== 0);
+      bookmarksBtn.setLabel(labels[bookmarksFilterState]);
+      applyBookmarksFilter(true); // Force since filter state changed
     };
 
     bar.updateGatherState = () => {
@@ -2376,6 +2857,61 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function applyBookmarksFilter(force = false) {
+    if (!isDrafts()) return;
+
+    // Skip if filter hasn't changed (unless forced)
+    if (!force && lastAppliedFilterState === bookmarksFilterState) {
+      return;
+    }
+
+    const bookmarks = getBookmarks();
+    const draftCards = selectAllDrafts();
+    lastAppliedFilterState = bookmarksFilterState;
+
+    for (const draftCard of draftCards) {
+      const draftId = extractDraftIdFromCard(draftCard);
+
+      // Determine if this card should be visible based on current filter state
+      let shouldShow = true;
+
+      if (!draftId) {
+        // No ID found - fade when filtering, show when showing all
+        shouldShow = bookmarksFilterState === 0;
+      } else {
+        const isBookmarked = bookmarks.has(draftId);
+        const isViolation = idToViolation.get(draftId);
+
+        if (bookmarksFilterState === 0) {
+          // Show all drafts
+          shouldShow = true;
+        } else if (bookmarksFilterState === 1) {
+          // Show only bookmarked drafts
+          shouldShow = isBookmarked;
+        } else if (bookmarksFilterState === 2) {
+          // Show only unbookmarked drafts
+          shouldShow = !isBookmarked;
+        } else if (bookmarksFilterState === 3) {
+          // Show only content violations
+          shouldShow = isViolation;
+        }
+      }
+
+      // Apply visual fade instead of hiding
+      if (shouldShow) {
+        draftCard.style.removeProperty('opacity');
+        draftCard.style.removeProperty('pointer-events');
+        draftCard.style.removeProperty('filter');
+      } else {
+        // Using !important is intentional - as a browser extension injecting into an unknown page,
+        // we need to override any existing styles that might interfere with filter visibility
+        draftCard.style.setProperty('opacity', '0.25', 'important');
+        draftCard.style.setProperty('pointer-events', 'none', 'important');
+        draftCard.style.setProperty('filter', 'grayscale(1)', 'important');
+      }
+    }
+  }
+
   // == Gather Mode ==
   function getGatherState() {
     try {
@@ -2571,7 +3107,13 @@ async function renderAnalyzeTable(force = false) {
       const res = await origFetch.apply(this, arguments);
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
-        if (FEED_RE.test(url)) {
+
+        // Check DRAFTS_RE before FEED_RE since drafts URL would also match FEED_RE
+        if (DRAFTS_RE.test(url)) {
+          res.clone().json().then(processDraftsJson).catch((err) => {
+            console.error('[SoraUV] Error parsing drafts fetch response:', err);
+          });
+        } else if (FEED_RE.test(url)) {
           dlog('feed', 'fetch matched', { url });
           res
             .clone()
@@ -2600,21 +3142,30 @@ async function renderAnalyzeTable(force = false) {
     XMLHttpRequest.prototype.open = function (method, url) {
       this.addEventListener('load', function () {
         try {
-          if (typeof url === 'string' && FEED_RE.test(url)) {
-            dlog('feed', 'xhr matched', { url });
-            try {
-              const j = JSON.parse(this.responseText);
-              dlog('feed', 'xhr parsed', { url, items: (j?.items || j?.data?.items || []).length });
-              processFeedJson(j);
-            } catch {}
-          } else if (typeof url === 'string' && url.startsWith(location.origin)) {
-            try {
-              const j = JSON.parse(this.responseText);
-              if (looksLikeSoraFeed(j)) {
-                dlog('feed', 'xhr autodetected', { url, items: (j?.items || j?.data?.items || []).length });
-                processFeedJson(j);
+          if (typeof url === 'string') {
+            // Check DRAFTS_RE before FEED_RE since drafts URL would also match FEED_RE
+            if (DRAFTS_RE.test(url)) {
+              try {
+                processDraftsJson(JSON.parse(this.responseText));
+              } catch (err) {
+                console.error('[SoraUV] Error parsing drafts XHR:', err);
               }
-            } catch {}
+            } else if (FEED_RE.test(url)) {
+              dlog('feed', 'xhr matched', { url });
+              try {
+                const j = JSON.parse(this.responseText);
+                dlog('feed', 'xhr parsed', { url, items: (j?.items || j?.data?.items || []).length });
+                processFeedJson(j);
+              } catch {}
+            } else if (url.startsWith(location.origin)) {
+              try {
+                const j = JSON.parse(this.responseText);
+                if (looksLikeSoraFeed(j)) {
+                  dlog('feed', 'xhr autodetected', { url, items: (j?.items || j?.data?.items || []).length });
+                  processFeedJson(j);
+                }
+              } catch {}
+            }
           }
         } catch {}
       });
@@ -2733,6 +3284,57 @@ async function renderAnalyzeTable(force = false) {
     renderProfileImpact();
   }
 
+  function processDraftsJson(json) {
+    // Extract draft data from API response
+    const items = json?.items || json?.data?.items || json?.generations || [];
+    if (!Array.isArray(items) || items.length === 0) return;
+
+    for (const item of items) {
+      try {
+        let draftId = item?.id || item?.generation_id || item?.draft_id;
+        if (!draftId) continue;
+        draftId = normalizeId(draftId);
+
+        // Extract n_frames and fps from creation_config for duration
+        const nFrames = item?.creation_config?.n_frames;
+        const fps = item?.creation_config?.fps;
+        if (typeof nFrames === 'number' && nFrames > 0) {
+          // Use fps from API if available, otherwise default to 30 fps
+          const hasValidFps = (typeof fps === 'number' && fps > 0);
+          const usedFps = hasValidFps ? fps : SORA_DEFAULT_FPS;
+          idToDuration.set(draftId, nFrames / usedFps);
+          if (!hasValidFps && DEBUG.drafts) {
+            dlog('drafts', `Draft ${draftId} duration calculated with default ${SORA_DEFAULT_FPS} fps (nFrames=${nFrames})`);
+          }
+        }
+
+        // Extract prompt from creation_config
+        const prompt = item?.creation_config?.prompt;
+        if (prompt && typeof prompt === 'string') {
+          idToPrompt.set(draftId, prompt);
+        }
+
+        // Extract downloadable_url
+        const downloadUrl = item?.downloadable_url;
+        if (downloadUrl && typeof downloadUrl === 'string') {
+          idToDownloadUrl.set(draftId, downloadUrl);
+        }
+
+        // Extract content violation status
+        if (item?.kind === 'sora_content_violation') {
+          idToViolation.set(draftId, true);
+        } else {
+          idToViolation.set(draftId, false);
+        }
+      } catch (e) {
+        console.error('[SoraUV] Error processing draft item:', e);
+      }
+    }
+
+    // Trigger render to show all draft buttons and badges
+    renderDraftButtons();
+  }
+
   // == Observers & Lifecycle ==
   const mo = new MutationObserver(() => {
     if (mo._raf) cancelAnimationFrame(mo._raf);
@@ -2740,6 +3342,8 @@ async function renderAnalyzeTable(force = false) {
       renderBadges();
       renderDetailBadge();
       renderProfileImpact();
+      renderBookmarkButtons();
+      renderDraftButtons();
       updateControlsVisibility();
     });
   });
@@ -2749,6 +3353,8 @@ async function renderAnalyzeTable(force = false) {
     renderBadges();
     renderDetailBadge();
     renderProfileImpact();
+    renderBookmarkButtons();
+    renderDraftButtons();
     updateControlsVisibility();
   }
 
@@ -2794,7 +3400,8 @@ async function renderAnalyzeTable(force = false) {
     const bar = ensureControlBar();
     if (!bar) return;
 
-    if (isFilterHiddenPage()) {
+    // Show control bar on drafts page for bookmarks feature, hide on other filter-hidden pages
+    if (isFilterHiddenPage() && !isDrafts()) {
       bar.style.display = 'none';
       return;
     } else bar.style.display = 'flex';
@@ -2810,6 +3417,13 @@ async function renderAnalyzeTable(force = false) {
       if (gatherBtn) gatherBtn.style.display = 'none';
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
       if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+
+      // Position on the right (default)
+      bar.style.top = '12px';
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
+
       return; // nothing else to manage while analyzing
     }
 
@@ -2820,6 +3434,23 @@ async function renderAnalyzeTable(force = false) {
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = isGatheringActiveThisTab ? 'flex' : 'none';
       if (sliderContainer) sliderContainer.style.display = isProfile() ? 'flex' : 'none';
       bar.updateGatherState();
+
+      // Position on the right (default)
+      bar.style.top = '12px';
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
+    } else if (isDrafts()) {
+      // On drafts page: hide Filter, Gather, and controls
+      if (filterBtn) filterBtn.style.display = 'none';
+      if (gatherBtn) gatherBtn.style.display = 'none';
+      if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
+
+      // Position centered horizontally to avoid overlapping native buttons on both sides
+      bar.style.top = '12px';
+      bar.style.left = '50%';
+      bar.style.right = 'auto';
+      bar.style.transform = 'translateX(-50%)';
     } else {
       if (gatherBtn) gatherBtn.style.display = 'none';
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
@@ -2832,10 +3463,19 @@ async function renderAnalyzeTable(force = false) {
         bar.updateGatherState();
       }
       if (filterBtn) filterBtn.style.display = '';
+
+      // Position on the right (default)
+      bar.style.top = '12px';
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
     }
 
     // Analyze button only on Top feed
     if (analyzeBtn) analyzeBtn.style.display = isTopFeed() ? '' : 'none';
+
+    // Bookmarks button only on Drafts page
+    if (bookmarksBtn) bookmarksBtn.style.display = isDrafts() ? '' : 'none';
 
     if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
   }
@@ -2847,6 +3487,18 @@ async function renderAnalyzeTable(force = false) {
 
     if (navigated) {
       forceStopGatherOnNavigation();
+      // Reset bookmarks filter on navigation
+      bookmarksFilterState = 0;
+      lastAppliedFilterState = -1;
+      if (bookmarksBtn) {
+        bookmarksBtn.setActive(false);
+        bookmarksBtn.setLabel('Filter');
+      }
+      // Invalidate draft card cache on navigation
+      cachedDraftCards = null;
+      cachedDraftCardsCount = 0;
+      processedDraftCardsCount = 0;
+      processedDraftCards = new WeakSet(); // Reset to clear stale DOM references; navigation may remove/replace draft card elements, so previous references may no longer be valid
     }
 
     const bar = ensureControlBar();
@@ -2855,6 +3507,8 @@ async function renderAnalyzeTable(force = false) {
     renderBadges();
     renderDetailBadge();
     renderProfileImpact();
+    renderBookmarkButtons();
+    renderDraftButtons();
     updateControlsVisibility();
   }
 
@@ -2869,6 +3523,33 @@ async function renderAnalyzeTable(force = false) {
   function setPrefs(p) {
     localStorage.setItem(PREF_KEY, JSON.stringify(p));
   }
+
+  // == Bookmarks (Drafts) ==
+  function getBookmarks() {
+    try {
+      const data = JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || '{}');
+      return new Set(Array.isArray(data.ids) ? data.ids : []);
+    } catch {
+      return new Set();
+    }
+  }
+  function setBookmarks(bookmarksSet) {
+    localStorage.setItem(BOOKMARKS_KEY, JSON.stringify({ ids: Array.from(bookmarksSet) }));
+  }
+  function toggleBookmark(draftId) {
+    const bookmarks = getBookmarks();
+    if (bookmarks.has(draftId)) {
+      bookmarks.delete(draftId);
+    } else {
+      bookmarks.add(draftId);
+    }
+    setBookmarks(bookmarks);
+    return bookmarks.has(draftId);
+  }
+  function isBookmarked(draftId) {
+    return getBookmarks().has(draftId);
+  }
+
   function handleStorageChange(e) {
     if (e.key !== PREF_KEY) return;
     try {
@@ -2900,6 +3581,22 @@ async function renderAnalyzeTable(force = false) {
       startGathering(true);
       if (!gatherCountdownIntervalId) gatherCountdownIntervalId = setInterval(updateCountdownDisplay, 1000);
     }
+  }
+
+  // Debug helper - only available when DEBUG.drafts is enabled
+  if (DEBUG.drafts) {
+    window.__soraDebug = {
+      idToDuration,
+      idToPrompt,
+      idToDownloadUrl,
+      idToViolation,
+      renderDraftButtons,
+      selectAllDrafts,
+      extractDraftIdFromCard,
+      isDrafts,
+      processDraftsJson,
+      getBookmarks,
+    };
   }
 
   if (document.readyState === 'loading') {
