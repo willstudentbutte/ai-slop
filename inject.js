@@ -36,7 +36,7 @@
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
-  const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
+  const FILTER_LABELS = ['All', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
 
   // == State Maps ==
@@ -1661,7 +1661,7 @@
     bar.updateFilterLabel = () => {
       const s = getGatherState();
       const idx = s.filterIndex ?? 0;
-      filterBtn.setLabel(FILTER_LABELS[idx]);
+      filterBtn.setLabel(idx === 0 ? 'Filter' : FILTER_LABELS[idx]);
 
       // Only apply filter-lock when NOT gathering; otherwise we’d re-enable Analyze mid-gather
       if (!isGatheringActiveThisTab) applyFilterLockState();
