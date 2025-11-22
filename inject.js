@@ -1487,10 +1487,72 @@
     }
 
     // Filter
+    const filterContainer = document.createElement('div');
+    filterContainer.className = 'sora-uv-filter-container';
+    filterContainer.style.position = 'relative';
+
     const filterBtn = document.createElement('button');
     filterBtn.setAttribute('data-role', 'filter-btn');
     makePill(filterBtn, 'Filter');
-    buttonRow.appendChild(filterBtn);
+    filterContainer.appendChild(filterBtn);
+
+    // Filter dropdown menu
+    const filterDropdown = document.createElement('div');
+    filterDropdown.className = 'sora-uv-filter-dropdown';
+    Object.assign(filterDropdown.style, {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      right: '0',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '4px',
+      padding: '8px',
+      background: 'rgba(29,29,29,0.95)',
+      border: '1px solid rgba(255,255,255,0.1)',
+      borderRadius: '12px',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+      backdropFilter: 'blur(8px)',
+      WebkitBackdropFilter: 'blur(8px)',
+      zIndex: 999999,
+      minWidth: '120px',
+    });
+    
+    // Filter dropdown items
+    FILTER_LABELS.forEach((label, index) => {
+      const option = document.createElement('button');
+      option.textContent = label;
+      option.className = 'sora-uv-filter-option';
+      Object.assign(option.style, {
+        padding: '8px 12px',
+        background: 'transparent',
+        border: 'none',
+        color: '#fff',
+        textAlign: 'left',
+        cursor: 'pointer',
+        borderRadius: '8px',
+        fontSize: '14px',
+        fontWeight: '500',
+        transition: 'background 120ms ease',
+      });
+
+      option.onmouseenter = () => { option.style.background = 'rgba(255,255,255,0.1)'; };
+      option.onmouseleave = () => { option.style.background = 'transparent'; };
+
+      option.onclick = (e) => {
+        e.stopPropagation();
+        const s = getGatherState();
+        s.filterIndex = index;
+        setGatherState(s);
+        bar.updateFilterLabel();
+        applyFilter();
+        filterDropdown.style.display = 'none';
+      };
+  
+      filterDropdown.appendChild(option);
+    });
+
+    filterContainer.appendChild(filterDropdown);
+    buttonRow.appendChild(filterContainer);
 
     // Gather
     const gatherBtn = document.createElement('button');
@@ -1606,14 +1668,17 @@
     };
 
     // Wire Filter button
-    filterBtn.onclick = () => {
-      if (filterBtn.disabled) return; // safety
-      const s = getGatherState();
-      s.filterIndex = ((s.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
-      setGatherState(s);
-      bar.updateFilterLabel();
-      applyFilter();
+    filterBtn.onclick = (e) => {
+      if (filterBtn.disabled) return;
+      e.stopPropagation();
+      const isOpen = filterDropdown.style.display === 'flex';
+      filterDropdown.style.display = isOpen ? 'none' : 'flex';
     };
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', () => {
+      filterDropdown.style.display = 'none';
+    });
 
     // Guard clicks on disabled buttons
     gatherBtn.onclick = () => {
