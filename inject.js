@@ -1380,14 +1380,14 @@
       st.textContent = `
         .sora-uv-btn{
           display:inline-flex;align-items:center;justify-content:center;height:40px;
-          border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.10);
+          border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.15);
           font-size:16px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;user-select:none;
-          background:rgba(29,29,29,0.78);color:#fff;
+          background:rgba(37,37,37,0.6);color:#fff;
           box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);
-          backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+          backdrop-filter:blur(22px) saturate(2);-webkit-backdrop-filter:blur(22px) saturate(2);
           transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease,opacity 120ms ease;
         }
-        .sora-uv-btn:hover{ background:rgba(29,29,29,0.88) }
+        .sora-uv-btn:hover{ background:rgba(37,37,37,0.75) }
         .sora-uv-btn[disabled]{ opacity:.5; cursor:not-allowed }
         .sora-uv-btn[data-active="true"]{
           background:hsla(120,60%,30%,.90);
@@ -1495,6 +1495,7 @@
     filterBtn.setAttribute('data-role', 'filter-btn');
     makePill(filterBtn, 'Filter');
     filterContainer.appendChild(filterBtn);
+    
 
     // Filter dropdown menu
     const filterDropdown = document.createElement('div');
@@ -1505,16 +1506,16 @@
       right: '0',
       display: 'none',
       flexDirection: 'column',
-      gap: '4px',
+      gap: '0',
       padding: '8px',
-      background: 'rgba(29,29,29,0.95)',
-      border: '1px solid rgba(255,255,255,0.1)',
-      borderRadius: '12px',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-      backdropFilter: 'blur(8px)',
-      WebkitBackdropFilter: 'blur(8px)',
+      background: 'rgba(37, 37, 37, 0.6)', // Sora's dark mode transparency
+      border: '1px solid rgba(255, 255, 255, 0.15)', // Subtle glass border
+      borderRadius: '20px',
+      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+      backdropFilter: 'blur(22px) saturate(2)', // The key glassmorphism effect
+      WebkitBackdropFilter: 'blur(22px) saturate(2)',
       zIndex: 999999,
-      minWidth: '120px',
+      minWidth: '220px',
     });
     
     // Filter dropdown items
@@ -1526,7 +1527,7 @@
         padding: '8px 12px',
         background: 'transparent',
         border: 'none',
-        color: '#fff',
+        color: 'var(--token-text-primary, #fff)',
         textAlign: 'left',
         cursor: 'pointer',
         borderRadius: '8px',
@@ -1535,7 +1536,7 @@
         transition: 'background 120ms ease',
       });
 
-      option.onmouseenter = () => { option.style.background = 'rgba(255,255,255,0.1)'; };
+      option.onmouseenter = () => { option.style.background = 'var(--token-bg-light, rgba(255, 255, 255, 0.1))'; };
       option.onmouseleave = () => { option.style.background = 'transparent'; };
 
       option.onclick = (e) => {
