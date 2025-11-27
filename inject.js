@@ -58,6 +58,8 @@
   const charToLikesCount = new Map(); // Character likes received count
   const charToCanCameo = new Map(); // Character can_cameo permission
   const usernameToUserId = new Map(); // Map username to user_id for character lookup
+  const charToOriginalIndex = new Map(); // Store original order from API
+  let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
   // == Draft UI Constants ==
   const DRAFT_BUTTON_SIZE = 24; // px
@@ -69,6 +71,8 @@
   let controlBar = null;
   let gatherTimerEl = null;
   let detailBadgeEl = null;
+  let characterSortBtn = null;
+  let characterSortMode = 'date'; // 'date', 'likes', 'cameos'
 
   let gatherScrollIntervalId = null;
   let gatherRefreshTimeoutId = null;
@@ -3360,7 +3364,8 @@ async function renderAnalyzeTable(force = false) {
 
     dlog('characters', `Processing ${items.length} characters`);
 
-    for (const item of items) {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
       try {
         const userId = item?.user_id;
         const username = item?.username;
@@ -3369,6 +3374,11 @@ async function renderAnalyzeTable(force = false) {
         // Store username -> userId mapping
         if (username) {
           usernameToUserId.set(username.toLowerCase(), userId);
+        }
+
+        // Store original index for date sorting (only if not already stored)
+        if (!charToOriginalIndex.has(userId)) {
+          charToOriginalIndex.set(userId, charGlobalIndexCounter++);
         }
 
         // Extract character stats
@@ -3388,13 +3398,206 @@ async function renderAnalyzeTable(force = false) {
       }
     }
 
-    // Trigger render to show character stats
+    // Trigger render to show character stats (this will also handle re-sorting)
     renderCharacterStats();
   }
 
+  function addCharacterSortButton() {
+    // Find the Characters dialog header by looking for dialog with "Characters" title
+    const dialog = document.querySelector('div[role="dialog"]');
+    if (!dialog) {
+      // Dialog closed, reset button reference
+      characterSortBtn = null;
+      return;
+    }
+
+    // Check if button already exists
+    if (dialog.querySelector('.sora-uv-char-sort-btn')) return;
+
+    // Find the header by text content
+    const dialogHeader = Array.from(dialog.querySelectorAll('h2')).find(h => h.textContent === 'Characters');
+    if (!dialogHeader) return;
+
+    const headerContainer = dialogHeader.parentElement;
+    if (!headerContainer) return;
+
+    // Create custom dropdown container
+    const dropdownContainer = document.createElement('div');
+    dropdownContainer.className = 'sora-uv-char-sort-dropdown';
+    Object.assign(dropdownContainer.style, {
+      position: 'relative',
+      marginTop: '4px'
+    });
+
+    // Create button
+    characterSortBtn = document.createElement('button');
+    characterSortBtn.className = 'sora-uv-char-sort-btn';
+    Object.assign(characterSortBtn.style, {
+      background: 'rgba(29,29,29,0.78)',
+      color: '#fff',
+      border: 'none',
+      borderRadius: '12px',
+      padding: '6px 12px',
+      fontSize: '12px',
+      fontWeight: '600',
+      cursor: 'pointer',
+      transition: 'background 0.2s',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px'
+    });
+
+    const updateButtonText = () => {
+      const labels = {
+        'date': 'Sort: Date',
+        'likes': 'Sort: Likes',
+        'cameos': 'Sort: Cameos'
+      };
+      characterSortBtn.textContent = labels[characterSortMode] || 'Sort';
+      characterSortBtn.appendChild(arrow);
+    };
+
+    // Create arrow icon
+    const arrow = document.createElement('span');
+    arrow.textContent = '▼';
+    arrow.style.fontSize = '10px';
+
+    updateButtonText();
+
+    // Create dropdown menu
+    const dropdownMenu = document.createElement('div');
+    dropdownMenu.className = 'sora-uv-char-sort-menu';
+    Object.assign(dropdownMenu.style, {
+      position: 'absolute',
+      top: '100%',
+      left: '0',
+      marginTop: '4px',
+      background: 'rgba(29,29,29,0.95)',
+      borderRadius: '12px',
+      padding: '4px',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: '140px',
+      zIndex: '1000',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+    });
+
+    // Add options to dropdown
+    const options = [
+      { value: 'date', label: 'Date' },
+      { value: 'likes', label: 'Likes' },
+      { value: 'cameos', label: 'Cameos' }
+    ];
+
+    options.forEach(opt => {
+      const option = document.createElement('button');
+      option.textContent = opt.label;
+      option.className = 'sora-uv-char-sort-option';
+      Object.assign(option.style, {
+        background: 'transparent',
+        color: '#fff',
+        border: 'none',
+        borderRadius: '8px',
+        padding: '8px 12px',
+        fontSize: '12px',
+        cursor: 'pointer',
+        textAlign: 'left',
+        transition: 'background 0.2s'
+      });
+
+      option.addEventListener('mouseenter', () => {
+        option.style.background = 'rgba(255,255,255,0.1)';
+      });
+
+      option.addEventListener('mouseleave', () => {
+        option.style.background = 'transparent';
+      });
+
+      option.addEventListener('click', (e) => {
+        e.stopPropagation();
+        characterSortMode = opt.value;
+        updateButtonText();
+        dropdownMenu.style.display = 'none';
+        sortCharacterList();
+      });
+
+      dropdownMenu.appendChild(option);
+    });
+
+    // Toggle dropdown on button click
+    characterSortBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isVisible = dropdownMenu.style.display === 'flex';
+      dropdownMenu.style.display = isVisible ? 'none' : 'flex';
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', () => {
+      if (dropdownMenu) {
+        dropdownMenu.style.display = 'none';
+      }
+    });
+
+    dropdownContainer.appendChild(characterSortBtn);
+    dropdownContainer.appendChild(dropdownMenu);
+    headerContainer.appendChild(dropdownContainer);
+  }
+
+  function sortCharacterList() {
+    // Find the character list container
+    const listContainer = document.querySelector('div[role="dialog"] .flex.flex-col.gap-1');
+    if (!listContainer) return;
+
+    // Get all character link elements
+    const characterLinks = Array.from(listContainer.querySelectorAll('a[href^="/profile/"]'));
+    if (characterLinks.length === 0) return;
+
+    // Create array of {element, username, stats} for sorting
+    const charactersData = characterLinks.map(link => {
+      const href = link.getAttribute('href');
+      const match = href?.match(/\/profile\/([^/?]+)/);
+      if (!match) return null;
+
+      const username = match[1];
+      const userId = usernameToUserId.get(username.toLowerCase());
+
+      return {
+        element: link,
+        username,
+        userId,
+        likes: userId ? (charToLikesCount.get(userId) || 0) : 0,
+        cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
+        originalIndex: userId ? (charToOriginalIndex.get(userId) ?? 9999) : 9999
+      };
+    }).filter(Boolean);
+
+    // Sort based on current mode
+    if (characterSortMode === 'likes') {
+      charactersData.sort((a, b) => b.likes - a.likes);
+    } else if (characterSortMode === 'cameos') {
+      charactersData.sort((a, b) => b.cameos - a.cameos);
+    } else if (characterSortMode === 'date') {
+      // Sort by original index to restore default order
+      charactersData.sort((a, b) => a.originalIndex - b.originalIndex);
+    }
+
+    // Reorder DOM elements
+    charactersData.forEach(char => {
+      listContainer.appendChild(char.element);
+    });
+
+    dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
+  }
+
   function renderCharacterStats() {
+    // Add sort button if dialog is open
+    addCharacterSortButton();
+
     // Find all character links in the dialog
     const characterLinks = document.querySelectorAll('a[href^="/profile/"]');
+
+    let hasNewStats = false;
 
     for (const link of characterLinks) {
       // Skip if we've already added stats to this link
@@ -3469,7 +3672,16 @@ async function renderAnalyzeTable(force = false) {
       const nameContainer = link.querySelector('.flex.min-w-0.flex-1.flex-col');
       if (nameContainer && statsContainer.childNodes.length > 0) {
         nameContainer.appendChild(statsContainer);
+        hasNewStats = true;
       }
+    }
+
+    // If we added new stats and we're in a sorted mode, re-sort the list
+    if (hasNewStats && characterSortMode !== 'date') {
+      // Use requestAnimationFrame to ensure DOM is updated before sorting
+      requestAnimationFrame(() => {
+        sortCharacterList();
+      });
     }
   }
 
