@@ -36,7 +36,7 @@
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
-  const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
+  const FILTER_LABELS = ['All', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
 
   // == State Maps ==
@@ -1380,14 +1380,14 @@
       st.textContent = `
         .sora-uv-btn{
           display:inline-flex;align-items:center;justify-content:center;height:40px;
-          border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.10);
+          border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.15);
           font-size:16px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;user-select:none;
-          background:rgba(29,29,29,0.78);color:#fff;
+          background:rgba(37,37,37,0.6);color:#fff;
           box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);
-          backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+          backdrop-filter:blur(22px) saturate(2);-webkit-backdrop-filter:blur(22px) saturate(2);
           transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease,opacity 120ms ease;
         }
-        .sora-uv-btn:hover{ background:rgba(29,29,29,0.88) }
+        .sora-uv-btn:hover{ background:rgba(37,37,37,0.75) }
         .sora-uv-btn[disabled]{ opacity:.5; cursor:not-allowed }
         .sora-uv-btn[data-active="true"]{
           background:hsla(120,60%,30%,.90);
@@ -1487,10 +1487,73 @@
     }
 
     // Filter
+    const filterContainer = document.createElement('div');
+    filterContainer.className = 'sora-uv-filter-container';
+    filterContainer.style.position = 'relative';
+
     const filterBtn = document.createElement('button');
     filterBtn.setAttribute('data-role', 'filter-btn');
     makePill(filterBtn, 'Filter');
-    buttonRow.appendChild(filterBtn);
+    filterContainer.appendChild(filterBtn);
+    
+
+    // Filter dropdown menu
+    const filterDropdown = document.createElement('div');
+    filterDropdown.className = 'sora-uv-filter-dropdown';
+    Object.assign(filterDropdown.style, {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      right: '0',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '0',
+      padding: '8px',
+      background: 'rgba(37, 37, 37, 0.6)', // Sora's dark mode transparency
+      border: '1px solid rgba(255, 255, 255, 0.15)', // Subtle glass border
+      borderRadius: '20px',
+      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+      backdropFilter: 'blur(22px) saturate(2)', // The key glassmorphism effect
+      WebkitBackdropFilter: 'blur(22px) saturate(2)',
+      zIndex: 999999,
+      minWidth: '220px',
+    });
+    
+    // Filter dropdown items
+    FILTER_LABELS.forEach((label, index) => {
+      const option = document.createElement('button');
+      option.textContent = label;
+      option.className = 'sora-uv-filter-option';
+      Object.assign(option.style, {
+        padding: '8px 12px',
+        background: 'transparent',
+        border: 'none',
+        color: 'var(--token-text-primary, #fff)',
+        textAlign: 'left',
+        cursor: 'pointer',
+        borderRadius: '8px',
+        fontSize: '14px',
+        fontWeight: '500',
+        transition: 'background 120ms ease',
+      });
+
+      option.onmouseenter = () => { option.style.background = 'var(--token-bg-light, rgba(255, 255, 255, 0.1))'; };
+      option.onmouseleave = () => { option.style.background = 'transparent'; };
+
+      option.onclick = (e) => {
+        e.stopPropagation();
+        const s = getGatherState();
+        s.filterIndex = index;
+        setGatherState(s);
+        bar.updateFilterLabel();
+        applyFilter();
+        filterDropdown.style.display = 'none';
+      };
+  
+      filterDropdown.appendChild(option);
+    });
+
+    filterContainer.appendChild(filterDropdown);
+    buttonRow.appendChild(filterContainer);
 
     // Gather
     const gatherBtn = document.createElement('button');
@@ -1599,21 +1662,24 @@
     bar.updateFilterLabel = () => {
       const s = getGatherState();
       const idx = s.filterIndex ?? 0;
-      filterBtn.setLabel(FILTER_LABELS[idx]);
+      filterBtn.setLabel(idx === 0 ? 'Filter' : FILTER_LABELS[idx]);
 
       // Only apply filter-lock when NOT gathering; otherwise we’d re-enable Analyze mid-gather
       if (!isGatheringActiveThisTab) applyFilterLockState();
     };
 
     // Wire Filter button
-    filterBtn.onclick = () => {
-      if (filterBtn.disabled) return; // safety
-      const s = getGatherState();
-      s.filterIndex = ((s.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
-      setGatherState(s);
-      bar.updateFilterLabel();
-      applyFilter();
+    filterBtn.onclick = (e) => {
+      if (filterBtn.disabled) return;
+      e.stopPropagation();
+      const isOpen = filterDropdown.style.display === 'flex';
+      filterDropdown.style.display = isOpen ? 'none' : 'flex';
     };
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', () => {
+      filterDropdown.style.display = 'none';
+    });
 
     // Guard clicks on disabled buttons
     gatherBtn.onclick = () => {
