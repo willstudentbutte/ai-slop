@@ -33,11 +33,15 @@
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
   const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
+  const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
   const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
+
+  // Debug toggle for characters
+  DEBUG.characters = true;
 
   // == State Maps ==
   const idToUnique = new Map();
@@ -50,6 +54,10 @@
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
+  const charToCameoCount = new Map(); // Character cameo count
+  const charToLikesCount = new Map(); // Character likes received count
+  const charToCanCameo = new Map(); // Character can_cameo permission
+  const usernameToUserId = new Map(); // Map username to user_id for character lookup
 
   // == Draft UI Constants ==
   const DRAFT_BUTTON_SIZE = 24; // px
@@ -3108,8 +3116,12 @@ async function renderAnalyzeTable(force = false) {
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
 
-        // Check DRAFTS_RE before FEED_RE since drafts URL would also match FEED_RE
-        if (DRAFTS_RE.test(url)) {
+        // Check DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
+        if (CHARACTERS_RE.test(url)) {
+          res.clone().json().then(processCharactersJson).catch((err) => {
+            console.error('[SoraUV] Error parsing characters fetch response:', err);
+          });
+        } else if (DRAFTS_RE.test(url)) {
           res.clone().json().then(processDraftsJson).catch((err) => {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
@@ -3143,8 +3155,14 @@ async function renderAnalyzeTable(force = false) {
       this.addEventListener('load', function () {
         try {
           if (typeof url === 'string') {
-            // Check DRAFTS_RE before FEED_RE since drafts URL would also match FEED_RE
-            if (DRAFTS_RE.test(url)) {
+            // Check CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
+            if (CHARACTERS_RE.test(url)) {
+              try {
+                processCharactersJson(JSON.parse(this.responseText));
+              } catch (err) {
+                console.error('[SoraUV] Error parsing characters XHR:', err);
+              }
+            } else if (DRAFTS_RE.test(url)) {
               try {
                 processDraftsJson(JSON.parse(this.responseText));
               } catch (err) {
@@ -3335,6 +3353,126 @@ async function renderAnalyzeTable(force = false) {
     renderDraftButtons();
   }
 
+  function processCharactersJson(json) {
+    // Extract character data from API response
+    const items = json?.items || [];
+    if (!Array.isArray(items) || items.length === 0) return;
+
+    dlog('characters', `Processing ${items.length} characters`);
+
+    for (const item of items) {
+      try {
+        const userId = item?.user_id;
+        const username = item?.username;
+        if (!userId) continue;
+
+        // Store username -> userId mapping
+        if (username) {
+          usernameToUserId.set(username.toLowerCase(), userId);
+        }
+
+        // Extract character stats
+        if (typeof item.cameo_count === 'number') {
+          charToCameoCount.set(userId, item.cameo_count);
+        }
+        if (typeof item.likes_received_count === 'number') {
+          charToLikesCount.set(userId, item.likes_received_count);
+        }
+        if (typeof item.can_cameo === 'boolean') {
+          charToCanCameo.set(userId, item.can_cameo);
+        }
+
+        dlog('characters', `Character: ${username} (${userId}) - ${item.cameo_count} cameos, ${item.likes_received_count} likes, can_cameo: ${item.can_cameo}`);
+      } catch (e) {
+        console.error('[SoraUV] Error processing character item:', e);
+      }
+    }
+
+    // Trigger render to show character stats
+    renderCharacterStats();
+  }
+
+  function renderCharacterStats() {
+    // Find all character links in the dialog
+    const characterLinks = document.querySelectorAll('a[href^="/profile/"]');
+
+    for (const link of characterLinks) {
+      // Skip if we've already added stats to this link
+      if (link.querySelector('.sora-uv-char-stats')) continue;
+
+      // Extract username from href
+      const href = link.getAttribute('href');
+      const match = href?.match(/\/profile\/([^/?]+)/);
+      if (!match) continue;
+
+      const username = match[1];
+      const userId = usernameToUserId.get(username.toLowerCase());
+      if (!userId) continue;
+
+      // Get stats from maps
+      const cameoCount = charToCameoCount.get(userId);
+      const likesCount = charToLikesCount.get(userId);
+      const canCameo = charToCanCameo.get(userId);
+
+      // Create stats container
+      const statsContainer = document.createElement('div');
+      statsContainer.className = 'sora-uv-char-stats';
+      Object.assign(statsContainer.style, {
+        display: 'flex',
+        gap: '8px',
+        fontSize: '12px',
+        marginTop: '2px',
+        color: '#a3a3a3',
+        alignItems: 'center'
+      });
+
+      // Add cameo count
+      if (typeof cameoCount === 'number') {
+        const cameoStat = document.createElement('span');
+        cameoStat.textContent = `${cameoCount} cameo${cameoCount !== 1 ? 's' : ''}`;
+        statsContainer.appendChild(cameoStat);
+
+        // Add separator
+        const sep1 = document.createElement('span');
+        sep1.textContent = '•';
+        sep1.style.color = '#525252';
+        statsContainer.appendChild(sep1);
+      }
+
+      // Add likes count
+      if (typeof likesCount === 'number') {
+        const likesStat = document.createElement('span');
+        likesStat.textContent = `${likesCount} like${likesCount !== 1 ? 's' : ''}`;
+        statsContainer.appendChild(likesStat);
+
+        // Add separator if canCameo exists
+        if (typeof canCameo === 'boolean') {
+          const sep2 = document.createElement('span');
+          sep2.textContent = '•';
+          sep2.style.color = '#525252';
+          statsContainer.appendChild(sep2);
+        }
+      }
+
+      // Add can cameo badge
+      if (typeof canCameo === 'boolean') {
+        const cameoBadge = document.createElement('span');
+        cameoBadge.textContent = canCameo ? '✓ Can cameo' : '✗ Cannot cameo';
+        Object.assign(cameoBadge.style, {
+          color: canCameo ? '#4ade80' : '#ef4444',
+          fontWeight: '500'
+        });
+        statsContainer.appendChild(cameoBadge);
+      }
+
+      // Add stats container to the character item
+      const nameContainer = link.querySelector('.flex.min-w-0.flex-1.flex-col');
+      if (nameContainer && statsContainer.childNodes.length > 0) {
+        nameContainer.appendChild(statsContainer);
+      }
+    }
+  }
+
   // == Observers & Lifecycle ==
   const mo = new MutationObserver(() => {
     if (mo._raf) cancelAnimationFrame(mo._raf);
@@ -3344,6 +3482,7 @@ async function renderAnalyzeTable(force = false) {
       renderProfileImpact();
       renderBookmarkButtons();
       renderDraftButtons();
+      renderCharacterStats();
       updateControlsVisibility();
     });
   });
