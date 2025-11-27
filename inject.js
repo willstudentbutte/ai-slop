@@ -3120,15 +3120,38 @@ async function renderAnalyzeTable(force = false) {
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
 
-        // Check DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
+        // Check CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
         if (CHARACTERS_RE.test(url)) {
           res.clone().json().then(processCharactersJson).catch((err) => {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
         } else if (DRAFTS_RE.test(url)) {
-          res.clone().json().then(processDraftsJson).catch((err) => {
-            console.error('[SoraUV] Error parsing drafts fetch response:', err);
-          });
+          // Clone and parse the response
+          const clonedRes = res.clone();
+          try {
+            const json = await clonedRes.json();
+
+            // Process for extension features (unchanged)
+            processDraftsJson(json);
+
+            // Modify the response to enable character creation for all items
+            if (json?.items && Array.isArray(json.items)) {
+              json.items = json.items.map(item => ({
+                ...item,
+                can_create_character: true
+              }));
+            }
+
+            // Return modified response to the page
+            return new Response(JSON.stringify(json), {
+              status: res.status,
+              statusText: res.statusText,
+              headers: res.headers
+            });
+          } catch (err) {
+            console.error('[SoraUV] Error parsing/modifying drafts fetch response:', err);
+            return res; // Return original response on error
+          }
         } else if (FEED_RE.test(url)) {
           dlog('feed', 'fetch matched', { url });
           res
@@ -3156,6 +3179,43 @@ async function renderAnalyzeTable(force = false) {
     };
     const origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (method, url) {
+      const xhr = this;
+      const isDraftsRequest = typeof url === 'string' && DRAFTS_RE.test(url);
+
+      if (isDraftsRequest) {
+        this.addEventListener('readystatechange', function () {
+          if (this.readyState === 4 && this.status === 200) {
+            try {
+              const json = JSON.parse(this.responseText);
+
+              // Process for extension features
+              processDraftsJson(json);
+
+              // Modify the response to enable character creation
+              if (json?.items && Array.isArray(json.items)) {
+                json.items = json.items.map(item => ({
+                  ...item,
+                  can_create_character: true
+                }));
+              }
+
+              // Override responseText getter to return modified JSON
+              const modifiedText = JSON.stringify(json);
+              Object.defineProperty(this, 'responseText', {
+                writable: false,
+                value: modifiedText
+              });
+              Object.defineProperty(this, 'response', {
+                writable: false,
+                value: modifiedText
+              });
+            } catch (err) {
+              console.error('[SoraUV] Error modifying drafts XHR:', err);
+            }
+          }
+        });
+      }
+
       this.addEventListener('load', function () {
         try {
           if (typeof url === 'string') {
@@ -3167,11 +3227,7 @@ async function renderAnalyzeTable(force = false) {
                 console.error('[SoraUV] Error parsing characters XHR:', err);
               }
             } else if (DRAFTS_RE.test(url)) {
-              try {
-                processDraftsJson(JSON.parse(this.responseText));
-              } catch (err) {
-                console.error('[SoraUV] Error parsing drafts XHR:', err);
-              }
+              // Processing is handled in readystatechange above for drafts
             } else if (FEED_RE.test(url)) {
               dlog('feed', 'xhr matched', { url });
               try {
