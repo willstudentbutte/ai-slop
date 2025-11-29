@@ -54,6 +54,7 @@
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
+  const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix)
   const charToCameoCount = new Map(); // Character cameo count
   const charToLikesCount = new Map(); // Character likes received count
   const charToCanCameo = new Map(); // Character can_cameo permission
@@ -883,6 +884,144 @@
     return downloadBtn;
   }
 
+  function ensureRedoButton(draftCard, draftId) {
+    if (!draftId) return null;
+
+    let redoBtn = draftCard.querySelector('.sora-uv-redo-btn');
+    if (!redoBtn) {
+      if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+      redoBtn = document.createElement('button');
+      redoBtn.className = 'sora-uv-redo-btn';
+      redoBtn.type = 'button';
+      redoBtn.setAttribute('aria-label', 'Redo generation');
+      Object.assign(redoBtn.style, {
+        position: 'absolute',
+        bottom: `${DRAFT_BUTTON_MARGIN}px`,
+        left: `${DRAFT_BUTTON_MARGIN + (DRAFT_BUTTON_SIZE + DRAFT_BUTTON_SPACING) * 3}px`,
+        width: `${DRAFT_BUTTON_SIZE}px`,
+        height: `${DRAFT_BUTTON_SIZE}px`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.75)',
+        border: 'none',
+        color: '#fff',
+        cursor: 'pointer',
+        zIndex: 9998,
+        transition: 'all 0.2s ease',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+      });
+
+      // Redo/refresh icon SVG
+      redoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="pointer-events: none;">
+        <path d="M21 2v6h-6"></path>
+        <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+        <path d="M3 22v-6h6"></path>
+        <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+      </svg>`;
+
+      redoBtn.addEventListener('mouseenter', () => {
+        if (!redoBtn.disabled) {
+          redoBtn.style.background = 'rgba(0,0,0,0.9)';
+          redoBtn.style.transform = 'scale(1.05)';
+        }
+      });
+      redoBtn.addEventListener('mouseleave', () => {
+        redoBtn.style.background = 'rgba(0,0,0,0.75)';
+        redoBtn.style.transform = 'scale(1)';
+      });
+
+      redoBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const prompt = idToPrompt.get(draftId);
+        if (!prompt) return;
+
+        const remixTargetId = idToRemixTarget.get(draftId);
+
+        if (remixTargetId) {
+          // This is a remix - navigate to the remix page and fill in the prompt
+          const remixUrl = `https://sora.chatgpt.com/p/${remixTargetId}?remix=`;
+          window.location.href = remixUrl;
+
+          // Wait for navigation and then fill in the textarea
+          // We use sessionStorage to pass the prompt to the new page
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', prompt);
+        } else {
+          // Not a remix - fill in the prompt directly on the drafts page textarea
+          const textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
+          if (textarea) {
+            // Set the value and dispatch events to trigger React state updates
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+            nativeInputValueSetter.call(textarea, prompt);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            textarea.dispatchEvent(new Event('change', { bubbles: true }));
+
+            // Focus the textarea
+            textarea.focus();
+
+            // Scroll to the textarea
+            textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            // Show brief feedback
+            const originalColor = redoBtn.style.color;
+            redoBtn.style.color = '#4ade80';
+            setTimeout(() => {
+              redoBtn.style.color = originalColor;
+            }, 1500);
+          } else {
+            console.error('[SoraUV] Could not find textarea to fill prompt');
+          }
+        }
+      });
+
+      draftCard.appendChild(redoBtn);
+    }
+
+    // Update button state based on whether prompt exists
+    const hasPrompt = idToPrompt.has(draftId);
+    redoBtn.disabled = !hasPrompt;
+    redoBtn.style.opacity = hasPrompt ? '1' : '0.4';
+    redoBtn.style.cursor = hasPrompt ? 'pointer' : 'not-allowed';
+
+    return redoBtn;
+  }
+
+  // Check for pending redo prompt on page load (for remix navigation)
+  function checkPendingRedoPrompt() {
+    const pendingPrompt = sessionStorage.getItem('SORA_UV_REDO_PROMPT');
+    if (!pendingPrompt) return;
+
+    // Clear it immediately to prevent re-triggering
+    sessionStorage.removeItem('SORA_UV_REDO_PROMPT');
+
+    // Wait for page to load and textarea to be available
+    const attemptFill = (retries = 0) => {
+      const textarea = document.querySelector('textarea[placeholder="Describe changes..."]');
+      if (textarea) {
+        // Set the value and dispatch events to trigger React state updates
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        nativeInputValueSetter.call(textarea, pendingPrompt);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+        textarea.focus();
+        textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else if (retries < 20) {
+        // Retry up to 20 times (2 seconds total)
+        setTimeout(() => attemptFill(retries + 1), 100);
+      } else {
+        console.error('[SoraUV] Could not find remix textarea after navigation');
+      }
+    };
+
+    // Start attempting after a short delay for page render
+    setTimeout(() => attemptFill(), 300);
+  }
+
   function createPill(parent, text, tooltipText, tooltipEnabled = true) {
     if (!text) return null;
     const pill = document.createElement('span');
@@ -1126,6 +1265,7 @@
       ensureDurationBadge(draftCard, draftId);
       ensureCopyPromptButton(draftCard, draftId);
       ensureDownloadButton(draftCard, draftId);
+      ensureRedoButton(draftCard, draftId);
       processedDraftCards.add(draftCard);
       processedDraftCardsCount++; // Increment count for early exit optimization
     }
@@ -3349,6 +3489,12 @@ async function renderAnalyzeTable(force = false) {
         } else {
           idToViolation.set(draftId, false);
         }
+
+        // Extract remix target post ID if this is a remix
+        const remixTargetPostId = item?.creation_config?.remix_target_post?.post?.id;
+        if (remixTargetPostId && typeof remixTargetPostId === 'string') {
+          idToRemixTarget.set(draftId, remixTargetPostId);
+        }
       } catch (e) {
         console.error('[SoraUV] Error processing draft item:', e);
       }
@@ -3959,6 +4105,9 @@ async function renderAnalyzeTable(force = false) {
     onRouteChange();
     window.addEventListener('storage', handleStorageChange);
 
+    // Check for pending redo prompt (from remix navigation)
+    checkPendingRedoPrompt();
+
     // If this tab had Gather running pre-refresh, resume it AND start a fresh timer.
     const s = getGatherState() || {};
     if (s.isGathering) {
@@ -3978,6 +4127,7 @@ async function renderAnalyzeTable(force = false) {
       idToPrompt,
       idToDownloadUrl,
       idToViolation,
+      idToRemixTarget,
       renderDraftButtons,
       selectAllDrafts,
       extractDraftIdFromCard,
