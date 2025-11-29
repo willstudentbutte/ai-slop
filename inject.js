@@ -33,11 +33,15 @@
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
   const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
+  const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
   const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
+
+  // Debug toggle for characters
+  DEBUG.characters = true;
 
   // == State Maps ==
   const idToUnique = new Map();
@@ -50,6 +54,12 @@
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
+  const charToCameoCount = new Map(); // Character cameo count
+  const charToLikesCount = new Map(); // Character likes received count
+  const charToCanCameo = new Map(); // Character can_cameo permission
+  const usernameToUserId = new Map(); // Map username to user_id for character lookup
+  const charToOriginalIndex = new Map(); // Store original order from API
+  let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
   // == Draft UI Constants ==
   const DRAFT_BUTTON_SIZE = 24; // px
@@ -61,6 +71,8 @@
   let controlBar = null;
   let gatherTimerEl = null;
   let detailBadgeEl = null;
+  let characterSortBtn = null;
+  let characterSortMode = 'date'; // 'date', 'likes', 'cameos'
 
   let gatherScrollIntervalId = null;
   let gatherRefreshTimeoutId = null;
@@ -3108,8 +3120,12 @@ async function renderAnalyzeTable(force = false) {
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
 
-        // Check DRAFTS_RE before FEED_RE since drafts URL would also match FEED_RE
-        if (DRAFTS_RE.test(url)) {
+        // Check DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
+        if (CHARACTERS_RE.test(url)) {
+          res.clone().json().then(processCharactersJson).catch((err) => {
+            console.error('[SoraUV] Error parsing characters fetch response:', err);
+          });
+        } else if (DRAFTS_RE.test(url)) {
           res.clone().json().then(processDraftsJson).catch((err) => {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
@@ -3143,8 +3159,14 @@ async function renderAnalyzeTable(force = false) {
       this.addEventListener('load', function () {
         try {
           if (typeof url === 'string') {
-            // Check DRAFTS_RE before FEED_RE since drafts URL would also match FEED_RE
-            if (DRAFTS_RE.test(url)) {
+            // Check CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
+            if (CHARACTERS_RE.test(url)) {
+              try {
+                processCharactersJson(JSON.parse(this.responseText));
+              } catch (err) {
+                console.error('[SoraUV] Error parsing characters XHR:', err);
+              }
+            } else if (DRAFTS_RE.test(url)) {
               try {
                 processDraftsJson(JSON.parse(this.responseText));
               } catch (err) {
@@ -3335,6 +3357,334 @@ async function renderAnalyzeTable(force = false) {
     renderDraftButtons();
   }
 
+  function processCharactersJson(json) {
+    // Extract character data from API response
+    const items = json?.items || [];
+    if (!Array.isArray(items) || items.length === 0) return;
+
+    dlog('characters', `Processing ${items.length} characters`);
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      try {
+        const userId = item?.user_id;
+        const username = item?.username;
+        if (!userId) continue;
+
+        // Store username -> userId mapping
+        if (username) {
+          usernameToUserId.set(username.toLowerCase(), userId);
+        }
+
+        // Store original index for date sorting (only if not already stored)
+        if (!charToOriginalIndex.has(userId)) {
+          charToOriginalIndex.set(userId, charGlobalIndexCounter++);
+        }
+
+        // Extract character stats
+        if (typeof item.cameo_count === 'number') {
+          charToCameoCount.set(userId, item.cameo_count);
+        }
+        if (typeof item.likes_received_count === 'number') {
+          charToLikesCount.set(userId, item.likes_received_count);
+        }
+        if (typeof item.can_cameo === 'boolean') {
+          charToCanCameo.set(userId, item.can_cameo);
+        }
+
+        dlog('characters', `Character: ${username} (${userId}) - ${item.cameo_count} cameos, ${item.likes_received_count} likes, can_cameo: ${item.can_cameo}`);
+      } catch (e) {
+        console.error('[SoraUV] Error processing character item:', e);
+      }
+    }
+
+    // Trigger render to show character stats (this will also handle re-sorting)
+    renderCharacterStats();
+  }
+
+  function addCharacterSortButton() {
+    // Find the Characters dialog header by looking for dialog with "Characters" title
+    const dialog = document.querySelector('div[role="dialog"]');
+    if (!dialog) {
+      // Dialog closed, reset button reference
+      characterSortBtn = null;
+      return;
+    }
+
+    // Check if button already exists
+    if (dialog.querySelector('.sora-uv-char-sort-btn')) return;
+
+    // Find the header by text content
+    const dialogHeader = Array.from(dialog.querySelectorAll('h2')).find(h => h.textContent === 'Characters');
+    if (!dialogHeader) return;
+
+    const headerContainer = dialogHeader.parentElement;
+    if (!headerContainer) return;
+
+    // Create custom dropdown container
+    const dropdownContainer = document.createElement('div');
+    dropdownContainer.className = 'sora-uv-char-sort-dropdown';
+    Object.assign(dropdownContainer.style, {
+      position: 'relative',
+      marginTop: '4px'
+    });
+
+    // Create button
+    characterSortBtn = document.createElement('button');
+    characterSortBtn.className = 'sora-uv-char-sort-btn';
+    Object.assign(characterSortBtn.style, {
+      background: 'rgba(29,29,29,0.78)',
+      color: '#fff',
+      border: 'none',
+      borderRadius: '12px',
+      padding: '6px 12px',
+      fontSize: '12px',
+      fontWeight: '600',
+      cursor: 'pointer',
+      transition: 'background 0.2s',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px'
+    });
+
+    const updateButtonText = () => {
+      const labels = {
+        'date': 'Sort: Date',
+        'likes': 'Sort: Likes',
+        'cameos': 'Sort: Cameos'
+      };
+      characterSortBtn.textContent = labels[characterSortMode] || 'Sort';
+      characterSortBtn.appendChild(arrow);
+    };
+
+    // Create arrow icon
+    const arrow = document.createElement('span');
+    arrow.textContent = '▼';
+    arrow.style.fontSize = '10px';
+
+    updateButtonText();
+
+    // Create dropdown menu
+    const dropdownMenu = document.createElement('div');
+    dropdownMenu.className = 'sora-uv-char-sort-menu';
+    Object.assign(dropdownMenu.style, {
+      position: 'absolute',
+      top: '100%',
+      left: '0',
+      marginTop: '4px',
+      background: 'rgba(29,29,29,0.95)',
+      borderRadius: '12px',
+      padding: '4px',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: '140px',
+      zIndex: '1000',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+    });
+
+    // Add options to dropdown
+    const options = [
+      { value: 'date', label: 'Date' },
+      { value: 'likes', label: 'Likes' },
+      { value: 'cameos', label: 'Cameos' }
+    ];
+
+    options.forEach(opt => {
+      const option = document.createElement('button');
+      option.textContent = opt.label;
+      option.className = 'sora-uv-char-sort-option';
+      Object.assign(option.style, {
+        background: 'transparent',
+        color: '#fff',
+        border: 'none',
+        borderRadius: '8px',
+        padding: '8px 12px',
+        fontSize: '12px',
+        cursor: 'pointer',
+        textAlign: 'left',
+        transition: 'background 0.2s'
+      });
+
+      option.addEventListener('mouseenter', () => {
+        option.style.background = 'rgba(255,255,255,0.1)';
+      });
+
+      option.addEventListener('mouseleave', () => {
+        option.style.background = 'transparent';
+      });
+
+      option.addEventListener('click', (e) => {
+        e.stopPropagation();
+        characterSortMode = opt.value;
+        updateButtonText();
+        dropdownMenu.style.display = 'none';
+        sortCharacterList();
+      });
+
+      dropdownMenu.appendChild(option);
+    });
+
+    // Toggle dropdown on button click
+    characterSortBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isVisible = dropdownMenu.style.display === 'flex';
+      dropdownMenu.style.display = isVisible ? 'none' : 'flex';
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', () => {
+      if (dropdownMenu) {
+        dropdownMenu.style.display = 'none';
+      }
+    });
+
+    dropdownContainer.appendChild(characterSortBtn);
+    dropdownContainer.appendChild(dropdownMenu);
+    headerContainer.appendChild(dropdownContainer);
+  }
+
+  function sortCharacterList() {
+    // Find the character list container
+    const listContainer = document.querySelector('div[role="dialog"] .flex.flex-col.gap-1');
+    if (!listContainer) return;
+
+    // Get all character link elements
+    const characterLinks = Array.from(listContainer.querySelectorAll('a[href^="/profile/"]'));
+    if (characterLinks.length === 0) return;
+
+    // Create array of {element, username, stats} for sorting
+    const charactersData = characterLinks.map(link => {
+      const href = link.getAttribute('href');
+      const match = href?.match(/\/profile\/([^/?]+)/);
+      if (!match) return null;
+
+      const username = match[1];
+      const userId = usernameToUserId.get(username.toLowerCase());
+
+      return {
+        element: link,
+        username,
+        userId,
+        likes: userId ? (charToLikesCount.get(userId) || 0) : 0,
+        cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
+        originalIndex: userId ? (charToOriginalIndex.get(userId) ?? 9999) : 9999
+      };
+    }).filter(Boolean);
+
+    // Sort based on current mode
+    if (characterSortMode === 'likes') {
+      charactersData.sort((a, b) => b.likes - a.likes);
+    } else if (characterSortMode === 'cameos') {
+      charactersData.sort((a, b) => b.cameos - a.cameos);
+    } else if (characterSortMode === 'date') {
+      // Sort by original index to restore default order
+      charactersData.sort((a, b) => a.originalIndex - b.originalIndex);
+    }
+
+    // Reorder DOM elements
+    charactersData.forEach(char => {
+      listContainer.appendChild(char.element);
+    });
+
+    dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
+  }
+
+  function renderCharacterStats() {
+    // Add sort button if dialog is open
+    addCharacterSortButton();
+
+    // Find all character links in the dialog
+    const characterLinks = document.querySelectorAll('a[href^="/profile/"]');
+
+    let hasNewStats = false;
+
+    for (const link of characterLinks) {
+      // Skip if we've already added stats to this link
+      if (link.querySelector('.sora-uv-char-stats')) continue;
+
+      // Extract username from href
+      const href = link.getAttribute('href');
+      const match = href?.match(/\/profile\/([^/?]+)/);
+      if (!match) continue;
+
+      const username = match[1];
+      const userId = usernameToUserId.get(username.toLowerCase());
+      if (!userId) continue;
+
+      // Get stats from maps
+      const cameoCount = charToCameoCount.get(userId);
+      const likesCount = charToLikesCount.get(userId);
+      const canCameo = charToCanCameo.get(userId);
+
+      // Create stats container
+      const statsContainer = document.createElement('div');
+      statsContainer.className = 'sora-uv-char-stats';
+      Object.assign(statsContainer.style, {
+        display: 'flex',
+        gap: '8px',
+        fontSize: '12px',
+        marginTop: '2px',
+        color: '#a3a3a3',
+        alignItems: 'center'
+      });
+
+      // Add cameo count
+      if (typeof cameoCount === 'number') {
+        const cameoStat = document.createElement('span');
+        cameoStat.textContent = `${cameoCount} cameo${cameoCount !== 1 ? 's' : ''}`;
+        statsContainer.appendChild(cameoStat);
+
+        // Add separator
+        const sep1 = document.createElement('span');
+        sep1.textContent = '•';
+        sep1.style.color = '#525252';
+        statsContainer.appendChild(sep1);
+      }
+
+      // Add likes count
+      if (typeof likesCount === 'number') {
+        const likesStat = document.createElement('span');
+        likesStat.textContent = `${likesCount} like${likesCount !== 1 ? 's' : ''}`;
+        statsContainer.appendChild(likesStat);
+
+        // Add separator if canCameo exists
+        if (typeof canCameo === 'boolean') {
+          const sep2 = document.createElement('span');
+          sep2.textContent = '•';
+          sep2.style.color = '#525252';
+          statsContainer.appendChild(sep2);
+        }
+      }
+
+      // Add can cameo badge
+      if (typeof canCameo === 'boolean') {
+        const cameoBadge = document.createElement('span');
+        cameoBadge.textContent = canCameo ? '✓ Can cameo' : '✗ Cannot cameo';
+        Object.assign(cameoBadge.style, {
+          color: canCameo ? '#4ade80' : '#ef4444',
+          fontWeight: '500'
+        });
+        statsContainer.appendChild(cameoBadge);
+      }
+
+      // Add stats container to the character item
+      const nameContainer = link.querySelector('.flex.min-w-0.flex-1.flex-col');
+      if (nameContainer && statsContainer.childNodes.length > 0) {
+        nameContainer.appendChild(statsContainer);
+        hasNewStats = true;
+      }
+    }
+
+    // If we added new stats and we're in a sorted mode, re-sort the list
+    if (hasNewStats && characterSortMode !== 'date') {
+      // Use requestAnimationFrame to ensure DOM is updated before sorting
+      requestAnimationFrame(() => {
+        sortCharacterList();
+      });
+    }
+  }
+
   // == Observers & Lifecycle ==
   const mo = new MutationObserver(() => {
     if (mo._raf) cancelAnimationFrame(mo._raf);
@@ -3344,6 +3694,7 @@ async function renderAnalyzeTable(force = false) {
       renderProfileImpact();
       renderBookmarkButtons();
       renderDraftButtons();
+      renderCharacterStats();
       updateControlsVisibility();
     });
   });
