@@ -31,9 +31,11 @@
   const ANALYZE_VISITED_KEY = 'SORA_UV_ANALYZE_VISITED';
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
+  const TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID for draft remixes
   const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
+  const NF_CREATE_RE = /\/backend\/nf\/create/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
@@ -54,7 +56,9 @@
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
-  const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix)
+  const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
+  const idToRemixTargetDraft = new Map(); // Draft remix target draft ID (if it's a remix of a draft)
+  const taskToSourceDraft = new Map(); // task_id -> source draft gen ID (for draft remix tracking)
   const charToCameoCount = new Map(); // Character cameo count
   const charToLikesCount = new Map(); // Character likes received count
   const charToCanCameo = new Map(); // Character can_cameo permission
@@ -941,16 +945,19 @@
         const prompt = idToPrompt.get(draftId);
         if (!prompt) return;
 
-        const remixTargetId = idToRemixTarget.get(draftId);
+        const remixTargetPostId = idToRemixTarget.get(draftId);
+        const remixTargetDraftId = idToRemixTargetDraft.get(draftId);
 
-        if (remixTargetId) {
-          // This is a remix - navigate to the remix page and fill in the prompt
-          const remixUrl = `https://sora.chatgpt.com/p/${remixTargetId}?remix=`;
-          window.location.href = remixUrl;
-
-          // Wait for navigation and then fill in the textarea
-          // We use sessionStorage to pass the prompt to the new page
+        if (remixTargetPostId) {
+          // This is a remix of a post - navigate to the post remix page
+          const remixUrl = `https://sora.chatgpt.com/p/${remixTargetPostId}?remix=`;
           sessionStorage.setItem('SORA_UV_REDO_PROMPT', prompt);
+          window.location.href = remixUrl;
+        } else if (remixTargetDraftId) {
+          // This is a remix of a draft - navigate to the draft remix page
+          const remixUrl = `https://sora.chatgpt.com/d/${remixTargetDraftId}?remix=`;
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', prompt);
+          window.location.href = remixUrl;
         } else {
           // Not a remix - fill in the prompt directly on the drafts page textarea
           const textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
@@ -3261,6 +3268,22 @@ async function renderAnalyzeTable(force = false) {
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
 
+        // Intercept /backend/nf/create to capture task_id -> source draft mapping for draft remixes
+        if (NF_CREATE_RE.test(url)) {
+          // Only capture if we're on a draft remix page (/d/{genId}?remix=)
+          const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
+          if (draftRemixMatch && location.search.includes('remix')) {
+            const sourceDraftId = draftRemixMatch[1];
+            res.clone().json().then((json) => {
+              const taskId = json?.id;
+              if (taskId && sourceDraftId) {
+                saveTaskToSourceDraft(taskId, sourceDraftId);
+                dlog('drafts', `Saved task->draft mapping: ${taskId} -> ${sourceDraftId}`);
+              }
+            }).catch(() => {});
+          }
+        }
+
         // Check DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
         if (CHARACTERS_RE.test(url)) {
           res.clone().json().then(processCharactersJson).catch((err) => {
@@ -3300,6 +3323,22 @@ async function renderAnalyzeTable(force = false) {
       this.addEventListener('load', function () {
         try {
           if (typeof url === 'string') {
+            // Intercept /backend/nf/create for draft remix tracking
+            if (NF_CREATE_RE.test(url)) {
+              const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
+              if (draftRemixMatch && location.search.includes('remix')) {
+                const sourceDraftId = draftRemixMatch[1];
+                try {
+                  const json = JSON.parse(this.responseText);
+                  const taskId = json?.id;
+                  if (taskId && sourceDraftId) {
+                    saveTaskToSourceDraft(taskId, sourceDraftId);
+                    dlog('drafts', `Saved task->draft mapping (XHR): ${taskId} -> ${sourceDraftId}`);
+                  }
+                } catch {}
+              }
+            }
+
             // Check CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
             if (CHARACTERS_RE.test(url)) {
               try {
@@ -3490,10 +3529,20 @@ async function renderAnalyzeTable(force = false) {
           idToViolation.set(draftId, false);
         }
 
-        // Extract remix target post ID if this is a remix
+        // Extract remix target post ID if this is a remix of a post
         const remixTargetPostId = item?.creation_config?.remix_target_post?.post?.id;
         if (remixTargetPostId && typeof remixTargetPostId === 'string') {
           idToRemixTarget.set(draftId, remixTargetPostId);
+        }
+
+        // Check if this draft is a remix of another draft (only if not already mapped)
+        if (!idToRemixTargetDraft.has(draftId)) {
+          const taskId = item?.task_id;
+          if (taskId && taskToSourceDraft.has(taskId)) {
+            const sourceDraftId = taskToSourceDraft.get(taskId);
+            idToRemixTargetDraft.set(draftId, sourceDraftId);
+            dlog('drafts', `Mapped draft ${draftId} -> source draft ${sourceDraftId}`);
+          }
         }
       } catch (e) {
         console.error('[SoraUV] Error processing draft item:', e);
@@ -4084,6 +4133,28 @@ async function renderAnalyzeTable(force = false) {
     return getBookmarks().has(draftId);
   }
 
+  // == Task to Source Draft Mapping (for draft remix redo button) ==
+  function loadTaskToSourceDraft() {
+    try {
+      const data = JSON.parse(localStorage.getItem(TASK_TO_DRAFT_KEY) || '{}');
+      for (const [taskId, sourceDraftId] of Object.entries(data)) {
+        taskToSourceDraft.set(taskId, sourceDraftId);
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+  function saveTaskToSourceDraft(taskId, sourceDraftId) {
+    taskToSourceDraft.set(taskId, sourceDraftId);
+    try {
+      const data = JSON.parse(localStorage.getItem(TASK_TO_DRAFT_KEY) || '{}');
+      data[taskId] = sourceDraftId;
+      localStorage.setItem(TASK_TO_DRAFT_KEY, JSON.stringify(data));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
   function handleStorageChange(e) {
     if (e.key !== PREF_KEY) return;
     try {
@@ -4100,6 +4171,7 @@ async function renderAnalyzeTable(force = false) {
   function init() {
     dlog('feed', 'init');
     // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
+    loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
     startObservers();
     onRouteChange();
@@ -4128,6 +4200,8 @@ async function renderAnalyzeTable(force = false) {
       idToDownloadUrl,
       idToViolation,
       idToRemixTarget,
+      idToRemixTargetDraft,
+      taskToSourceDraft,
       renderDraftButtons,
       selectAllDrafts,
       extractDraftIdFromCard,
