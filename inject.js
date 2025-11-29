@@ -57,6 +57,7 @@
   const charToCameoCount = new Map(); // Character cameo count
   const charToLikesCount = new Map(); // Character likes received count
   const charToCanCameo = new Map(); // Character can_cameo permission
+  const charToCreatedAt = new Map(); // Character created_at timestamp
   const usernameToUserId = new Map(); // Map username to user_id for character lookup
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
@@ -72,7 +73,7 @@
   let gatherTimerEl = null;
   let detailBadgeEl = null;
   let characterSortBtn = null;
-  let characterSortMode = 'date'; // 'date', 'likes', 'cameos'
+  let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
 
   let gatherScrollIntervalId = null;
   let gatherRefreshTimeoutId = null;
@@ -3391,8 +3392,13 @@ async function renderAnalyzeTable(force = false) {
         if (typeof item.can_cameo === 'boolean') {
           charToCanCameo.set(userId, item.can_cameo);
         }
+        // Extract created_at for likes per day calculation
+        const createdAt = item?.created_at ?? item?.createdAt ?? item?.created ?? null;
+        if (createdAt) {
+          charToCreatedAt.set(userId, createdAt);
+        }
 
-        dlog('characters', `Character: ${username} (${userId}) - ${item.cameo_count} cameos, ${item.likes_received_count} likes, can_cameo: ${item.can_cameo}`);
+        dlog('characters', `Character: ${username} (${userId}) - ${item.cameo_count} cameos, ${item.likes_received_count} likes, can_cameo: ${item.can_cameo}, created_at: ${createdAt}`);
       } catch (e) {
         console.error('[SoraUV] Error processing character item:', e);
       }
@@ -3451,6 +3457,7 @@ async function renderAnalyzeTable(force = false) {
       const labels = {
         'date': 'Sort: Date',
         'likes': 'Sort: Likes',
+        'likesPerDay': 'Sort: Likes/Day',
         'cameos': 'Sort: Cameos'
       };
       characterSortBtn.textContent = labels[characterSortMode] || 'Sort';
@@ -3487,6 +3494,7 @@ async function renderAnalyzeTable(force = false) {
     const options = [
       { value: 'date', label: 'Date' },
       { value: 'likes', label: 'Likes' },
+      { value: 'likesPerDay', label: 'Likes/Day' },
       { value: 'cameos', label: 'Cameos' }
     ];
 
@@ -3562,11 +3570,23 @@ async function renderAnalyzeTable(force = false) {
       const username = match[1];
       const userId = usernameToUserId.get(username.toLowerCase());
 
+      const likes = userId ? (charToLikesCount.get(userId) || 0) : 0;
+      const createdAt = userId ? charToCreatedAt.get(userId) : null;
+      let likesPerDay = 0;
+      if (createdAt && likes > 0) {
+        // createdAt is a Unix timestamp in seconds, convert to milliseconds
+        const created = new Date(createdAt * 1000);
+        const now = new Date();
+        const daysSinceCreation = Math.max(1, (now - created) / (1000 * 60 * 60 * 24));
+        likesPerDay = likes / daysSinceCreation;
+      }
+
       return {
         element: link,
         username,
         userId,
-        likes: userId ? (charToLikesCount.get(userId) || 0) : 0,
+        likes,
+        likesPerDay,
         cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
         originalIndex: userId ? (charToOriginalIndex.get(userId) ?? 9999) : 9999
       };
@@ -3575,6 +3595,8 @@ async function renderAnalyzeTable(force = false) {
     // Sort based on current mode
     if (characterSortMode === 'likes') {
       charactersData.sort((a, b) => b.likes - a.likes);
+    } else if (characterSortMode === 'likesPerDay') {
+      charactersData.sort((a, b) => b.likesPerDay - a.likesPerDay);
     } else if (characterSortMode === 'cameos') {
       charactersData.sort((a, b) => b.cameos - a.cameos);
     } else if (characterSortMode === 'date') {
@@ -3632,7 +3654,7 @@ async function renderAnalyzeTable(force = false) {
       // Add cameo count
       if (typeof cameoCount === 'number') {
         const cameoStat = document.createElement('span');
-        cameoStat.textContent = `${cameoCount} cameo${cameoCount !== 1 ? 's' : ''}`;
+        cameoStat.textContent = `${fmt(cameoCount)} cameo${cameoCount !== 1 ? 's' : ''}`;
         statsContainer.appendChild(cameoStat);
 
         // Add separator
@@ -3642,11 +3664,26 @@ async function renderAnalyzeTable(force = false) {
         statsContainer.appendChild(sep1);
       }
 
-      // Add likes count
+      // Add likes count and likes per day
       if (typeof likesCount === 'number') {
         const likesStat = document.createElement('span');
-        likesStat.textContent = `${likesCount} like${likesCount !== 1 ? 's' : ''}`;
+        likesStat.textContent = `${fmt(likesCount)} like${likesCount !== 1 ? 's' : ''}`;
         statsContainer.appendChild(likesStat);
+
+        // Calculate and add likes per day
+        const createdAt = charToCreatedAt.get(userId);
+        if (createdAt && likesCount > 0) {
+          // createdAt is a Unix timestamp in seconds, convert to milliseconds
+          const created = new Date(createdAt * 1000);
+          const now = new Date();
+          const daysSinceCreation = Math.max(1, (now - created) / (1000 * 60 * 60 * 24));
+          const likesPerDay = likesCount / daysSinceCreation;
+
+          const lpdStat = document.createElement('span');
+          lpdStat.textContent = `(${fmt(Math.round(likesPerDay))}/day)`;
+          lpdStat.style.color = '#737373';
+          statsContainer.appendChild(lpdStat);
+        }
 
         // Add separator if canCameo exists
         if (typeof canCameo === 'boolean') {
