@@ -998,6 +998,74 @@
     return redoBtn;
   }
 
+  function ensureRemixButton(draftCard, draftId) {
+    if (!draftId) return null;
+
+    let remixBtn = draftCard.querySelector('.sora-uv-remix-btn');
+    if (!remixBtn) {
+      if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+      remixBtn = document.createElement('button');
+      remixBtn.className = 'sora-uv-remix-btn';
+      remixBtn.type = 'button';
+      remixBtn.setAttribute('aria-label', 'Remix this draft');
+      Object.assign(remixBtn.style, {
+        position: 'absolute',
+        bottom: `${DRAFT_BUTTON_MARGIN}px`,
+        left: `${DRAFT_BUTTON_MARGIN + (DRAFT_BUTTON_SIZE + DRAFT_BUTTON_SPACING) * 4}px`,
+        width: `${DRAFT_BUTTON_SIZE}px`,
+        height: `${DRAFT_BUTTON_SIZE}px`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.75)',
+        border: 'none',
+        color: '#fff',
+        cursor: 'pointer',
+        zIndex: 9998,
+        transition: 'all 0.2s ease',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+      });
+
+      // Remix icon SVG (Sora's official remix icon)
+      remixBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" viewBox="0 0 20 20" style="pointer-events: none;">
+        <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.556"></circle>
+        <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M11.945 10c0-4.667-9.723-5.833-8.75 1.556"></path>
+        <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M8.055 10c0 4.667 9.723 5.833 8.75-1.556"></path>
+      </svg>`;
+
+      remixBtn.addEventListener('mouseenter', () => {
+        remixBtn.style.background = 'rgba(0,0,0,0.9)';
+        remixBtn.style.transform = 'scale(1.05)';
+      });
+      remixBtn.addEventListener('mouseleave', () => {
+        remixBtn.style.background = 'rgba(0,0,0,0.75)';
+        remixBtn.style.transform = 'scale(1)';
+      });
+
+      remixBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Store the prompt if available so it auto-fills on the remix page
+        const prompt = idToPrompt.get(draftId);
+        if (prompt) {
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', prompt);
+        }
+
+        // Navigate to the remix page for this draft
+        const remixUrl = `https://sora.chatgpt.com/d/${draftId}?remix=`;
+        window.location.href = remixUrl;
+      });
+
+      draftCard.appendChild(remixBtn);
+    }
+
+    return remixBtn;
+  }
+
   // Check for pending redo prompt on page load (for remix navigation)
   function checkPendingRedoPrompt() {
     const pendingPrompt = sessionStorage.getItem('SORA_UV_REDO_PROMPT');
@@ -1273,6 +1341,7 @@
       ensureCopyPromptButton(draftCard, draftId);
       ensureDownloadButton(draftCard, draftId);
       ensureRedoButton(draftCard, draftId);
+      ensureRemixButton(draftCard, draftId);
       processedDraftCards.add(draftCard);
       processedDraftCardsCount++; // Increment count for early exit optimization
     }
