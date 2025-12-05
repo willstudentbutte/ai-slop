@@ -1006,7 +1006,8 @@
     function onHover(cb){ hoverCb = cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
+    function setAxisLabels(xAxis, tooltip){ xAxisLabel = xAxis; tooltipLabel = tooltip; draw(); }
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setAxisLabels };
   }
 
 function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views', yFmt = fmt){
@@ -1439,7 +1440,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
+    function setYAxisLabel(label){ yAxisLabel = label; draw(); }
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setYAxisLabel };
   }
 
   // First 24 hours views chart (x-axis = minutes since post creation, y-axis = views)
@@ -1860,7 +1862,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
+    function setYAxisLabel(label){ yAxisLabel = label; draw(); }
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setYAxisLabel };
   }
 
   // Followers time chart (multi-series, Y-axis = Followers)
@@ -3103,10 +3106,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         });
         const yAxisLabel = useUnique ? 'Unique Views' : 'Total Views';
-        // Recreate chart with correct label if needed
-        const zViewsAll = allViewsChart.getZoom();
-        allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', yAxisLabel, fmt2);
-        if (zViewsAll) allViewsChart.setZoom(zViewsAll);
+        allViewsChart.setYAxisLabel(yAxisLabel);
         allViewsChart.setData(allSeries);
       } catch {}
 
@@ -4043,10 +4043,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const label = useUnique ? 'Unique Views' : 'Total Views';
           const series = pts.length ? [{ id: 'all_posts', label, color, points: pts }] : [];
           const yAxisLabel = useUnique ? 'Unique Views' : 'Total Views';
-          // Recreate chart with correct label if needed
-          const zViewsAll = allViewsChart.getZoom();
-          allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', yAxisLabel, fmt2);
-          if (zViewsAll) allViewsChart.setZoom(zViewsAll);
+          allViewsChart.setYAxisLabel(yAxisLabel);
           allViewsChart.setData(series);
         } catch {}
         // Cast in chart: use user-level cast in count history when available
@@ -4244,33 +4241,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             totalPill.classList.add('active');
           }
         }
-        // Save zoom states before recreating charts
-        const zChart = chart.getZoom();
-        const zViewsPerPerson = viewsPerPersonChart.getZoom();
-        const zViews = viewsChart.getZoom();
-        const zFirst24Hours = first24HoursChart.getZoom();
-        
-        // Recreate charts with new labels
-        const yAxisLabel = type === 'unique' ? 'Unique Views' : 'Total Views';
-        const xAxisLabel = type === 'unique' ? 'Unique viewers' : 'Total viewers';
-        const tooltipLabel = type === 'unique' ? 'Unique' : 'Total';
-        chart = makeChart($('#chart'), xAxisLabel, tooltipLabel);
-        viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', yAxisLabel, fmt);
-        first24HoursChart = makeFirst24HoursChart($('#first24HoursChart'), '#first24HoursTooltip', yAxisLabel, fmt);
-        // Views Per Person chart doesn't need to be recreated (not affected by unique/total toggle)
-        
-        // Immediately clear data to prevent hovering over stale data from wrong mode
-        chart.setData([]);
-        viewsChart.setData([]);
-        first24HoursChart.setData([]);
-        
-        // Restore zoom states
-        if (zChart) chart.setZoom(zChart);
-        if (zViewsPerPerson) viewsPerPersonChart.setZoom(zViewsPerPerson);
-        if (zViews) viewsChart.setZoom(zViews);
-        if (zFirst24Hours) first24HoursChart.setZoom(zFirst24Hours);
-        
-        // Refresh the UI to update chart data
+      // Update chart labels
+      const yAxisLabel = type === 'unique' ? 'Unique Views' : 'Total Views';
+      const xAxisLabel = type === 'unique' ? 'Unique viewers' : 'Total viewers';
+      const tooltipLabel = type === 'unique' ? 'Unique' : 'Total';
+      
+      chart.setAxisLabels(xAxisLabel, tooltipLabel);
+      viewsChart.setYAxisLabel(yAxisLabel);
+      first24HoursChart.setYAxisLabel(yAxisLabel);
+      
+      // Immediately clear data to prevent hovering over stale data from wrong mode
+      chart.setData([]);
+      viewsChart.setData([]);
+      first24HoursChart.setData([]);
+      
+      // Refresh the UI to update chart data
         refreshUserUI({ skipRestoreZoom: true });
       } finally {
         isUpdatingViewsType = false;
