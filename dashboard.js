@@ -483,7 +483,7 @@
 
     for (let i=0;i<posts.length;i++){
       const p = posts[i];
-      const row = document.createElement('label');
+      const row = document.createElement('div');
       row.className='post';
       row.dataset.pid = p.pid;
       const color = typeof colorFor === 'function' ? colorFor(p.pid) : COLORS[i % COLORS.length];
