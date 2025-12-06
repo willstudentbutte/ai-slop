@@ -2200,7 +2200,7 @@
       position: 'fixed',
       top: getBarTopPosition(), // Start 30px lower (42px), move linearly to 12px
       right: '12px',
-      zIndex: 2147483647,
+      zIndex: 2147483640, // Lower than max to allow notifications (toasts) to be on top
       display: 'flex',
       gap: '8px',
       padding: '0',
@@ -6035,8 +6035,23 @@ async function renderAnalyzeTable(force = false) {
     } catch {}
   }, true); // Capture phase to ensure we get it first
 
+  function ensureToastStyles() {
+    if (document.getElementById('sora-uv-toast-style')) return;
+    const st = document.createElement('style');
+    st.id = 'sora-uv-toast-style';
+    st.textContent = `
+      [data-sonner-toaster="true"], 
+      section[aria-label="Notifications alt+T"],
+      ol[data-sonner-toaster="true"] {
+        z-index: 2147483647 !important;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
   function init() {
     dlog('feed', 'init');
+    ensureToastStyles();
     // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
