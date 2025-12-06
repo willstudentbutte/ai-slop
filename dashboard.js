@@ -3933,7 +3933,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
       }
       buildPostsList(user, colorFor, visibleSet, { 
-        onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); },
+        onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); viewsPerPersonChart.setHoverSeries(pid); },
         onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
       });
       const useUnique = viewsChartType === 'unique';
