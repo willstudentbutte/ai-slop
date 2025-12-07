@@ -1209,7 +1209,7 @@
     const likes = idToLikes.get(id) ?? 0;
     if (likes >= 50 && Number.isFinite(ageMin) && ageMin < 60) return colorForAgeMin(0);
     if (isNearWholeDay(ageMin)) return greenEmblemColor();
-    if (likes > 15) return colorForAgeMin(ageMin);
+    if (likes >= 25) return colorForAgeMin(ageMin);
     return null;
   }
   function badgeEmojiFor(id, meta) {
@@ -1218,7 +1218,7 @@
     const likes = idToLikes.get(id) ?? 0;
     if (likes >= 50 && Number.isFinite(ageMin) && ageMin < 60) return '🔥🔥🔥🔥🔥';
     if (isNearWholeDay(ageMin)) return '📝';
-    if (likes > 15) return fireForAge(ageMin);
+    if (likes >= 25) return fireForAge(ageMin);
     return '';
   }
 
