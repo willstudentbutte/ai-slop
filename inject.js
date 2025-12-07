@@ -3930,9 +3930,9 @@ async function renderAnalyzeTable(force = false) {
     }
 
     const table = analyzeTableEl;
-    const oldTbody = table.tBodies[0];
     const swap = () => {
-      if (oldTbody) table.replaceChild(newTbody, oldTbody);
+      const currentBody = table.tBodies[0];
+      if (currentBody) table.replaceChild(newTbody, currentBody);
       else table.appendChild(newTbody);
     };
     if ('requestAnimationFrame' in window) requestAnimationFrame(swap);
