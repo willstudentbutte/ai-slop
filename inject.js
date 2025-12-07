@@ -1,14 +1,26 @@
 /*
- * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
- * Licensed under the MIT License. See the LICENSE file for details.
- *
- * What this does (simple):
- * - Reads the site’s feed JSON and adds a small badge to each post card.
- * - Badge color is based on time since posting (all posts >25 likes): red (<1h) → yellow (18h) in 18 gradient steps from RED (hot) to YELLOW (warm).
- * - If age is within ±15m of a whole day (1d, 2d, 3d…), the badge turns green with a 📝 icon.
- * - Corner button cycles a time filter: All, <3h, <6h, <12h, <15h, <18h, <21h.
- * - "Gather" mode (profile/top) auto-scrolls + refreshes; Top now scrolls slightly faster and uses a 10m loop.
- */
+ * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
+ * Licensed under the MIT License. See the LICENSE file for details.
+ *
+ * SORA CREATOR TOOLS - Feature Overview:
+ *
+ * 1. FEED ENHANCEMENTS:
+ *    - Injects status badges into post cards showing age and engagement metrics.
+ *    - Color-coded badges: Red (<1h) to Yellow (18h) gradient indicating post "hotness".
+ *    - Daily milestones: Green badge with 📝 icon indicating if a post was made around this time
+ *    - Time Filters: Button to select time-bound post visibility (<3h, <6h... <21h).
+ *
+ * 2. DATA GATHERING & ANALYSIS:
+ *    - "Gather" Mode: Auto-scrolls and refreshes profiles/feeds to scrape data.
+ *    - "Analyze" Mode (Top Feed): Overlay table sorting posts by Views, Likes, etc.
+ *
+ * 3. CREATOR TOOLS:
+ *    - Drafts: Bookmarking system, bulk filtering, and download button injection.
+ *    - Characters: Tracks cameo counts, likes, and creation dates.
+ *
+ * 4. UX IMPROVEMENTS:
+ *    - Auto-scroll capabilities for hands-free data collection.
+ */
 
 (function () {
   'use strict';
@@ -36,6 +48,7 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
+  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors))?(\?|$)/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
@@ -51,8 +64,10 @@
   const idToViews = new Map();
   const idToComments = new Map();
   const idToRemixes = new Map();
+  const idToCameos = new Map(); // Array of cameo usernames
   const idToMeta = new Map(); // { ageMin, userHandle }
   const idToDuration = new Map(); // Draft duration in seconds
+  const idToDimensions = new Map(); // Video dimensions { width, height }
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
@@ -64,6 +79,8 @@
   const charToCanCameo = new Map(); // Character can_cameo permission
   const charToCreatedAt = new Map(); // Character created_at timestamp
   const usernameToUserId = new Map(); // Map username to user_id for character lookup
+  const lockedPostIds = new Set(); // Post IDs whose data should not be overwritten (currently viewed posts)
+  const processedPostDetailIds = new Set(); // Post detail responses already applied (avoid late duplicate overwrites)
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
@@ -77,8 +94,10 @@
   let controlBar = null;
   let gatherTimerEl = null;
   let detailBadgeEl = null;
+  let detailBadgeRetryInterval = null;
   let characterSortBtn = null;
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
+  let suppressDetailBadgeRender = false; // Flag to prevent renderDetailBadge during bulk processing
 
   let gatherScrollIntervalId = null;
   let gatherRefreshTimeoutId = null;
@@ -101,6 +120,9 @@
   let analyzeCountdownRemainingSec = 0;
   let analyzeSortKey = 'views';
   let analyzeSortDir = 'desc';
+  let analyzeCameoFilterWrap = null;
+  let analyzeCameoSelectEl = null;
+  let analyzeCameoFilterUsername = null;
 
   // Time window (hours) for slicing rows
   const ANALYZE_WINDOW_KEY = 'SORA_UV_ANALYZE_WINDOW_H';
@@ -298,8 +320,64 @@
         const n = Number(v);
         if (Number.isFinite(n)) return n;
       }
+      // API uses cameo_profiles array
       const arr = Array.isArray(p?.cameo_profiles) ? p.cameo_profiles : null;
       if (arr) return arr.length;
+    } catch {}
+    return null;
+  };
+  const getCameoUsernames = (item) => {
+    try {
+      const usernamesSet = new Set();
+      
+      // Helper function to extract usernames from a post object
+      const extractFromPost = (postObj) => {
+        if (!postObj || typeof postObj !== 'object') return;
+        // API uses cameo_profiles array - each item is a profile object with username
+        const arr = Array.isArray(postObj?.cameo_profiles) ? postObj.cameo_profiles : null;
+        if (arr && arr.length > 0) {
+          for (const profile of arr) {
+            if (profile?.username && typeof profile.username === 'string') {
+              usernamesSet.add(profile.username);
+            }
+          }
+        }
+      };
+      
+      // Extract from main post
+      const p = item?.post ?? item;
+      extractFromPost(p);
+      
+      // NOTE: Do NOT extract from remix_posts - those are child remixes with their own cameos
+      // We only want cameos that are actually IN this post
+      
+      // Extract from nested ancestors.items array (ancestors is an object with items array)
+      if (p?.ancestors) {
+        const ancestorItems = Array.isArray(p.ancestors.items) ? p.ancestors.items 
+                            : Array.isArray(p.ancestors) ? p.ancestors 
+                            : null;
+        if (ancestorItems) {
+          for (const ancestorItem of ancestorItems) {
+            const ancestorPost = ancestorItem?.post ?? ancestorItem;
+            extractFromPost(ancestorPost);
+          }
+        }
+      }
+      
+      // Also check if ancestors are at the item level (but NOT remix_posts - see note above)
+      if (item?.ancestors) {
+        const ancestorItems = Array.isArray(item.ancestors.items) ? item.ancestors.items 
+                            : Array.isArray(item.ancestors) ? item.ancestors 
+                            : null;
+        if (ancestorItems) {
+          for (const ancestorItem of ancestorItems) {
+            const ancestorPost = ancestorItem?.post ?? ancestorItem;
+            extractFromPost(ancestorPost);
+          }
+        }
+      }
+      
+      return usernamesSet.size > 0 ? Array.from(usernamesSet) : null;
     } catch {}
     return null;
   };
@@ -494,7 +572,7 @@
       padding: '6px 10px',
       fontSize: '12px',
       fontWeight: '600',
-      lineHeight: '1',
+      lineHeight: '1.2',
       borderRadius: '9999px',
       background: 'rgba(37,37,37,0.7)',
       color: '#fff',
@@ -546,7 +624,7 @@
     if (!enabled || !text) return;
     let timerId = null;
     let tracking = false;
-    const DELAY_MS = 1000;
+    const DELAY_MS = 750;
     const OFFSET_Y = 1;
 
     const move = (e) => {
@@ -1105,13 +1183,13 @@
       display: 'inline-flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: '4px 8px',
+      padding: '5px 8px',
       borderRadius: '9999px',
       background: 'rgba(37,37,37,0.7)',
       color: '#fff',
       fontSize: '13px',
       fontWeight: '700',
-      lineHeight: '1.1',
+      lineHeight: '1',
       userSelect: 'none',
       whiteSpace: 'nowrap',
       backdropFilter: 'blur(8px)',
@@ -1131,7 +1209,7 @@
     const likes = idToLikes.get(id) ?? 0;
     if (likes >= 50 && Number.isFinite(ageMin) && ageMin < 60) return colorForAgeMin(0);
     if (isNearWholeDay(ageMin)) return greenEmblemColor();
-    if (likes > 25) return colorForAgeMin(ageMin);
+    if (likes >= 25) return colorForAgeMin(ageMin);
     return null;
   }
   function badgeEmojiFor(id, meta) {
@@ -1140,7 +1218,7 @@
     const likes = idToLikes.get(id) ?? 0;
     if (likes >= 50 && Number.isFinite(ageMin) && ageMin < 60) return '🔥🔥🔥🔥🔥';
     if (isNearWholeDay(ageMin)) return '📝';
-    if (likes > 25) return fireForAge(ageMin);
+    if (likes >= 25) return fireForAge(ageMin);
     return '';
   }
 
@@ -1176,6 +1254,7 @@
     const isSuperHot = likes >= 50 && Number.isFinite(ageMin) && ageMin < 60;
 
     const uv = idToUnique.get(id);
+    const totalViews = idToViews.get(id);
     const irRaw = interactionRate(idToLikes.get(id), idToComments.get(id), idToUnique.get(id)); // already like "12.3%"
     const rrRaw = remixRate(idToLikes.get(id), idToRemixes.get(id)); // "12.34" (no %)
 
@@ -1183,6 +1262,17 @@
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
     const rrDisp =
       rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
+
+    // Impact Score
+    let impactStr = null;
+    if (totalViews != null && uv != null && uv > 0) {
+      const ratio = totalViews / uv;
+      impactStr = `${ratio.toFixed(2)}`;
+    }
+
+    // Duration
+    const duration = idToDuration.get(id);
+    const durationStr = duration ? formatDuration(duration) : null;
 
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
@@ -1195,7 +1285,7 @@
     badge.style.background = 'transparent';
     const pillBg = bg || 'rgba(37,37,37,0.7)';
 
-    const newKey = JSON.stringify([viewsStr, irStr, rrStr, timeEmojiStr, pillBg]);
+    const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
     if (badge.dataset.key === newKey) {
       badge.style.boxShadow = 'none';
       return;
@@ -1203,8 +1293,31 @@
     badge.dataset.key = newKey;
 
     badge.innerHTML = '';
+    if (durationStr) {
+      const dims = idToDimensions.get(id);
+      let modelName = '';
+      if (dims) {
+        const w = dims.width;
+        const h = dims.height;
+        // Check for Sora 2 (352x640 or 640x352)
+        if ((w === 352 && h === 640) || (w === 640 && h === 352)) {
+          modelName = ' Sora 2';
+        }
+        // Check for Sora 2 Pro (512x896 or 896x512)
+        else if ((w === 512 && h === 896) || (w === 896 && h === 512)) {
+          modelName = ' Sora 2 Pro';
+        }
+      }
+      const tooltip = `${durationStr}${modelName} video`;
+      const el = createPill(badge, `⏱ ${durationStr}`, tooltip, true);
+      el.style.background = pillBg;
+    }
     if (viewsStr) {
-      const el = createPill(badge, viewsStr, `${fmtInt(uv)} Unique Views`, true);
+      let tooltip = `${fmtInt(uv)} Unique Views`;
+      if (impactStr) {
+        tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
+      }
+      const el = createPill(badge, viewsStr, tooltip, true);
       el.style.background = pillBg;
     }
     if (irStr) {
@@ -1270,8 +1383,23 @@
 
   function formatDuration(seconds) {
     if (!seconds || !Number.isFinite(seconds)) return null;
+    
+    // Round to nearest whole second if within 0.2s of a whole number
+    const nearestWhole = Math.round(seconds);
+    if (Math.abs(seconds - nearestWhole) < 0.2) {
+      seconds = nearestWhole;
+    }
+    
+    // Round to 1 decimal place
+    const rounded = Math.round(seconds * 10) / 10;
+    
+    if (rounded < 60) {
+      // For under 60 seconds, show as whole number
+      return `${Math.round(rounded)}s`;
+    }
+    
+    // For 60+ seconds, show minutes (keep existing logic)
     const s = Math.round(seconds);
-    if (s < 60) return `${s}s`;
     const mins = Math.floor(s / 60);
     const secs = s % 60;
     return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
@@ -1320,6 +1448,7 @@
     return badge;
   }
 
+
   function renderDraftButtons() {
     if (!isDrafts()) return;
 
@@ -1351,12 +1480,54 @@
   
   // This function targets the visible video container
   function findDetailBadgeTarget() {
-    if (!isPost()) return null;
-
-    // 1. Find the wrapper div for the *visible* video player (the one at top: 0px and opacity: 1)
-    const visibleVideoWrapper = document.querySelector('.relative.h-full.w-full.origin-top > .absolute.overflow-hidden.rounded-xl.cursor-default[style*="top: 0px"][style*="opacity: 1"]');
+    // We look for the specific structure of the detail modal/page
+    const selector = '.relative.h-full.w-full.origin-top > .absolute.overflow-hidden.rounded-xl';
     
-    if (!visibleVideoWrapper) return null;
+    // Find ALL matching wrappers
+    const wrappers = Array.from(document.querySelectorAll(selector));
+    
+    if (wrappers.length === 0) return null;
+    
+    let bestWrapper = null;
+    let bestDist = Infinity;
+    const viewportCenterY = window.innerHeight / 2;
+    
+    for (const wrapper of wrappers) {
+      const style = window.getComputedStyle(wrapper);
+      
+      // Check for basic visibility
+      if ((style.opacity === '1' || parseFloat(style.opacity) > 0.5) && style.display !== 'none' && style.visibility !== 'hidden') {
+        
+        // Find the one closest to the center of the viewport
+        const rect = wrapper.getBoundingClientRect();
+        
+        // Skip if completely out of view
+        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+        
+        const wrapperCenterY = rect.top + rect.height / 2;
+        const dist = Math.abs(viewportCenterY - wrapperCenterY);
+        
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestWrapper = wrapper;
+        }
+      }
+    }
+    
+    if (!bestWrapper) {
+      // Fallback: just take the first visible one if none are "in view" (maybe loading?)
+      for (const wrapper of wrappers) {
+         const style = window.getComputedStyle(wrapper);
+         if ((style.opacity === '1' || parseFloat(style.opacity) > 0.5) && style.display !== 'none' && style.visibility !== 'hidden') {
+           bestWrapper = wrapper;
+           break;
+         }
+      }
+    }
+    
+    if (!bestWrapper) return null;
+    
+    const visibleVideoWrapper = bestWrapper;
     
     // 2. The inner container which we want to attach the badge to is the .group.relative.h-full.w-full
     const videoGroup = visibleVideoWrapper.querySelector('.group.relative.h-full.w-full');
@@ -1409,11 +1580,174 @@
   }
 
 
+  // Function to fetch post data when visiting a post page directly
+  async function fetchPostDataIfNeeded() {
+    if (!isPost()) return;
+    
+    const sid = currentSIdFromURL();
+    if (!sid) return;
+    
+    // Check if we already have data for this post
+    if (idToUnique.has(sid)) {
+      return; // Data already available
+    }
+    
+    // Try to load from storage first
+    try {
+      const requestId = 'post_data_' + Date.now();
+      window.postMessage({ __sora_uv__: true, type: 'metrics_request', req: requestId }, '*');
+      
+      // Wait for response
+      const responsePromise = new Promise((resolve) => {
+        const handler = (ev) => {
+          const d = ev?.data;
+          if (d?.__sora_uv__ === true && d?.type === 'metrics_response' && d?.req === requestId) {
+            window.removeEventListener('message', handler);
+            resolve(d.metrics);
+          }
+        };
+        window.addEventListener('message', handler);
+        // Timeout after 1 second
+        setTimeout(() => {
+          window.removeEventListener('message', handler);
+          resolve(null);
+        }, 1000);
+      });
+      
+      const metrics = await responsePromise;
+      if (metrics?.users) {
+        // Helper function to load post data from a post object
+        const loadPostData = (post, postId) => {
+          const latest = __sorauv_latestSnapshot(post.snapshots);
+          if (latest) {
+            // Only set values if they're not null/undefined
+            if (latest.uv != null) idToUnique.set(postId, latest.uv);
+            if (latest.likes != null) idToLikes.set(postId, latest.likes);
+            if (latest.views != null) idToViews.set(postId, latest.views);
+            if (latest.comments != null) idToComments.set(postId, latest.comments);
+            // Remixes might be stored as remix_count or remixes
+            const remixes = Number(latest.remix_count ?? latest.remixes ?? 0);
+            if (!isNaN(remixes)) idToRemixes.set(postId, remixes);
+            
+            // Load duration from snapshot if available
+            if (latest.duration != null && typeof latest.duration === 'number') {
+              idToDuration.set(postId, latest.duration);
+            }
+            
+            // Load dimensions from snapshot if available
+            if (latest.width != null && latest.height != null) {
+              idToDimensions.set(postId, { width: latest.width, height: latest.height });
+            }
+            
+            // Calculate age from post creation time, not snapshot time
+            const tPost = __sorauv_getPostTimeStrict(post);
+            if (tPost > 0) {
+              // __sorauv_getPostTimeStrict returns milliseconds, __sorauv_toTs handles conversion
+              const ageMin = Math.max(0, (Date.now() - tPost) / (1000 * 60));
+              idToMeta.set(postId, { ageMin });
+            } else if (latest.t) {
+              // Fallback: use snapshot time if post_time not available
+              // This is less accurate but better than nothing
+              const ageMin = Math.max(0, (Date.now() - latest.t) / (1000 * 60));
+              idToMeta.set(postId, { ageMin });
+            }
+          }
+          
+          // Also try to extract duration and dimensions from post level if not in latest snapshot
+          if (!idToDuration.has(postId) && post.duration != null && typeof post.duration === 'number') {
+            idToDuration.set(postId, post.duration);
+          }
+          
+          if (!idToDimensions.has(postId) && post.width != null && post.height != null) {
+            idToDimensions.set(postId, { width: post.width, height: post.height });
+          }
+          
+          // Fallback: check all snapshots for duration and dimensions
+          if (!idToDuration.has(postId) && post.snapshots && post.snapshots.length > 0) {
+            for (const snap of post.snapshots) {
+              if (snap.duration != null && typeof snap.duration === 'number') {
+                idToDuration.set(postId, snap.duration);
+                break;
+              }
+            }
+          }
+          
+          if (!idToDimensions.has(postId) && post.snapshots && post.snapshots.length > 0) {
+            for (const snap of post.snapshots) {
+              if (snap.width != null && snap.height != null) {
+                idToDimensions.set(postId, { width: snap.width, height: snap.height });
+                break;
+              }
+            }
+          }
+          
+          return true;
+        };
+        
+        // Find the post in stored metrics and populate Maps
+        for (const user of Object.values(metrics.users)) {
+          if (user.posts) {
+            // First check if the post is at the top level
+            if (user.posts[sid]) {
+              loadPostData(user.posts[sid], sid);
+              return; // Found and loaded
+            }
+            
+            // If not found at top level, search through remix_posts of all posts
+            for (const [parentId, parentPost] of Object.entries(user.posts)) {
+              // remix_posts can be either an array OR an object with items array
+              const remixPostsData = parentPost.remix_posts;
+              const remixPosts = Array.isArray(remixPostsData) 
+                ? remixPostsData 
+                : (Array.isArray(remixPostsData?.items) ? remixPostsData.items : []);
+              
+              if (remixPosts.length > 0) {
+                for (const remixItem of remixPosts) {
+                  // Remix items may have nested post object or be the post itself
+                  const remixPost = remixItem?.post || remixItem;
+                  // Check if this remix post matches our target ID
+                  const remixId = remixPost.id || remixPost.post_id;
+                  if (remixId === sid) {
+                    // Pass the actual post object, not the wrapper
+                    loadPostData(remixPost, sid);
+                    return; // Found and loaded remix
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      dlog('feed', 'Error loading post data from storage', e);
+    }
+    
+    // If not in storage, try fetching from feed endpoints
+    // Try Top feed first (most likely to have the post)
+    try {
+      const feedUrl = `${location.origin}/explore?feed=top`;
+      const response = await fetch(feedUrl, {
+        method: 'GET',
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' },
+      });
+      if (response.ok) {
+        const json = await response.json();
+        processFeedJson(json);
+        // Check if we now have valid data (not just that the key exists)
+        if (idToUnique.get(sid) != null) return;
+      }
+    } catch (e) {
+      dlog('feed', 'Error fetching Top feed for post data', e);
+    }
+  }
+
   function renderDetailBadge() {
     const el = ensureDetailBadgeContainer();
     
-    if (!isPost() || !el) {
-      if (el) el.innerHTML = ''; 
+    // If no container found, or if we have one but want to clear it (e.g. navigated away)
+    // We check sid later.
+    if (!el) {
       if (detailBadgeEl) {
         detailBadgeEl.remove();
         detailBadgeEl = null;
@@ -1423,78 +1757,198 @@
 
     const sid = currentSIdFromURL();
     if (!sid) {
+      // If we have a container but no SID (e.g. modal open but URL not updated yet?),
+      // we can't render data. Just clear it.
       el.innerHTML = '';
       return;
     }
+    
+    dlog('feed', 'renderDetailBadge for post', { 
+      sid, 
+      uv: idToUnique.get(sid), 
+      likes: idToLikes.get(sid),
+      remixes: idToRemixes.get(sid),
+      isLocked: lockedPostIds.has(sid)
+    });
 
+    // If we don't have valid data, try to fetch it
+    // Require all primary metrics before showing pills for a clean, single render
     const uv = idToUnique.get(sid);
     const likes = idToLikes.get(sid);
     const totalViews = idToViews.get(sid);
     const comments = idToComments.get(sid);
     const remixes = idToRemixes.get(sid);
+    const allMetricsReady = uv != null && likes != null && totalViews != null && comments != null && remixes != null;
+
+    if (!allMetricsReady) {
+      // Clear any existing retry interval
+      if (detailBadgeRetryInterval) {
+        clearInterval(detailBadgeRetryInterval);
+        detailBadgeRetryInterval = null;
+      }
+      
+      // Try fetching data
+      fetchPostDataIfNeeded();
+      
+      // Set up retries to check if data becomes available (page might load it via API)
+      let retryCount = 0;
+      const maxRetries = 20; // Try for up to 6 seconds (20 * 300ms)
+      detailBadgeRetryInterval = setInterval(() => {
+        retryCount++;
+        const checkUv = idToUnique.get(sid);
+        const checkMeta = idToMeta.get(sid);
+        const checkDuration = idToDuration.get(sid);
+        const checkLikes = idToLikes.get(sid);
+        const checkViews = idToViews.get(sid);
+        const checkComments = idToComments.get(sid);
+        const checkRemixes = idToRemixes.get(sid);
+        const ready =
+          checkUv != null &&
+          checkLikes != null &&
+          checkViews != null &&
+          checkComments != null &&
+          checkRemixes != null &&
+          checkMeta != null;
+        
+        // Only stop if we have ALL primary metrics (and meta) or we timed out
+        if (ready || retryCount >= maxRetries) {
+          clearInterval(detailBadgeRetryInterval);
+          detailBadgeRetryInterval = null;
+          renderDetailBadge(); // Re-render with whatever we have
+        }
+      }, 300);
+      
+      el.innerHTML = ''; // Clear while loading
+      return;
+    }
+    
+    // Clear retry interval if we have data
+    if (detailBadgeRetryInterval) {
+      clearInterval(detailBadgeRetryInterval);
+      detailBadgeRetryInterval = null;
+    }
+
+    // All primary metrics are present; render the pills
 
     const irRaw = interactionRate(likes, comments, uv);
     const rrRaw = remixRate(likes, remixes);
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
     const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
+    
+    // Impact Score
+    let impactStr = null;
+    if (totalViews != null && uv != null && uv > 0) {
+      const ratio = totalViews / uv;
+      impactStr = `${ratio.toFixed(2)}`;
+    }
 
     const meta = idToMeta.get(sid);
     const ageMin = meta?.ageMin;
     const isSuperHot = (likes ?? 0) >= 50 && Number.isFinite(ageMin) && ageMin < 60;
 
-    const viewsStr = uv != null ? `👀 ${fmt(uv)} views` : null;
+    // Match feed badge format exactly
+    const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
+    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
+    const emojiStr = badgeEmojiFor(sid, meta);
+    const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
+
+    // Get duration if available
+    let duration = idToDuration.get(sid);
     
-    const timeStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
-    const emoji = badgeEmojiFor(sid, meta);
+    // Fallback: Try to extract duration and dimensions from the video element on the page
+    if (!duration || !idToDimensions.has(sid)) {
+      try {
+        const videoEl = document.querySelector('video[src]');
+        if (videoEl) {
+          // Extract duration
+          if (!duration && videoEl.duration && isFinite(videoEl.duration)) {
+            duration = videoEl.duration;
+            idToDuration.set(sid, duration); // Cache it
+          }
+          // Extract dimensions
+          if (!idToDimensions.has(sid) && videoEl.videoWidth && videoEl.videoHeight) {
+            idToDimensions.set(sid, { width: videoEl.videoWidth, height: videoEl.videoHeight });
+          }
+        }
+      } catch (e) {
+        // Ignore errors
+      }
+    }
+    
+    const durationStr = duration ? formatDuration(duration) : null;
 
     // Determine if we have any data to display
-    if (viewsStr == null && irStr == null && rrStr == null && timeStr == null && emoji == '') {
+    if (viewsStr == null && irStr == null && rrStr == null && impactStr == null && timeEmojiStr == null && durationStr == null) {
       el.innerHTML = '';
       return;
     }
 
-    // Use a key to prevent unnecessary DOM updates
-    const newKey = JSON.stringify([viewsStr, irStr, rrStr, timeStr, emoji]);
+    // Use a key to prevent unnecessary DOM updates - match feed badge key format
+    const bg = badgeBgFor(sid, meta);
+    const pillBg = bg || 'rgba(37,37,37,0.7)';
+    const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
     if (el.dataset.key === newKey) return;
     el.dataset.key = newKey;
     
-    el.innerHTML = '';
-
-    const pillBg = 'rgba(37,37,37,0.7)'; 
+    el.innerHTML = ''; 
     
-    // 1. Views Pill
-    if (viewsStr) {
-      const metEl = createPill(el, viewsStr, `${fmtInt(uv)} Unique Views`, true);
+    // 1. Duration Pill (first position for prominence) - match feed badge exactly
+    if (durationStr) {
+      const dims = idToDimensions.get(sid);
+      let modelName = '';
+      if (dims) {
+        const w = dims.width;
+        const h = dims.height;
+        // Check for Sora 2 (352x640 or 640x352)
+        if ((w === 352 && h === 640) || (w === 640 && h === 352)) {
+          modelName = ' Sora 2';
+        }
+        // Check for Sora 2 Pro (512x896 or 896x512)
+        else if ((w === 512 && h === 896) || (w === 896 && h === 512)) {
+          modelName = ' Sora 2 Pro';
+        }
+      }
+      const tooltip = `${durationStr}${modelName} video`;
+      const metEl = createPill(el, `⏱ ${durationStr}`, tooltip, true);
       metEl.style.background = pillBg;
       metEl.style.pointerEvents = 'auto';
     }
     
-    // 2. IR Pill
+    // 2. Views Pill - match feed badge exactly
+    if (viewsStr) {
+      let tooltip = `${fmtInt(uv)} Unique Views`;
+      if (impactStr) {
+        tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
+      }
+      const metEl = createPill(el, viewsStr, tooltip, true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 3. IR Pill - match feed badge exactly
     if (irStr) {
       const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
       metEl.style.background = pillBg;
       metEl.style.pointerEvents = 'auto';
     }
     
-    // 3. RR Pill
+    // 4. RR Pill - match feed badge exactly
     if (rrStr) {
       const metEl = createPill(el, rrStr, 'Total Remixes relative to Likes', true);
       metEl.style.background = pillBg;
       metEl.style.pointerEvents = 'auto';
     }
     
-    // 4. Time/Age Pill
-    if (timeStr || emoji) {
-      const timeEmojiStr = [timeStr || '', emoji || ''].filter(Boolean).join(' ');
+    // 5. Time/Age Pill - match feed badge exactly
+    if (timeEmojiStr) {
       const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
       const nearDay = isNearWholeDay(ageMin);
       const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
       
       const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
-      const bg = badgeBgFor(sid, meta);
-      timeEl.style.background = bg || pillBg;
+      timeEl.style.background = pillBg;
       timeEl.style.pointerEvents = 'auto';
 
       if (isSuperHot) {
@@ -1601,30 +2055,62 @@
     }
   }
 
-  function makePill(btn, label) {
+  function makePill(btn, label, hasArrow = false) {
     // inject shared CSS once
     if (!document.getElementById('sora-uv-btn-style')) {
       const st = document.createElement('style');
       st.id = 'sora-uv-btn-style';
       st.textContent = `
-        .sora-uv-btn{
-          display:inline-flex;align-items:center;justify-content:center;height:40px;
-          border-radius:9999px;padding:10px 16px;border:1px solid rgba(255,255,255,0.10);
-          font-size:16px;font-weight:600;line-height:1;white-space:nowrap;cursor:pointer;user-select:none;
-          background:rgba(29,29,29,0.78);color:#fff;
-          box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);
-          backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
-          transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease,opacity 120ms ease;
+        .sora-uv-btn {
+          display: flex;
+          height: 40px;
+          align-items: center;
+          justify-content: space-between;
+          gap: 6px;
+          border-radius: 9999px;
+          padding: 0 16px;
+          background: rgba(37, 37, 37, 0.6);
+          backdrop-filter: blur(22px) saturate(2);
+          -webkit-backdrop-filter: blur(22px) saturate(2);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          color: #fff;
+          font-size: 16px;
+          font-weight: 600;
+          white-space: nowrap;
+          cursor: pointer;
+          user-select: none;
+          transition: opacity 120ms ease;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
         }
-        .sora-uv-btn:hover{ background:rgba(29,29,29,0.88) }
-        .sora-uv-btn[disabled]{ opacity:.5; cursor:not-allowed }
-        .sora-uv-btn[data-active="true"]{
-          background:hsla(120,60%,30%,.90);
-          border:1px solid hsla(120,60%,40%,.90);
-          box-shadow:0 0 10px 3px hsla(120,60%,35%,.45);
+        .sora-uv-btn::before,
+        .sora-uv-btn::after {
+          display: none !important;
         }
-        .sora-uv-btn[data-active="true"]:hover{
-          background:hsla(120,60%,32%,.95);
+        .sora-uv-btn:hover {
+          opacity: 0.9;
+        }
+        .sora-uv-btn[disabled] { 
+          opacity: .5; 
+          cursor: not-allowed; 
+        }
+        .sora-uv-btn[data-active="true"] {
+          background: hsla(120, 60%, 30%, .90) !important;
+          border: 1px solid hsla(120, 60%, 40%, .90) !important;
+          box-shadow: 0 0 10px 3px hsla(120, 60%, 35%, .45) !important;
+          color: #fff !important;
+          opacity: 1 !important;
+        }
+        .sora-uv-btn[data-active="true"]:hover {
+          background: hsla(120, 60%, 32%, .95) !important;
+        }
+        .sora-uv-btn svg {
+          opacity: 0.5;
+        }
+        .sora-uv-btn:hover svg {
+          opacity: 1;
+        }
+        .sora-uv-btn[data-active="true"] svg {
+          opacity: 0.8;
         }
       `;
       document.head.appendChild(st);
@@ -1636,15 +2122,24 @@
     span.textContent = label;
     btn.appendChild(span);
 
+    // add arrow if requested
+    if (hasArrow) {
+      btn.dataset.hasArrow = 'true';
+      const arrowDiv = document.createElement('div');
+      arrowDiv.style.display = 'flex';
+      arrowDiv.style.alignItems = 'center';
+      arrowDiv.style.flexShrink = '0';
+      arrowDiv.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>`;
+      btn.appendChild(arrowDiv);
+    }
+
     // base attrs
     btn.type = 'button';
     btn.setAttribute('role', 'combobox');
     btn.setAttribute('aria-expanded', 'false');
     btn.setAttribute('aria-autocomplete', 'none');
     btn.dataset.state = 'closed';
-
-    // apply class; CSS handles normal/hover/active
-    btn.classList.add('sora-uv-btn');
+    btn.className = 'sora-uv-btn';
 
     // helpers
     btn._labelSpan = span;
@@ -1669,11 +2164,43 @@
 
     const bar = document.createElement('div');
     bar.className = 'sora-uv-controls';
+    
+    // Helper function to calculate top position based on scroll distance
+    // Linear movement: starts at 42px (12px + 30px), moves to 8px over 30px of scroll
+    // Only applies on explore pages
+    const getBarTopPosition = () => {
+      // Only apply scroll-based positioning on explore pages
+      if (!isExplore()) {
+        return '12px'; // Default position on non-explore pages
+      }
+      
+      const scrollY = window.scrollY || window.pageYOffset || 0;
+      const maxScroll = 30; // Distance to scroll before fully moved up
+      const startTop = 42; // 12px + 30px offset
+      const endTop = 8; // Positioned slightly higher than original 12px after scrolling
+      
+      if (scrollY <= 0) {
+        return `${startTop}px`;
+      } else if (scrollY >= maxScroll) {
+        return `${endTop}px`;
+      } else {
+        // Linear interpolation
+        const progress = scrollY / maxScroll;
+        const currentTop = startTop - (startTop - endTop) * progress;
+        return `${currentTop}px`;
+      }
+    };
+    
+    // Update bar position based on scroll
+    const updateBarPosition = () => {
+      bar.style.top = getBarTopPosition();
+    };
+    
     Object.assign(bar.style, {
       position: 'fixed',
-      top: '12px',
+      top: getBarTopPosition(), // Start 30px lower (42px), move linearly to 12px
       right: '12px',
-      zIndex: 2147483647,
+      zIndex: 2147483640, // Lower than max to allow notifications (toasts) to be on top
       display: 'flex',
       gap: '8px',
       padding: '0',
@@ -1684,10 +2211,94 @@
       alignItems: 'center',
       userSelect: 'none',
       flexDirection: 'column',
+      // No transition - direct movement tied to scroll
     });
+    
+    // Function to update feed selector button position based on scroll
+    const updateFeedButtonPosition = () => {
+      // Only apply scroll-based positioning on explore pages
+      if (!isExplore()) {
+        return; // Don't modify feed button position on non-explore pages
+      }
+      
+      // Find the feed selector button container (the one with "Choose a feed" aria-label)
+      const feedButton = document.querySelector('button[aria-label="Choose a feed"]');
+      if (!feedButton) return;
+      
+      // Find the parent container with fixed positioning
+      let container = feedButton.closest('.fixed');
+      if (!container) {
+        // If no fixed container found, look for parent with top-4 or top-2 classes
+        container = feedButton.parentElement;
+        while (container && !container.classList.contains('fixed')) {
+          container = container.parentElement;
+        }
+      }
+      if (!container) return;
+      
+      const scrollY = window.scrollY || window.pageYOffset || 0;
+      const maxScroll = 30;
+      const startOffset = 34; // 34px lower at start (more spacing)
+      
+      // Get original top values from classes (top-4 = 16px, top-2 = 8px)
+      // For mobile: top-4 (16px) -> 16px + 40px = 56px at start, 16px at end
+      // For tablet: top-2 (8px) -> 8px + 40px = 48px at start, 8px at end
+      const isTablet = window.matchMedia('(min-width: 768px)').matches;
+      const baseTop = isTablet ? 8 : 16; // top-2 = 8px, top-4 = 16px
+      const endTop = isTablet ? 8 : 16; // More spacing from top (back to original base positions)
+      
+      const startTop = baseTop + startOffset;
+      let finalTop;
+      if (scrollY <= 0) {
+        finalTop = startTop;
+      } else if (scrollY >= maxScroll) {
+        finalTop = endTop;
+      } else {
+        // Linear interpolation
+        const progress = scrollY / maxScroll;
+        finalTop = startTop - (startTop - endTop) * progress;
+      }
+      
+      container.style.top = `${finalTop}px`;
+    };
+    
+    // Store the function for later use
+    window.updateFeedButtonPosition = updateFeedButtonPosition;
+    
+    // Initial position update and watch for dynamically added buttons
+    const tryUpdateFeedButton = () => {
+      updateFeedButtonPosition();
+    };
+    
+    // Try immediately and after a delay
+    tryUpdateFeedButton();
+    setTimeout(tryUpdateFeedButton, 100);
+    setTimeout(tryUpdateFeedButton, 500);
+    
+    // Watch for DOM changes in case button is added dynamically
+    const observer = new MutationObserver(() => {
+      tryUpdateFeedButton();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    
+    // Add scroll event listener - update directly on every scroll
+    const handleScroll = () => {
+      updateBarPosition();
+      updateFeedButtonPosition();
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    
+    // Store the update function on the bar for later use
+    bar.updateBarPosition = updateBarPosition;
 
     const buttonRow = document.createElement('div');
-    Object.assign(buttonRow.style, { display: 'flex', gap: '8px', background: 'transparent' });
+    Object.assign(buttonRow.style, {
+      display: 'flex',
+      gap: '8px',
+      background: 'transparent',
+      justifyContent: 'center',
+      alignItems: 'center',
+    });
 
     // prefs
     let prefs = getPrefs();
@@ -1716,32 +2327,179 @@
     }
 
     // Filter
+    const filterContainer = document.createElement('div');
+    filterContainer.className = 'sora-uv-filter-container';
+    filterContainer.style.position = 'relative';
+    filterContainer.style.display = 'none';
+    
     const filterBtn = document.createElement('button');
     filterBtn.setAttribute('data-role', 'filter-btn');
-    makePill(filterBtn, 'Filter');
-    buttonRow.appendChild(filterBtn);
+    makePill(filterBtn, 'Filter', true);
+    filterContainer.appendChild(filterBtn);
+    
+    // Filter dropdown menu
+    const filterDropdown = document.createElement('div');
+    filterDropdown.className = 'sora-uv-filter-dropdown';
+    Object.assign(filterDropdown.style, {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      right: '0',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '0',
+      padding: '8px',
+      background: 'rgba(37, 37, 37, 0.6)', // Sora's dark mode transparency
+      border: '1px solid rgba(255, 255, 255, 0.15)', // Subtle glass border
+      borderRadius: '20px',
+      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+      backdropFilter: 'blur(22px) saturate(2)', // The key glassmorphism effect
+      WebkitBackdropFilter: 'blur(22px) saturate(2)',
+      zIndex: 999999,
+      minWidth: '220px',
+    });
+    
+    // Filter dropdown items
+    FILTER_LABELS.forEach((label, index) => {
+      const option = document.createElement('button');
+      // Format dropdown labels: "All Posts" for first item, "Past X hours" for others
+      let dropdownLabel;
+      if (index === 0) {
+        dropdownLabel = 'All Posts';
+      } else {
+        const hours = FILTER_STEPS_MIN[index] / 60; // Convert minutes to hours
+        dropdownLabel = `Past ${hours} hours`;
+      }
+      option.textContent = dropdownLabel;
+      option.className = 'sora-uv-filter-option';
+      Object.assign(option.style, {
+        padding: '8px 12px',
+        background: 'transparent',
+        border: 'none',
+        color: 'var(--token-text-primary, #fff)',
+        textAlign: 'left',
+        cursor: 'pointer',
+        borderRadius: '8px',
+        fontSize: '14px',
+        fontWeight: '500',
+        transition: 'background 120ms ease',
+      });
+      option.onmouseenter = () => { option.style.background = 'var(--token-bg-light, rgba(255, 255, 255, 0.1))'; };
+      option.onmouseleave = () => { option.style.background = 'transparent'; };
+      option.onclick = (e) => {
+        e.stopPropagation();
+        const s = getGatherState();
+        s.filterIndex = index;
+        setGatherState(s);
+        bar.updateFilterLabel();
+        applyFilter();
+        filterDropdown.style.display = 'none';
+      };
+      filterDropdown.appendChild(option);
+    });
+    
+    filterContainer.appendChild(filterDropdown);
+    buttonRow.appendChild(filterContainer);
 
     // Gather
     const gatherBtn = document.createElement('button');
-    gatherBtn.className = 'sora-uv-gather-btn';
     gatherBtn.dataset.gathering = 'false';
     makePill(gatherBtn, 'Gather');
+    gatherBtn.classList.add('sora-uv-gather-btn');
+    gatherBtn.style.display = 'none';
     buttonRow.appendChild(gatherBtn);
 
     // Analyze (Top only; visibility handled later)
     analyzeBtn = document.createElement('button');
-    analyzeBtn.className = 'sora-uv-analyze-btn';
     makePill(analyzeBtn, 'Analyze');
+    analyzeBtn.classList.add('sora-uv-analyze-btn');
     analyzeBtn.style.display = 'none';
     buttonRow.appendChild(analyzeBtn);
 
     // Bookmarks (Drafts only; visibility handled later)
+    const bookmarksContainer = document.createElement('div');
+    bookmarksContainer.className = 'sora-uv-bookmarks-container';
+    bookmarksContainer.style.position = 'relative';
+    
     bookmarksBtn = document.createElement('button');
-    bookmarksBtn.className = 'sora-uv-bookmarks-btn';
     bookmarksBtn.dataset.active = 'false';
-    makePill(bookmarksBtn, 'Filter');
+    makePill(bookmarksBtn, 'All Drafts', true);
+    bookmarksBtn.classList.add('sora-uv-bookmarks-btn');
     bookmarksBtn.style.display = 'none';
-    buttonRow.appendChild(bookmarksBtn);
+    bookmarksContainer.appendChild(bookmarksBtn);
+    
+    // Bookmarks dropdown menu
+    const bookmarksDropdown = document.createElement('div');
+    bookmarksDropdown.className = 'sora-uv-bookmarks-dropdown';
+    Object.assign(bookmarksDropdown.style, {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      right: '0',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '0',
+      padding: '8px',
+      background: 'rgba(37, 37, 37, 0.6)',
+      border: '1px solid rgba(255, 255, 255, 0.15)',
+      borderRadius: '20px',
+      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+      backdropFilter: 'blur(22px) saturate(2)',
+      WebkitBackdropFilter: 'blur(22px) saturate(2)',
+      zIndex: 999999,
+      minWidth: '220px',
+    });
+    
+    // Bookmarks dropdown options
+    const bookmarksLabels = ['All Drafts', 'Bookmarks', 'Unbookmarked', 'Violations'];
+    bookmarksLabels.forEach((label, index) => {
+      const option = document.createElement('button');
+      option.textContent = label;
+      option.className = 'sora-uv-bookmarks-option';
+      Object.assign(option.style, {
+        padding: '8px 12px',
+        background: 'transparent',
+        border: 'none',
+        color: 'var(--token-text-primary, #fff)',
+        textAlign: 'left',
+        cursor: 'pointer',
+        borderRadius: '8px',
+        fontSize: '14px',
+        fontWeight: '500',
+        transition: 'background 120ms ease',
+      });
+      option.onmouseenter = () => { option.style.background = 'var(--token-bg-light, rgba(255, 255, 255, 0.1))'; };
+      option.onmouseleave = () => { option.style.background = 'transparent'; };
+      option.onclick = (e) => {
+        e.stopPropagation();
+        bookmarksFilterState = index;
+        bookmarksBtn.setActive(bookmarksFilterState !== 0);
+        bookmarksBtn.setLabel(label);
+        applyBookmarksFilter(true);
+        bookmarksDropdown.style.display = 'none';
+        // Update visual selection
+        updateBookmarksDropdownSelection();
+      };
+      bookmarksDropdown.appendChild(option);
+    });
+    
+    // Function to update dropdown selection visual state
+    const updateBookmarksDropdownSelection = () => {
+      const options = bookmarksDropdown.querySelectorAll('.sora-uv-bookmarks-option');
+      options.forEach((opt, idx) => {
+        if (idx === bookmarksFilterState) {
+          opt.style.background = 'var(--token-bg-active, rgba(255, 255, 255, 0.15))';
+          opt.style.fontWeight = '600';
+        } else {
+          opt.style.background = 'transparent';
+          opt.style.fontWeight = '500';
+        }
+      });
+    };
+    
+    // Initialize selection state
+    updateBookmarksDropdownSelection();
+    
+    bookmarksContainer.appendChild(bookmarksDropdown);
+    buttonRow.appendChild(bookmarksContainer);
 
     bar.appendChild(buttonRow);
 
@@ -1757,12 +2515,29 @@
       background: 'transparent',
     });
 
+    // Inject gather slider CSS once
+    if (!document.getElementById('sora-uv-gather-slider-style')) {
+      const st = document.createElement('style');
+      st.id = 'sora-uv-gather-slider-style';
+      st.textContent = `
+        .sora-uv-controls input[type="range"]::-webkit-slider-thumb {
+          appearance: none;
+          -webkit-appearance: none;
+        }
+        .sora-uv-controls input[type="range"]::-moz-range-thumb {
+          border: none;
+        }
+      `;
+      document.head.appendChild(st);
+    }
+
     const sliderContainer = document.createElement('div');
     sliderContainer.className = 'sora-uv-slider-container';
     Object.assign(sliderContainer.style, {
       display: 'flex',
       width: '100%',
       alignItems: 'center',
+      justifyContent: 'center',
       gap: '5px',
       background: 'transparent',
     });
@@ -1835,14 +2610,19 @@
     };
 
     // Wire Filter button
-    filterBtn.onclick = () => {
-      if (filterBtn.disabled) return; // safety
-      const s = getGatherState();
-      s.filterIndex = ((s.filterIndex ?? 0) + 1) % FILTER_STEPS_MIN.length;
-      setGatherState(s);
-      bar.updateFilterLabel();
-      applyFilter();
+    filterBtn.onclick = (e) => {
+      if (filterBtn.disabled) return;
+      e.stopPropagation();
+      const isOpen = filterDropdown.style.display === 'flex';
+      filterDropdown.style.display = isOpen ? 'none' : 'flex';
     };
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!filterContainer.contains(e.target)) {
+        filterDropdown.style.display = 'none';
+      }
+    });
 
     // Guard clicks on disabled buttons
     gatherBtn.onclick = () => {
@@ -1868,16 +2648,22 @@
       toggleAnalyzeMode();
     };
 
-    bookmarksBtn.onclick = () => {
+    bookmarksBtn.onclick = (e) => {
       if (bookmarksBtn.disabled) return;
-      // Cycle through states: 0 (all) -> 1 (bookmarked) -> 2 (unbookmarked) -> 3 (violations) -> 0
-      bookmarksFilterState = (bookmarksFilterState + 1) % 4;
-
-      const labels = ['Filter', 'Bookmarks', 'Unbookmarked', 'Violations'];
-      bookmarksBtn.setActive(bookmarksFilterState !== 0);
-      bookmarksBtn.setLabel(labels[bookmarksFilterState]);
-      applyBookmarksFilter(true); // Force since filter state changed
+      e.stopPropagation();
+      const isOpen = bookmarksDropdown.style.display === 'flex';
+      if (!isOpen) {
+        updateBookmarksDropdownSelection();
+      }
+      bookmarksDropdown.style.display = isOpen ? 'none' : 'flex';
     };
+    
+    // Close bookmarks dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (bookmarksContainer && !bookmarksContainer.contains(e.target)) {
+        bookmarksDropdown.style.display = 'none';
+      }
+    });
 
     bar.updateGatherState = () => {
       const filterLockActive = (getGatherState().filterIndex ?? 0) > 0;
@@ -1896,6 +2682,18 @@
 
         // Disable Filter during gather
         setDisabled(filterBtn, true);
+
+        // Align gatherControlsWrapper with the button's current width
+        // Use requestAnimationFrame to ensure the button has rendered with new label
+        requestAnimationFrame(() => {
+          const buttonWidth = gatherBtn.offsetWidth;
+          gatherControlsWrapper.style.width = `${buttonWidth}px`;
+          gatherControlsWrapper.style.alignSelf = 'flex-start';
+          // Calculate the left offset to align with the button relative to the bar
+          const buttonRect = gatherBtn.getBoundingClientRect();
+          const barRect = bar.getBoundingClientRect();
+          gatherControlsWrapper.style.marginLeft = `${buttonRect.left - barRect.left}px`;
+        });
 
         if (isProfile()) {
           gatherControlsWrapper.style.display = 'flex';
@@ -1916,6 +2714,10 @@
         // Re-enable Filter, then apply Filter-lock (may disable Gather/Analyze if a filter is set)
         setDisabled(filterBtn, false);
         gatherControlsWrapper.style.display = 'none';
+        // Reset alignment styles
+        gatherControlsWrapper.style.width = '100%';
+        gatherControlsWrapper.style.alignSelf = '';
+        gatherControlsWrapper.style.marginLeft = '';
         stopGathering(false);
 
         // Restore Analyze visibility (Top feed only); then apply lock
@@ -1934,6 +2736,9 @@
 
     // Initial label + lock application
     bar.updateFilterLabel();
+    
+    // Set initial position based on current scroll
+    updateBarPosition();
 
     document.documentElement.appendChild(bar);
     controlBar = bar;
@@ -1942,14 +2747,76 @@
 
 
 
+  async function fetchNewPostsForAnalyze() {
+    // Fetch on all feeds except Drafts
+    if (isDrafts()) return;
+    
+    try {
+      let feedUrl;
+      
+      if (isTopFeed()) {
+        // Top feed endpoint
+        feedUrl = `${location.origin}/explore?feed=top`;
+      } else if (isProfile()) {
+        // Profile feed endpoint
+        const profileHandle = currentProfileHandleFromURL();
+        if (profileHandle) {
+          feedUrl = `${location.origin}/profile/${profileHandle}`;
+        } else {
+          feedUrl = `${location.origin}/profile`;
+        }
+      } else {
+        // For other feeds (For You, Following, etc.), use current path
+        feedUrl = `${location.origin}${location.pathname}${location.search}`;
+      }
+      
+      if (feedUrl) {
+        dlog('analyze', 'fetching new posts', { feedUrl });
+        // Fetch the feed - this will go through the fetch sniffer which automatically
+        // processes the response via processFeedJson, updating stored metrics
+        const response = await fetch(feedUrl, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'Accept': 'application/json',
+          },
+        });
+        
+        if (response.ok) {
+          // The fetch sniffer will handle processing the JSON automatically
+          // We just need to wait a bit for it to process, then the render will pick up new data
+          const json = await response.json();
+          dlog('analyze', 'fetched new posts', { items: (json?.items || json?.data?.items || []).length });
+          // Process directly as well to ensure immediate update (fetch sniffer may have already done this)
+          processFeedJson(json);
+        }
+      }
+    } catch (error) {
+      dlog('analyze', 'error fetching new posts', { error: error.message });
+    }
+  }
+
   function startAnalyzeAutoRefresh() {
     if (analyzeAutoRefreshId) clearInterval(analyzeAutoRefreshId);
 
     const TICK_MS = 30_000; // every 30s (your setting)
 
-    const tick = () => {
+    const tick = async () => {
       if (!analyzeActive) return;
       if (document.hidden) return; // SAFEGUARD: no work when tab not visible
+      
+      // First, fetch new posts from the API
+      await fetchNewPostsForAnalyze();
+      
+      // Update the cameo dropdown with fresh counts if it's visible
+      if (analyzeCameoFilterWrap && analyzeCameoFilterWrap.style.display !== 'none') {
+        // Use the globally accessible updateCameoDropdown function
+        if (typeof window._soraUVUpdateCameoDropdown === 'function') {
+          await window._soraUVUpdateCameoDropdown();
+        }
+      }
+      
+      // Then render the table with updated data
       requestAnimationFrame(() => renderAnalyzeTable(true));
     };
 
@@ -1959,13 +2826,27 @@
     if (!document.hidden) tick();
 
     // Refresh immediately when the tab gains focus or becomes visible
-    const onFocus = () => {
+    const onFocus = async () => {
       if (!analyzeActive) return;
-      if (!document.hidden) requestAnimationFrame(() => renderAnalyzeTable(true));
+      if (!document.hidden) {
+        await fetchNewPostsForAnalyze();
+        // Update dropdown if visible
+        if (analyzeCameoFilterWrap && analyzeCameoFilterWrap.style.display !== 'none' && typeof window._soraUVUpdateCameoDropdown === 'function') {
+          await window._soraUVUpdateCameoDropdown();
+        }
+        requestAnimationFrame(() => renderAnalyzeTable(true));
+      }
     };
-    const onVis = () => {
+    const onVis = async () => {
       if (!analyzeActive) return;
-      if (!document.hidden) requestAnimationFrame(() => renderAnalyzeTable(true));
+      if (!document.hidden) {
+        await fetchNewPostsForAnalyze();
+        // Update dropdown if visible
+        if (analyzeCameoFilterWrap && analyzeCameoFilterWrap.style.display !== 'none' && typeof window._soraUVUpdateCameoDropdown === 'function') {
+          await window._soraUVUpdateCameoDropdown();
+        }
+        requestAnimationFrame(() => renderAnalyzeTable(true));
+      }
     };
 
     // Store listeners so we can remove them on stop
@@ -2130,6 +3011,24 @@
         _metricsInFlight = null;
         _metricsCache = d.metrics || { users: {} };
         _metricsTs = Date.now();
+        
+        // Debug: Check if duration is in the stored metrics
+        if (DEBUG.analyze) {
+          const sampleUser = Object.values(_metricsCache.users || {})[0];
+          if (sampleUser && sampleUser.posts) {
+            const samplePost = Object.values(sampleUser.posts)[0];
+            if (samplePost) {
+              dlog('analyze', 'metrics loaded', {
+                userCount: Object.keys(_metricsCache.users || {}).length,
+                postCount: Object.values(_metricsCache.users || {}).reduce((sum, u) => sum + Object.keys(u.posts || {}).length, 0),
+                samplePostHasDuration: !!samplePost.duration,
+                samplePostDuration: samplePost.duration,
+                sampleSnapshotHasDuration: samplePost.snapshots && samplePost.snapshots.length > 0 ? !!samplePost.snapshots[0].duration : false
+              });
+            }
+          }
+        }
+        
         resolve(_metricsCache);
       };
       window.addEventListener('message', onReply);
@@ -2144,21 +3043,79 @@
     return _metricsInFlight;
   }
 
-  async function collectAnalyzeRowsFromStorage() {
+  async function collectCameoUsernamesFromStorage() {
     const metrics = await requestStoredMetrics();
-    const rows = [];
     const NOW = Date.now();
-    const DAY_MS = 24 * 60 * 60 * 1000;
+    const windowHours = Number(analyzeWindowHours) || 24;
+    const WINDOW_MS = windowHours * 60 * 60 * 1000;
+    const userPostIds = new Map(); // username -> Set of post IDs (any post they're tied to)
 
     for (const [, user] of Object.entries(metrics?.users || {})) {
+      const userHandle = user?.handle || user?.userHandle || null;
+      
       for (const [pid, p] of Object.entries(user?.posts || {})) {
         const tPost = __sorauv_getPostTimeStrict(p);
-        if (!tPost || NOW - tPost > DAY_MS) continue;
+        if (!tPost || NOW - tPost > WINDOW_MS) continue;
 
         const snap = __sorauv_latestSnapshot(p?.snapshots);
         if (!snap) continue;
         const likes = Number(snap.likes);
-        if (!isFinite(likes) || likes < 20) continue;
+        if (!isFinite(likes) || likes < 15) continue;
+
+        // Get owner of this post
+        const ownerHandle = p?.ownerHandle || userHandle;
+        
+        // Get cameos in this post
+        const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames : [];
+        const uniqueCameos = [...new Set(cameos)].filter(c => typeof c === 'string' && c);
+        
+        // Collect all usernames tied to this post (owner + cast)
+        const tiedUsernames = new Set();
+        if (ownerHandle && typeof ownerHandle === 'string') {
+          tiedUsernames.add(ownerHandle);
+        }
+        for (const cameoUsername of uniqueCameos) {
+          tiedUsernames.add(cameoUsername);
+        }
+        
+        // Add this post to each tied username's set (dedupe automatically)
+        for (const username of tiedUsernames) {
+          if (!userPostIds.has(username)) {
+            userPostIds.set(username, new Set());
+          }
+          userPostIds.get(username).add(pid);
+        }
+      }
+    }
+
+    // Convert to array with counts and sort by count (descending), then alphabetically
+    const result = Array.from(userPostIds.entries())
+      .map(([username, postIds]) => ({ username, count: postIds.size }))
+      .sort((a, b) => {
+        if (a.count !== b.count) return b.count - a.count;
+        return a.username.localeCompare(b.username);
+      });
+    
+    return result;
+  }
+
+  async function collectAnalyzeRowsFromStorage() {
+    const metrics = await requestStoredMetrics();
+    const rows = [];
+    const NOW = Date.now();
+    const windowHours = Number(analyzeWindowHours) || 24;
+    const WINDOW_MS = windowHours * 60 * 60 * 1000;
+    const windowMin = windowHours * 60;
+
+    for (const [, user] of Object.entries(metrics?.users || {})) {
+      for (const [pid, p] of Object.entries(user?.posts || {})) {
+        const tPost = __sorauv_getPostTimeStrict(p);
+        if (!tPost || NOW - tPost > WINDOW_MS) continue;
+
+        const snap = __sorauv_latestSnapshot(p?.snapshots);
+        if (!snap) continue;
+        const likes = Number(snap.likes);
+        if (!isFinite(likes) || likes < 15) continue;
 
         const uv = Number(snap.uv);
         const comments = Number(snap.comments);
@@ -2169,7 +3126,7 @@
         const irVal = isFinite(uv) && uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
 
         const ageMin = Math.max(0, Math.floor((NOW - tPost) / 60000));
-        const expiringMin = Math.max(0, 1440 - ageMin);
+        const expiringMin = Math.max(0, windowMin - ageMin);
 
         const caption =
           typeof p?.caption === 'string' && p.caption ? p.caption : typeof p?.text === 'string' && p.text ? p.text : '';
@@ -2187,11 +3144,45 @@
         const rrPctStr = rrVal == null ? '' : rrVal === 0 ? '0%' : rrVal.toFixed(2).replace(/\.00$/, '') + '%';
         const irPctStr = irVal == null ? '' : irVal === 0 ? '0%' : irVal.toFixed(1).replace(/\.0$/, '') + '%';
 
+        // Get duration from storage: try snapshot first, then post level, then in-memory Map
+        let duration = snap.duration != null ? snap.duration : (p.duration != null ? p.duration : idToDuration.get(pid));
+        const durationStr = duration ? formatDuration(duration) : null;
+        
+        // Debug logging to track duration loading
+        if (DEBUG.analyze && pid && likes >= 20) {
+          const sample = Math.random() < 0.1; // Sample 10% of posts
+          if (sample || !duration) {
+            dlog('analyze', 'duration load', { 
+              pid: pid.substring(0, 8), 
+              snapDuration: snap.duration, 
+              postDuration: p.duration, 
+              memDuration: idToDuration.get(pid),
+              final: duration,
+              hasSnap: !!snap,
+              snapKeys: snap ? Object.keys(snap).join(',') : 'none',
+              postKeys: Object.keys(p || {}).join(',')
+            });
+          }
+        }
+        
+        // Restore duration to in-memory Map if we found it in storage
+        if (duration != null && !idToDuration.has(pid)) {
+          idToDuration.set(pid, duration);
+        }
+
+        // Also restore dimensions to in-memory Map if stored (try snapshot first, then post level)
+        if (snap.width != null && snap.height != null) {
+          idToDimensions.set(pid, { width: snap.width, height: snap.height });
+        } else if (p.width != null && p.height != null) {
+          idToDimensions.set(pid, { width: p.width, height: p.height });
+        }
+
         rows.push({
           id: pid,
           url: p.url ? p.url : `${location.origin}/p/${pid}`,
           ownerHandle,
           views: isFinite(uv) ? uv : 0,
+          duration: durationStr,
           likes: isFinite(likes) ? likes : 0,
           remixes: isFinite(remixes) ? remixes : 0,
           comments: isFinite(comments) ? comments : 0,
@@ -2201,6 +3192,7 @@
           irPctVal: irVal == null ? -1 : irVal,
           expiringMin,
           caption,
+          cameo_usernames: Array.isArray(p?.cameo_usernames) ? p.cameo_usernames : null,
         });
       }
     }
@@ -2210,11 +3202,13 @@
 
   function collectAnalyzeRowsFromLiveMaps() {
     const rows = [];
+    const windowHours = Number(analyzeWindowHours) || 24;
+    const windowMin = windowHours * 60;
     for (const [id, likes] of idToLikes.entries()) {
       const meta = idToMeta.get(id);
       const ageMin = meta?.ageMin;
-      if (!Number.isFinite(ageMin) || ageMin > 1440) continue;
-      if (!Number.isFinite(likes) || likes < 20) continue;
+      if (!Number.isFinite(ageMin) || ageMin > windowMin) continue;
+      if (!Number.isFinite(likes) || likes < 15) continue;
 
       const uv = Number(idToUnique.get(id) ?? 0);
       const comments = Number(idToComments.get(id) ?? 0);
@@ -2227,13 +3221,17 @@
       const irVal = uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
       const irPctStr = irVal == null ? '' : irVal === 0 ? '0%' : irVal.toFixed(1).replace(/\.0$/, '') + '%';
 
-      const expiringMin = Math.max(0, 1440 - Math.floor(ageMin));
+      const expiringMin = Math.max(0, windowMin - Math.floor(ageMin));
+
+      const duration = idToDuration.get(id);
+      const durationStr = duration ? formatDuration(duration) : null;
 
       rows.push({
         id,
         url: `${location.origin}/p/${id}`,
         ownerHandle: typeof meta?.userHandle === 'string' && meta.userHandle ? meta.userHandle : '',
         views: uv || 0,
+        duration: durationStr,
         likes: Number(likes) || 0,
         remixes: remixes || 0,
         comments: comments || 0,
@@ -2242,7 +3240,8 @@
         irPctStr,
         irPctVal: irVal == null ? -1 : irVal,
         expiringMin,
-        caption: '', // live map path doesn’t retain caption reliably
+        caption: '', // live map path doesn't retain caption reliably
+        cameo_usernames: null, // live maps don't retain cameo_usernames reliably
       });
     }
     if (DEBUG.analyze) dlog('analyze', 'rows from live maps', rows.length);
@@ -2345,7 +3344,7 @@
 
     const lbl = document.createElement('div');
     lbl.textContent = 'Range';
-    Object.assign(lbl.style, { fontWeight: 800, fontSize: '13px', opacity: 0.9, minWidth: '64px' });
+    Object.assign(lbl.style, { fontWeight: 800, fontSize: '13px', opacity: 0.9, minWidth: '48px' });
 
     const track = document.createElement('div');
     Object.assign(track.style, { position: 'relative', flex: '1 1 auto', height: '20px', display: 'flex', alignItems: 'center' });
@@ -2414,17 +3413,25 @@
       fillBar.style.width = pctSafe + '%';
     };
 
-    pill.onclick = () => {
+    pill.onclick = async () => {
       rangeInput.value = '24';
       analyzeWindowHours = 24;
       localStorage.setItem('SORA_UV_ANALYZE_WINDOW_H', '24');
       updateSliderUI();
+      // Update cameo dropdown when window changes
+      if (analyzeCameoFilterWrap && analyzeCameoFilterWrap.style.display !== 'none') {
+        await updateCameoDropdown();
+      }
       renderAnalyzeTable(true);
     };
-    rangeInput.oninput = () => {
+    rangeInput.oninput = async () => {
       analyzeWindowHours = Math.min(24, Math.max(1, Number(rangeInput.value) || 24));
       localStorage.setItem('SORA_UV_ANALYZE_WINDOW_H', String(analyzeWindowHours));
       updateSliderUI();
+      // Update cameo dropdown when window changes
+      if (analyzeCameoFilterWrap && analyzeCameoFilterWrap.style.display !== 'none') {
+        await updateCameoDropdown();
+      }
       renderAnalyzeTable(true);
     };
     window.addEventListener('resize', updateSliderUI);
@@ -2436,6 +3443,80 @@
     analyzeSliderWrap.appendChild(lbl);
     analyzeSliderWrap.appendChild(track);
     analyzeSliderWrap.appendChild(pill);
+
+    // ---------- Cameo Filter Row ----------
+    analyzeCameoFilterWrap = document.createElement('div');
+    Object.assign(analyzeCameoFilterWrap.style, {
+      width: '100%', display: 'none', alignItems: 'center', gap: '6px',
+      padding: '10px 12px', borderRadius: '14px',
+      background: 'rgba(48,48,48,0.22)',
+      border: '1px solid #353535',
+      boxShadow: '0 6px 20px rgba(0,0,0,0.30), inset 0 0 1px rgba(255,255,255,0.18)',
+      isolation: 'isolate', position: 'relative', margin: '4px 0 10px',
+    });
+    panel.appendChild(analyzeCameoFilterWrap);
+
+    const cameoFilterLbl = document.createElement('div');
+    cameoFilterLbl.textContent = 'See gens tied to';
+    Object.assign(cameoFilterLbl.style, { fontWeight: 800, fontSize: '13px', opacity: 0.9, minWidth: '105px' });
+
+    analyzeCameoSelectEl = document.createElement('select');
+    Object.assign(analyzeCameoSelectEl.style, {
+      minWidth: '180px',
+      maxWidth: '220px',
+      padding: '6px 10px',
+      background: 'rgba(29,29,29,0.78)',
+      color: '#e8eaed',
+      border: '1px solid rgba(255,255,255,0.10)',
+      borderRadius: '8px',
+      fontSize: '13px',
+      outline: 'none',
+      cursor: 'pointer',
+    });
+
+    const updateCameoDropdown = async () => {
+      const cameos = await collectCameoUsernamesFromStorage();
+      
+      // Sort by count descending (most frequent to least)
+      const sortedCameos = [...cameos].sort((a, b) => b.count - a.count);
+      
+      if (analyzeCameoSelectEl) {
+        analyzeCameoSelectEl.innerHTML = 
+          '<option value="">Everyone</option>' +
+          sortedCameos.map(c => `<option value="${c.username}">${c.username} (${c.count})</option>`).join('');
+        
+        if (analyzeCameoFilterUsername) {
+          analyzeCameoSelectEl.value = analyzeCameoFilterUsername;
+        } else {
+          analyzeCameoSelectEl.value = '';
+        }
+      }
+    };
+    
+    // Make updateCameoDropdown accessible globally for auto-refresh
+    window._soraUVUpdateCameoDropdown = updateCameoDropdown;
+
+    analyzeCameoSelectEl.addEventListener('change', (e) => {
+      const value = e.target.value;
+      if (value === '' || value === null) {
+        // "Everyone" - no filter, show all data
+        analyzeCameoFilterUsername = null;
+      } else {
+        // Specific person selected - filter to show posts with this cameo OR made by this user
+        analyzeCameoFilterUsername = value;
+      }
+      // Force refresh to apply the new filter and update header text
+      renderAnalyzeTable(true);
+    });
+
+    analyzeCameoFilterWrap.appendChild(cameoFilterLbl);
+    analyzeCameoFilterWrap.appendChild(analyzeCameoSelectEl);
+
+    // Initialize dropdown
+    updateCameoDropdown();
+    
+    // Make updateCameoDropdown accessible globally for auto-refresh
+    window._soraUVUpdateCameoDropdown = updateCameoDropdown;
 
     // ---------- Table ----------
     analyzeTableEl = document.createElement('table');
@@ -2459,6 +3540,7 @@
     ro.observe(panel);
     ro.observe(headerBox);
     ro.observe(analyzeSliderWrap);
+    if (analyzeCameoFilterWrap) ro.observe(analyzeCameoFilterWrap);
     window.addEventListener('resize', ov._recomputeSticky);
     requestAnimationFrame(() => {
       ov._recomputeSticky();
@@ -2497,7 +3579,7 @@
       colPost.style.minWidth = '140px';
       cg.appendChild(colPost);
 
-      ['100px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
+      ['100px', '60px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
         const c = document.createElement('col');
         c.style.width = w;
         c.style.maxWidth = w;
@@ -2515,6 +3597,7 @@
         ['prompt', '📋'],
         ['post', 'Post'],
         ['views', 'Views'],
+        ['duration', '⏱'],
         ['likes', '👍'],
         ['remixes', '🌀'],
         ['comments', '💬'],
@@ -2629,7 +3712,7 @@
       colPost.style.minWidth = '140px';
       cg.appendChild(colPost);
 
-      ['100px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
+      ['100px', '60px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
         const c = document.createElement('col');
         c.style.width = w;
         c.style.maxWidth = w;
@@ -2647,6 +3730,7 @@
         ['prompt', '📋'],
         ['post', 'Post'],
         ['views', 'Views'],
+        ['duration', '⏱'],
         ['likes', '👍'],
         ['remixes', '🌀'],
         ['comments', '💬'],
@@ -2739,9 +3823,40 @@ async function renderAnalyzeTable(force = false) {
     let rows = await collectAnalyzeRowsFromStorage();
     if (!rows.length && typeof collectAnalyzeRowsFromLiveMaps === 'function') rows = collectAnalyzeRowsFromLiveMaps();
 
+    if (DEBUG.analyze && rows.length > 0) {
+      const sample = rows.find(r => r.cameo_usernames && r.cameo_usernames.length > 0);
+      if (sample) {
+        dlog('analyze', 'found row with cameos', { id: sample.id, cameos: sample.cameo_usernames, owner: sample.ownerHandle });
+      } else {
+        dlog('analyze', 'no rows with cameos found in this batch', { totalRows: rows.length });
+      }
+    }
+
     const windowMin = (Number(analyzeWindowHours) || 24) * 60;
-    const expiringThreshold = 1440 - windowMin;
-    rows = rows.filter((r) => Number.isFinite(r.expiringMin) && r.expiringMin >= expiringThreshold);
+    // Filter rows: expiringMin represents minutes until the post expires from the window
+    // A post with expiringMin >= 0 is still within the window
+    rows = rows.filter((r) => Number.isFinite(r.expiringMin) && r.expiringMin >= 0);
+    
+    // Filter by cameo username if selected
+    if (analyzeCameoFilterUsername) {
+      // Show posts with specific cameo OR posts made by that user
+      const filterUsernameLower = analyzeCameoFilterUsername.toLowerCase().trim();
+      rows = rows.filter((r) => {
+        // Check if user appears as a cameo
+        const cameos = Array.isArray(r.cameo_usernames) ? r.cameo_usernames : [];
+        const hasCameo = cameos.some(c => {
+          if (typeof c !== 'string') return false;
+          return c.toLowerCase().trim() === filterUsernameLower;
+        });
+        
+        // Check if user is the owner/creator of the post
+        const ownerHandleLower = (r.ownerHandle || '').toLowerCase().trim();
+        const isOwner = ownerHandleLower === filterUsernameLower;
+        
+        return hasCameo || isOwner;
+      });
+    }
+    
     rows = sortRows(rows);
 
     const newTbody = document.createElement('tbody');
@@ -2846,15 +3961,64 @@ async function renderAnalyzeTable(force = false) {
 
       const owner = typeof r.ownerHandle === 'string' && r.ownerHandle ? r.ownerHandle : '';
       const captionRaw = typeof r.caption === 'string' && r.caption ? r.caption : r.id;
-      const fullLabel = owner ? `${owner} • ${captionRaw}` : captionRaw || '';
+      const cameos = Array.isArray(r.cameo_usernames) ? r.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
+      
+      // Build the full label with cast: "username cast charactername1, charactername2 - caption"
+      let fullLabel = '';
+      if (owner) {
+        if (cameos.length > 0) {
+          const cameoList = cameos.join(', ');
+          fullLabel = `${owner} cast ${cameoList} - ${captionRaw}`;
+        } else {
+          fullLabel = `${owner} - ${captionRaw}`;
+        }
+      } else {
+        fullLabel = captionRaw || '';
+      }
       a.title = fullLabel;
 
       if (owner) {
-        const u = document.createElement('span'); u.textContent = owner; u.style.fontWeight = '800'; a.appendChild(u);
-        const sep = document.createElement('span'); sep.textContent = ' - '; sep.style.fontWeight = '300'; a.appendChild(sep);
-        const c = document.createElement('span'); c.textContent = captionRaw || ''; c.style.fontWeight = '300'; a.appendChild(c);
+        const u = document.createElement('span'); 
+        u.textContent = owner; 
+        u.style.fontWeight = '800'; 
+        a.appendChild(u);
+        
+        if (cameos.length > 0) {
+          // Always show "cast" when there are cast members (even if owner is also in cast)
+          const castWord = document.createElement('span'); 
+          castWord.textContent = ' cast '; 
+          castWord.style.fontWeight = '300'; 
+          a.appendChild(castWord);
+          
+          // Add each cast username as a separate bold span
+          cameos.forEach((cameo, idx) => {
+            const cameoUser = document.createElement('span');
+            cameoUser.textContent = cameo;
+            cameoUser.style.fontWeight = '800';
+            a.appendChild(cameoUser);
+            if (idx < cameos.length - 1) {
+              const comma = document.createElement('span');
+              comma.textContent = ', ';
+              comma.style.fontWeight = '300';
+              a.appendChild(comma);
+            }
+          });
+        }
+        
+        const sep = document.createElement('span'); 
+        sep.textContent = ' - '; 
+        sep.style.fontWeight = '300'; 
+        a.appendChild(sep);
+        
+        const c = document.createElement('span'); 
+        c.textContent = captionRaw || ''; 
+        c.style.fontWeight = '300'; 
+        a.appendChild(c);
       } else {
-        const c = document.createElement('span'); c.textContent = captionRaw || ''; c.style.fontWeight = '300'; a.appendChild(c);
+        const c = document.createElement('span'); 
+        c.textContent = captionRaw || ''; 
+        c.style.fontWeight = '300'; 
+        a.appendChild(c);
       }
 
       a.onmouseenter = () => { a.style.textDecoration = 'underline'; };
@@ -2862,6 +4026,7 @@ async function renderAnalyzeTable(force = false) {
       tdPost.appendChild(a);
 
       const tdViews = mkTdNum(r.views);
+      const tdDuration = mkTdNum(r.duration || '—');
       const tdLikes = mkTdNum(r.likes);
       const tdRemixes = mkTdNum(r.remixes);
       const tdComments = mkTdNum(r.comments);
@@ -2873,6 +4038,7 @@ async function renderAnalyzeTable(force = false) {
       tr.appendChild(tdPrompt);
       tr.appendChild(tdPost);
       tr.appendChild(tdViews);
+      tr.appendChild(tdDuration);
       tr.appendChild(tdLikes);
       tr.appendChild(tdRemixes);
       tr.appendChild(tdComments);
@@ -2894,9 +4060,25 @@ async function renderAnalyzeTable(force = false) {
     const isAnalyzing = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
     if (!isAnalyzing && analyzeHeaderTextEl) {
       const hoursLabel = (n) => (Number(n) === 1 ? '1 hour' : `${n} hours`);
-      analyzeHeaderTextEl.textContent = rows.length
-        ? `${rows.length} top gens from the last ${hoursLabel(analyzeWindowHours)}`
-        : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
+      const username = analyzeCameoFilterUsername;
+      if (username) {
+        // User selected in dropdown
+        analyzeHeaderTextEl.textContent = rows.length
+          ? `${rows.length} top gen${rows.length === 1 ? '' : 's'} tied to ${username} from the last ${hoursLabel(analyzeWindowHours)}`
+          : `No top gens tied to ${username} for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
+      } else {
+        // Everyone selected (no filter)
+        analyzeHeaderTextEl.textContent = rows.length
+          ? `You've seen ${rows.length} top gens in the last ${hoursLabel(analyzeWindowHours)}.`
+          : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
+      }
+      // Show helper text if there are rows
+      // BUT hide it during gather mode OR during rapid analyze gather
+      if (analyzeHelperTextEl) {
+        const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
+        const shouldShow = rows.length > 0 && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+        analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
+      }
     }
   } finally {
     renderAnalyzeTable._busy = false;
@@ -2942,6 +4124,21 @@ async function renderAnalyzeTable(force = false) {
         return aCap.localeCompare(bCap) * dir;
       }
       if (key === 'views') return (a.views - b.views) * dir;
+      if (key === 'duration') {
+        // Parse duration strings like "10s" or "10.5s" to numeric values for sorting
+        const parseDuration = (d) => {
+          if (!d || d === '—') return -1;
+          const match = d.match(/^(\d+(?:\.\d+)?)s$/);
+          return match ? parseFloat(match[1]) : -1;
+        };
+        const aDur = parseDuration(a.duration);
+        const bDur = parseDuration(b.duration);
+        if (aDur !== bDur) {
+          return (aDur - bDur) * dir;
+        }
+        // If durations are equal, sort by views (descending)
+        return b.views - a.views;
+      }
       if (key === 'likes') return (a.likes - b.likes) * dir;
       if (key === 'remixes') return (a.remixes - b.remixes) * dir;
       if (key === 'comments') return (a.comments - b.comments) * dir;
@@ -2965,6 +4162,9 @@ async function renderAnalyzeTable(force = false) {
     stopRapidAnalyzeGather();
     showAnalyzeTable(false);
     if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'none';
+    if (analyzeCameoFilterWrap) analyzeCameoFilterWrap.style.display = 'none';
+    // Hide helper text during rapid gather
+    if (analyzeHelperTextEl) analyzeHelperTextEl.style.display = 'none';
 
     // Faster, longer bursts; no end detection
     const BURST_STEP_PX = 1200; // was 100
@@ -2992,11 +4192,15 @@ async function renderAnalyzeTable(force = false) {
       stopRapidAnalyzeGather();
       showAnalyzeTable(true);
       if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'flex';
+      if (analyzeCameoFilterWrap) analyzeCameoFilterWrap.style.display = 'flex';
       renderAnalyzeTable(true);
       setTimeout(() => {
         try {
           const hasRows = !!(analyzeTableEl && analyzeTableEl.tBodies[0] && analyzeTableEl.tBodies[0].rows.length);
-          if (analyzeHelperTextEl) analyzeHelperTextEl.style.display = hasRows ? '' : 'none';
+          // After rapid gather completes, show helper text if there are rows
+          if (analyzeHelperTextEl) {
+            analyzeHelperTextEl.style.display = hasRows ? '' : 'none';
+          }
         } catch {}
       }, 0);
     }, ANALYZE_RUN_MS);
@@ -3025,6 +4229,15 @@ async function renderAnalyzeTable(force = false) {
 
   async function enterAnalyzeMode() {
     analyzeActive = true;
+    
+    // On profile pages, set the cameo filter to the profile username BEFORE building overlay
+    if (isProfile()) {
+      const profileHandle = currentProfileHandleFromURL();
+      if (profileHandle) {
+        analyzeCameoFilterUsername = profileHandle;
+      }
+    }
+    
     const ov = ensureAnalyzeOverlay();
 
     hideAllCards(true);
@@ -3033,11 +4246,63 @@ async function renderAnalyzeTable(force = false) {
     if (typeof ov._recomputeSticky === 'function') ov._recomputeSticky();
 
     analyzeBtn && analyzeBtn.setActive && analyzeBtn.setActive(true);
-    // keep existing sort (don’t reset), only set defaults if nothing chosen
+    // keep existing sort (don't reset), only set defaults if nothing chosen
     if (!analyzeSortKey) analyzeSortKey = 'views';
     if (!analyzeSortDir) analyzeSortDir = 'desc';
 
-    startRapidAnalyzeGather();    // 10s burst to populate quickly
+    // On profile pages, update UI elements after overlay is built
+    if (isProfile() && analyzeCameoFilterUsername) {
+      // Update UI elements if they exist
+      if (analyzeCameoSelectEl) analyzeCameoSelectEl.value = analyzeCameoFilterUsername;
+    }
+
+    // Only start rapid gather on Top feed (not on profile pages or other feeds)
+    if (isTopFeed()) {
+      startRapidAnalyzeGather();    // 10s burst to populate quickly
+    } else if (isProfile()) {
+      // On profile pages, show "Loading..." initially
+      if (analyzeHeaderTextEl) {
+        analyzeHeaderTextEl.textContent = 'Loading...';
+      }
+      // On profile pages, show the table immediately
+      showAnalyzeTable(true);
+      if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'flex';
+      if (analyzeCameoFilterWrap) analyzeCameoFilterWrap.style.display = 'flex';
+      renderAnalyzeTable(true);
+      // Show helper text after rendering
+      setTimeout(() => {
+        try {
+          const hasRows = !!(analyzeTableEl && analyzeTableEl.tBodies[0] && analyzeTableEl.tBodies[0].rows.length);
+          // Hide helper text during gather mode OR during rapid analyze gather
+          if (analyzeHelperTextEl) {
+            const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
+            const shouldShow = hasRows && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+            analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
+          }
+        } catch {}
+      }, 100);
+    } else {
+      // On other feeds (For You, Following, etc.), show the table immediately like Profile
+      if (analyzeHeaderTextEl) {
+        analyzeHeaderTextEl.textContent = 'Loading...';
+      }
+      showAnalyzeTable(true);
+      if (analyzeSliderWrap) analyzeSliderWrap.style.display = 'flex';
+      if (analyzeCameoFilterWrap) analyzeCameoFilterWrap.style.display = 'flex';
+      renderAnalyzeTable(true);
+      // Show helper text after rendering (shown immediately on other pages unless gathering)
+      setTimeout(() => {
+        try {
+          const hasRows = !!(analyzeTableEl && analyzeTableEl.tBodies[0] && analyzeTableEl.tBodies[0].rows.length);
+          // Hide helper text during gather mode OR during rapid analyze gather
+          if (analyzeHelperTextEl) {
+            const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
+            const shouldShow = hasRows && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+            analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
+          }
+        } catch {}
+      }, 100);
+    }
     startAnalyzeAutoRefresh();    // then keep it fresh every minute
     updateControlsVisibility();
   }
@@ -3053,8 +4318,9 @@ async function renderAnalyzeTable(force = false) {
     const bar = controlBar || ensureControlBar();
     if (bar) {
       const f = bar.querySelector('[data-role="filter-btn"]');
+      const filterContainer = f ? f.closest('.sora-uv-filter-container') : null;
       const g = bar.querySelector('.sora-uv-gather-btn');
-      if (f) f.style.display = '';
+      if (filterContainer) filterContainer.style.display = '';
       if (g) g.style.display = '';
     }
 
@@ -3062,7 +4328,7 @@ async function renderAnalyzeTable(force = false) {
   }
 
   function toggleAnalyzeMode() {
-    if (!isTopFeed()) return;
+    if (isDrafts()) return; // Don't allow Analyze mode on Drafts page
     if (analyzeActive) exitAnalyzeMode();
     else enterAnalyzeMode();
   }
@@ -3162,7 +4428,7 @@ async function renderAnalyzeTable(force = false) {
     const deadline = state.refreshDeadline;
     if (deadline) {
       const remainingMs = Math.max(0, deadline - Date.now());
-      gatherTimerEl.textContent = `Refresh in ${fmtRefreshCountdown(remainingMs)}`;
+      gatherTimerEl.textContent = `Refreshing in ${fmtRefreshCountdown(remainingMs)}`;
     } else {
       gatherTimerEl.textContent = '';
     }
@@ -3195,8 +4461,8 @@ async function renderAnalyzeTable(force = false) {
 
     if (isTopFeed()) {
       // === TOP: keep 10m loop ===
-      const refreshMs = 5 * 60 * 1000;
-      const TOP_PX_PER_STEP = 16; //  1 → ~75 px/s
+      const refreshMs = 10 * 60 * 1000;
+      const TOP_PX_PER_STEP = 7; //  67% of 10.66 (33% slower)
 
       const s0 = getGatherState() || {};
       if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now()) {
@@ -3229,9 +4495,9 @@ async function renderAnalyzeTable(force = false) {
     const t = Math.min(1, Math.max(0, Number(speedValue) / 100));
 
     // Map slider to pixels-per-second (slow → fast)
-    const PPS_SLOW = 50;    // px/s at far left
-    const PPS_MID = 1500;   // px/s mid
-    const PPS_FAST = 3000;    // px/s far right
+    const PPS_SLOW = 100;    // px/s at far left
+    const PPS_MID = 900;   // px/s mid
+    const PPS_FAST = 1800;    // px/s far right
 
     const lerp = (a, b, u) => a + (b - a) * u;
     let pps;
@@ -3246,7 +4512,7 @@ async function renderAnalyzeTable(force = false) {
     // randomized refresh window (unchanged)
     const speedSlow = { rMin: 15 * 60000, rMax: 17 * 60000 };
     const speedMid  = { rMin: 7 * 60000,  rMax: 9 * 60000 };
-    const speedFast = { rMin: 1 * 60000,  rMax: 2 * 60000 };
+    const speedFast = { rMin: 5 * 60000,  rMax: 6 * 60000 };
 
     let refreshMinMs, refreshMaxMs;
     if (t <= 0.5) {
@@ -3329,6 +4595,23 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function looksLikePostDetail(json) {
+    try {
+      // Post detail has structure: { post: {...}, profile: {...}, remix_posts: {...}, ancestors: {...} }
+      const p = json?.post;
+      if (!p || typeof p !== 'object') return false;
+      
+      // Check if it has typical post fields
+      if (typeof p?.id === 'string' && /^s_[A-Za-z0-9]+$/.test(p.id)) return true;
+      if (p?.unique_view_count != null || p?.view_count != null) return true;
+      if (Array.isArray(p?.attachments) && p.attachments.length) return true;
+      
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
     const origFetch = window.fetch;
@@ -3353,8 +4636,16 @@ async function renderAnalyzeTable(force = false) {
           }
         }
 
-        // Check DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
-        if (CHARACTERS_RE.test(url)) {
+        // Check POST_DETAIL_RE, DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
+        if (POST_DETAIL_RE.test(url)) {
+          dlog('feed', 'fetch matched post detail', { url });
+          res.clone().json().then((j) => {
+            dlog('feed', 'post detail parsed', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
+            processPostDetailJson(j);
+          }).catch((err) => {
+            console.error('[SoraUV] Error parsing post detail fetch response:', err);
+          });
+        } else if (CHARACTERS_RE.test(url)) {
           res.clone().json().then(processCharactersJson).catch((err) => {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
@@ -3377,8 +4668,11 @@ async function renderAnalyzeTable(force = false) {
             .clone()
             .json()
             .then((j) => {
-              if (looksLikeSoraFeed(j)) {
-                dlog('feed', 'fetch autodetected', { url, items: (j?.items || j?.data?.items || []).length });
+              if (looksLikePostDetail(j)) {
+                dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
+                processPostDetailJson(j);
+              } else if (looksLikeSoraFeed(j)) {
+                dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
                 processFeedJson(j);
               }
             })
@@ -3408,8 +4702,17 @@ async function renderAnalyzeTable(force = false) {
               }
             }
 
-            // Check CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
-            if (CHARACTERS_RE.test(url)) {
+            // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
+            if (POST_DETAIL_RE.test(url)) {
+              dlog('feed', 'xhr matched post detail', { url });
+              try {
+                const j = JSON.parse(this.responseText);
+                dlog('feed', 'post detail parsed (XHR)', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
+                processPostDetailJson(j);
+              } catch (err) {
+                console.error('[SoraUV] Error parsing post detail XHR:', err);
+              }
+            } else if (CHARACTERS_RE.test(url)) {
               try {
                 processCharactersJson(JSON.parse(this.responseText));
               } catch (err) {
@@ -3431,8 +4734,11 @@ async function renderAnalyzeTable(force = false) {
             } else if (url.startsWith(location.origin)) {
               try {
                 const j = JSON.parse(this.responseText);
-                if (looksLikeSoraFeed(j)) {
-                  dlog('feed', 'xhr autodetected', { url, items: (j?.items || j?.data?.items || []).length });
+                if (looksLikePostDetail(j)) {
+                  dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
+                  processPostDetailJson(j);
+                } else if (looksLikeSoraFeed(j)) {
+                  dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
                   processFeedJson(j);
                 }
               } catch {}
@@ -3488,12 +4794,35 @@ async function renderAnalyzeTable(force = false) {
       const id = getItemId(it);
       if (!id) continue;
 
+      // Safety check: ensure we don't process comments/replies as if they were the main post
+      // This happens because comments often contain the post_id they belong to, and getItemId finds it via deep search
+      const rawP = it?.post || it || {};
+      if (rawP.post_id && rawP.post_id === id && rawP.id !== id) {
+        continue;
+      }
+
       const uv = getUniqueViews(it);
       const likes = getLikes(it);
       const tv = getTotalViews(it);
       const cm = getComments(it);
       const rx = getRemixes(it);
       const cx = getCameos(it);
+      const cameoUsernames = getCameoUsernames(it);
+      if (cameoUsernames && cameoUsernames.length > 0) {
+        dlog('feed', 'extracted cameo usernames', { id, cameoUsernames, itemKeys: Object.keys(it || {}), postKeys: Object.keys(it?.post || {}) });
+      } else {
+        // Debug: log the structure to see what fields are available
+        const p = it?.post || it || {};
+        const castRelatedKeys = Object.keys(p || {}).filter(k => 
+          k.toLowerCase().includes('cast') || k.toLowerCase().includes('cameo'));
+        if (castRelatedKeys.length > 0) {
+          dlog('feed', 'found cast-related keys but no usernames extracted', { 
+            id, 
+            castRelatedKeys,
+            sampleValues: castRelatedKeys.slice(0, 3).map(k => ({ key: k, value: p[k], type: typeof p[k] }))
+          });
+        }
+      }
       const p = it?.post || it || {};
       const created_at =
         p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
@@ -3502,11 +4831,91 @@ async function renderAnalyzeTable(force = false) {
       const ageMin = minutesSince(created_at);
       const th = getThumbnail(it);
 
-      if (uv != null) idToUnique.set(id, uv);
-      if (likes != null) idToLikes.set(id, likes);
-      if (tv != null) idToViews.set(id, tv);
-      if (cm != null) idToComments.set(id, cm);
-      if (rx != null) idToRemixes.set(id, rx);
+      // Extract video duration from n_frames (Sora uses 30 fps for published posts)
+      try {
+        let nFrames = null;
+        let width = null;
+        let height = null;
+
+        // Strategy 1: attachments
+        const attachments = Array.isArray(p?.attachments) ? p.attachments : null;
+        if (attachments && attachments.length > 0) {
+          const att = attachments[0];
+          if (att?.n_frames != null) nFrames = Number(att.n_frames);
+          if (att?.width != null) width = Number(att.width);
+          if (att?.height != null) height = Number(att.height);
+          
+          if (DEBUG.feed && nFrames == null) {
+             dlog('feed', 'attachments found but n_frames missing', { id, attKeys: Object.keys(att) });
+          }
+        } else if (DEBUG.feed) {
+           dlog('feed', 'no attachments found', { id, pKeys: Object.keys(p || {}) });
+        }
+
+        // Strategy 2: creation_config (seen in drafts, maybe in feed too)
+        if (nFrames == null) {
+          const cc = p?.creation_config || it?.creation_config;
+          if (cc) {
+            if (cc.n_frames != null) nFrames = Number(cc.n_frames);
+          }
+        }
+
+        // Strategy 3: video_metadata or direct
+        if (nFrames == null || isNaN(nFrames)) {
+             if (p?.n_frames != null) nFrames = Number(p.n_frames);
+             
+             // Check video_metadata
+             if ((nFrames == null || isNaN(nFrames)) && p?.video_metadata) {
+               if (p.video_metadata.n_frames != null) nFrames = Number(p.video_metadata.n_frames);
+             }
+        }
+
+        if (typeof nFrames === 'number' && !isNaN(nFrames) && nFrames > 0) {
+          // Published posts use 30 fps
+          const duration = nFrames / 30;
+          idToDuration.set(id, duration);
+        } else if (DEBUG.feed) {
+           // Log when we fail to extract frames, to help debug
+           dlog('feed', 'failed to extract frames', { 
+             id, 
+             hasAttachments: !!(p?.attachments && p.attachments.length),
+             hasCreationConfig: !!(p?.creation_config || it?.creation_config),
+             keys: Object.keys(p || {})
+           });
+        }
+
+        if (typeof width === 'number' && typeof height === 'number') {
+          idToDimensions.set(id, { width, height });
+        }
+      } catch (e) {
+        // Ignore extraction errors
+      }
+
+      // Helper to safely update metrics, respecting locks and avoiding zero overwrites
+      const updateMetric = (map, val) => {
+        if (val == null) return;
+        const existing = map.get(id);
+        const isLocked = lockedPostIds.has(id);
+        if (isLocked) {
+          // For locked posts, only allow improvements (greater than existing)
+          if (existing == null || val > existing) {
+            map.set(id, val);
+          } else if (existing > 0 && val === 0) {
+            dlog('feed', 'BLOCKED: locked post metric zero overwrite', { id, existing, val });
+          }
+        } else {
+          // For unlocked posts, allow typical improvements / first set
+          if (existing == null || val > existing || (existing === 0 && val > 0)) {
+            map.set(id, val);
+          }
+        }
+      };
+
+      updateMetric(idToUnique, uv);
+      updateMetric(idToLikes, likes);
+      updateMetric(idToViews, tv);
+      updateMetric(idToComments, cm);
+      updateMetric(idToRemixes, rx);
 
       const absUrl = `${location.origin}/p/${id}`;
       const owner = getOwner(it);
@@ -3514,10 +4923,19 @@ async function renderAnalyzeTable(force = false) {
       const userId = owner.id || null;
 
       // store owner with meta so Analyze can render "<owner> • <caption>"
-      idToMeta.set(id, { ageMin, userHandle });
+      // Respect locks so the current post's meta (age/timestamp) is not overwritten by other packets
+      const isLockedMeta = lockedPostIds.has(id);
+      const existingMeta = idToMeta.get(id);
+      if (!isLockedMeta || !existingMeta) {
+        idToMeta.set(id, { ageMin, userHandle });
+      }
 
       const userKey = userHandle ? `h:${userHandle.toLowerCase()}` : userId != null ? `id:${userId}` : pageUserKey;
       const followers = getFollowerCount(it);
+
+      // Get duration and dimensions that were just extracted above
+      const duration = idToDuration.get(id);
+      const dimensions = idToDimensions.get(id);
 
       batch.push({
         postId: id,
@@ -3528,6 +4946,7 @@ async function renderAnalyzeTable(force = false) {
         remixes: rx,
         remix_count: rx,
         cameos: cx,
+        cameo_usernames: cameoUsernames,
         followers,
         created_at,
         caption,
@@ -3542,7 +4961,139 @@ async function renderAnalyzeTable(force = false) {
         root_post_id: p?.root_post_id ?? null,
         pageUserHandle,
         pageUserKey,
+        duration: duration || null,
+        width: dimensions?.width || null,
+        height: dimensions?.height || null,
       });
+      
+      // Also process remix_posts (child remixes) to make their data available when clicked
+      // remix_posts can be either an array OR an object with items array
+      const remixPostsData = p?.remix_posts || it?.remix_posts;
+      const remixPosts = Array.isArray(remixPostsData) 
+        ? remixPostsData 
+        : (Array.isArray(remixPostsData?.items) ? remixPostsData.items : []);
+      
+      if (remixPosts.length > 0) {
+        for (const remixItem of remixPosts) {
+          const remixId = getItemId(remixItem);
+          if (!remixId) continue;
+          
+          // Extract all the same data for the remix post
+          const remixUv = getUniqueViews(remixItem);
+          const remixLikes = getLikes(remixItem);
+          const remixTv = getTotalViews(remixItem);
+          const remixCm = getComments(remixItem);
+          const remixRx = getRemixes(remixItem);
+          const remixCx = getCameos(remixItem);
+          const remixCameoUsernames = getCameoUsernames(remixItem);
+          
+          const remixP = remixItem?.post || remixItem || {};
+          const remixCreatedAt = remixP?.created_at ?? remixP?.uploaded_at ?? remixP?.createdAt ?? remixP?.created ?? remixP?.posted_at ?? remixP?.timestamp ?? null;
+          const remixCaption = (typeof remixP?.caption === 'string' && remixP.caption) ? remixP.caption : (typeof remixP?.text === 'string' && remixP.text ? remixP.text : null);
+          const remixAgeMin = minutesSince(remixCreatedAt);
+          const remixTh = getThumbnail(remixItem);
+          
+          // Extract duration and dimensions for remix
+          try {
+            let remixNFrames = null;
+            let remixWidth = null;
+            let remixHeight = null;
+            
+            const remixAttachments = Array.isArray(remixP?.attachments) ? remixP.attachments : null;
+            if (remixAttachments && remixAttachments.length > 0) {
+              const att = remixAttachments[0];
+              if (att?.n_frames != null) remixNFrames = Number(att.n_frames);
+              if (att?.width != null) remixWidth = Number(att.width);
+              if (att?.height != null) remixHeight = Number(att.height);
+            }
+            
+            if (remixNFrames == null) {
+              const cc = remixP?.creation_config || remixItem?.creation_config;
+              if (cc && cc.n_frames != null) remixNFrames = Number(cc.n_frames);
+            }
+            
+            if (remixNFrames == null || isNaN(remixNFrames)) {
+              if (remixP?.n_frames != null) remixNFrames = Number(remixP.n_frames);
+              if ((remixNFrames == null || isNaN(remixNFrames)) && remixP?.video_metadata) {
+                if (remixP.video_metadata.n_frames != null) remixNFrames = Number(remixP.video_metadata.n_frames);
+              }
+            }
+            
+            if (typeof remixNFrames === 'number' && !isNaN(remixNFrames) && remixNFrames > 0) {
+              const remixDuration = remixNFrames / 30;
+              idToDuration.set(remixId, remixDuration);
+            }
+            
+            if (typeof remixWidth === 'number' && typeof remixHeight === 'number') {
+              idToDimensions.set(remixId, { width: remixWidth, height: remixHeight });
+            }
+          } catch (e) {
+            // Ignore extraction errors
+          }
+          
+          // Store in Maps - only update if we don't have data OR new data is better
+          // Remixes are not locked, but still avoid zero overwrites
+          const updateRemixMetric = (map, val) => {
+            if (val == null) return;
+            const existing = map.get(remixId);
+            if (existing == null || val > existing || (existing === 0 && val > 0)) {
+              map.set(remixId, val);
+            }
+          };
+
+          updateRemixMetric(idToUnique, remixUv);
+          updateRemixMetric(idToLikes, remixLikes);
+          updateRemixMetric(idToViews, remixTv);
+          updateRemixMetric(idToComments, remixCm);
+          updateRemixMetric(idToRemixes, remixRx);
+          
+          const remixAbsUrl = `${location.origin}/p/${remixId}`;
+          const remixOwner = getOwner(remixItem);
+          const remixUserHandle = remixOwner.handle || pageUserHandle || null;
+          const remixUserId = remixOwner.id || null;
+          
+          // Meta for remixes; not locked, but avoid overwriting if already set with a higher-quality value
+          const existingRemixMeta = idToMeta.get(remixId);
+          if (!existingRemixMeta) {
+            idToMeta.set(remixId, { ageMin: remixAgeMin, userHandle: remixUserHandle });
+          }
+          
+          const remixUserKey = remixUserHandle ? `h:${remixUserHandle.toLowerCase()}` : remixUserId != null ? `id:${remixUserId}` : pageUserKey;
+          const remixFollowers = getFollowerCount(remixItem);
+          
+          const remixDuration = idToDuration.get(remixId);
+          const remixDimensions = idToDimensions.get(remixId);
+          
+          batch.push({
+            postId: remixId,
+            uv: remixUv,
+            likes: remixLikes,
+            views: remixTv,
+            comments: remixCm,
+            remixes: remixRx,
+            remix_count: remixRx,
+            cameos: remixCx,
+            cameo_usernames: remixCameoUsernames,
+            followers: remixFollowers,
+            created_at: remixCreatedAt,
+            caption: remixCaption,
+            ageMin: remixAgeMin,
+            thumb: remixTh,
+            url: remixAbsUrl,
+            ts: Date.now(),
+            userHandle: remixUserHandle,
+            userId: remixUserId,
+            userKey: remixUserKey,
+            parent_post_id: remixP?.parent_post_id ?? id, // Link to parent
+            root_post_id: remixP?.root_post_id ?? null,
+            pageUserHandle,
+            pageUserKey,
+            duration: remixDuration || null,
+            width: remixDimensions?.width || null,
+            height: remixDimensions?.height || null,
+          });
+        }
+      }
     }
 
     if (batch.length)
@@ -3551,8 +5102,102 @@ async function renderAnalyzeTable(force = false) {
       } catch {}
 
     renderBadges();
-    renderDetailBadge();
+    if (!suppressDetailBadgeRender) {
+      renderDetailBadge();
+    }
     renderProfileImpact();
+  }
+
+  function processPostDetailJson(json) {
+    // Process post detail page response (e.g., /posts/{id}/tree)
+    // Structure: { post: {...}, profile: {...}, remix_posts: {items: [...]}, ancestors: {items: [...]}, parent_post: {...}, children: {items: [...]} }
+    
+    const mainPostId = json?.post?.id;
+    const currentSid = currentSIdFromURL();
+    const isCurrentPost = !!(mainPostId && currentSid && mainPostId === currentSid);
+    if (mainPostId && processedPostDetailIds.has(mainPostId) && isCurrentPost) {
+      dlog('feed', 'processPostDetailJson skipped (already processed current)', { postId: mainPostId, currentSid });
+      return;
+    }
+    dlog('feed', 'processPostDetailJson', { 
+      hasPost: !!json?.post, 
+      postId: mainPostId,
+      currentSid,
+      isCurrentPost,
+      hasRemixes: !!json?.remix_posts?.items?.length,
+      hasAncestors: !!json?.ancestors?.items?.length 
+    });
+    
+    // Suppress renderDetailBadge during bulk processing to prevent flickering/wrong data
+    suppressDetailBadgeRender = true;
+    
+    try {
+      // Process the main post FIRST and LOCK it to prevent remix/ancestor data from overwriting it
+      if (json?.post && mainPostId) {
+        const postWrapper = { post: json.post };
+        if (json.profile) {
+          postWrapper.profile = json.profile;
+        }
+        processFeedJson({ items: [postWrapper] });
+        
+        // Lock this post's data only if it matches the currently viewed post
+        if (isCurrentPost) {
+          lockedPostIds.add(mainPostId);
+          processedPostDetailIds.add(mainPostId);
+          
+          dlog('feed', 'processed and LOCKED current main post', { 
+            id: mainPostId, 
+            uv: json.post.unique_view_count,
+            likes: json.post.like_count,
+            stored_uv: idToUnique.get(mainPostId),
+            stored_likes: idToLikes.get(mainPostId)
+          });
+        } else {
+          dlog('feed', 'processed main post (not current, not locked)', { id: mainPostId, currentSid });
+        }
+      }
+      
+      // Now process other data (their data can still be stored, but won't overwrite locked posts)
+      
+      // Process ancestors (these are parent posts in the chain)
+      if (json?.ancestors?.items && Array.isArray(json.ancestors.items)) {
+        processFeedJson({ items: json.ancestors.items });
+        dlog('feed', 'processed ancestors', { count: json.ancestors.items.length });
+      }
+      
+      // Process parent_post (immediate parent)
+      if (json?.parent_post) {
+        processFeedJson({ items: [json.parent_post] });
+        dlog('feed', 'processed parent_post');
+      }
+      
+      // Process remix_posts (child remixes - these should NOT affect the main post)
+      if (json?.remix_posts?.items && Array.isArray(json.remix_posts.items)) {
+        processFeedJson({ items: json.remix_posts.items });
+        dlog('feed', 'processed remix_posts', { count: json.remix_posts.items.length });
+      }
+      
+      // Process children (replies/comments)
+      if (json?.children?.items && Array.isArray(json.children.items)) {
+        processFeedJson({ items: json.children.items });
+        dlog('feed', 'processed children', { count: json.children.items.length });
+      }
+      
+      // Verify main post data is still correct after all processing
+      if (mainPostId) {
+        dlog('feed', 'After all processing - main post data', {
+          id: mainPostId,
+          stored_uv: idToUnique.get(mainPostId),
+          stored_likes: idToLikes.get(mainPostId),
+          stored_remixes: idToRemixes.get(mainPostId)
+        });
+      }
+    } finally {
+      // Re-enable rendering and trigger a single render with all data loaded
+      suppressDetailBadgeRender = false;
+      renderDetailBadge();
+      dlog('feed', 'processPostDetailJson complete, rendered badges');
+    }
   }
 
   function processDraftsJson(json) {
@@ -3997,6 +5642,7 @@ async function renderAnalyzeTable(force = false) {
       renderDraftButtons();
       renderCharacterStats();
       updateControlsVisibility();
+      injectDashboardButton();
     });
   });
 
@@ -4008,6 +5654,7 @@ async function renderAnalyzeTable(force = false) {
     renderBookmarkButtons();
     renderDraftButtons();
     updateControlsVisibility();
+    injectDashboardButton();
   }
 
   function resetFilterFreshSlate() {
@@ -4059,19 +5706,24 @@ async function renderAnalyzeTable(force = false) {
     } else bar.style.display = 'flex';
 
     const filterBtn = bar.querySelector('[data-role="filter-btn"]');
+    const filterContainer = filterBtn ? filterBtn.closest('.sora-uv-filter-container') : null;
     const gatherBtn = bar.querySelector('.sora-uv-gather-btn');
     const gatherControlsWrapper = bar.querySelector('.sora-uv-gather-controls-wrapper');
     const sliderContainer = bar.querySelector('.sora-uv-slider-container');
 
     // Hide Filter/Gather entirely during Analyze mode
     if (analyzeActive) {
-      if (filterBtn) filterBtn.style.display = 'none';
+      if (filterContainer) filterContainer.style.display = 'none';
       if (gatherBtn) gatherBtn.style.display = 'none';
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
       if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
 
       // Position on the right (default)
-      bar.style.top = '12px';
+      if (typeof bar.updateBarPosition === 'function') {
+        bar.updateBarPosition();
+      } else {
+        bar.style.top = '12px';
+      }
       bar.style.right = '12px';
       bar.style.left = 'auto';
       bar.style.transform = 'none';
@@ -4080,30 +5732,13 @@ async function renderAnalyzeTable(force = false) {
     }
 
     // Normal visibility rules (when NOT analyzing)
-    if (isProfile() || isTopFeed()) {
-      if (gatherBtn) gatherBtn.style.display = '';
-      if (filterBtn) filterBtn.style.display = '';
-      if (gatherControlsWrapper) gatherControlsWrapper.style.display = isGatheringActiveThisTab ? 'flex' : 'none';
-      if (sliderContainer) sliderContainer.style.display = isProfile() ? 'flex' : 'none';
-      bar.updateGatherState();
-
-      // Position on the right (default)
-      bar.style.top = '12px';
-      bar.style.right = '12px';
-      bar.style.left = 'auto';
-      bar.style.transform = 'none';
-    } else if (isDrafts()) {
+    // Gather button: ONLY show on Top feed (feed=top) or Profile pages
+    // Explicitly hide on drafts pages and other explore feeds (feed=following, feed=latest, or no feed param)
+    
+    // First, handle drafts page - always hide Gather on drafts
+    if (isDrafts()) {
       // On drafts page: hide Filter, Gather, and controls
-      if (filterBtn) filterBtn.style.display = 'none';
-      if (gatherBtn) gatherBtn.style.display = 'none';
-      if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
-
-      // Position centered horizontally to avoid overlapping native buttons on both sides
-      bar.style.top = '12px';
-      bar.style.left = '50%';
-      bar.style.right = 'auto';
-      bar.style.transform = 'translateX(-50%)';
-    } else {
+      if (filterContainer) filterContainer.style.display = 'none';
       if (gatherBtn) gatherBtn.style.display = 'none';
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
       if (isGatheringActiveThisTab) {
@@ -4114,17 +5749,60 @@ async function renderAnalyzeTable(force = false) {
         setGatherState(sState);
         bar.updateGatherState();
       }
-      if (filterBtn) filterBtn.style.display = '';
+
+      // Position centered horizontally to avoid overlapping native buttons on both sides
+      if (typeof bar.updateBarPosition === 'function') {
+        bar.updateBarPosition();
+      } else {
+        bar.style.top = '12px';
+      }
+      bar.style.left = '50%';
+      bar.style.right = 'auto';
+      bar.style.transform = 'translateX(-50%)';
+    } else if (isProfile() || isTopFeed()) {
+      // Show Gather on Profile pages or Top feed
+      if (gatherBtn) gatherBtn.style.display = 'flex';
+      if (filterContainer) filterContainer.style.display = '';
+      if (gatherControlsWrapper) gatherControlsWrapper.style.display = isGatheringActiveThisTab ? 'flex' : 'none';
+      if (sliderContainer) sliderContainer.style.display = isProfile() ? 'flex' : 'none';
+      bar.updateGatherState();
 
       // Position on the right (default)
-      bar.style.top = '12px';
+      if (typeof bar.updateBarPosition === 'function') {
+        bar.updateBarPosition();
+      } else {
+        bar.style.top = '12px';
+      }
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
+    } else {
+      // On other explore feeds (feed=following, feed=latest, or no feed param) or other pages, hide Gather
+      if (gatherBtn) gatherBtn.style.display = 'none';
+      if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
+      if (isGatheringActiveThisTab) {
+        isGatheringActiveThisTab = false;
+        let sState = getGatherState();
+        sState.isGathering = false;
+        delete sState.refreshDeadline;
+        setGatherState(sState);
+        bar.updateGatherState();
+      }
+      if (filterContainer) filterContainer.style.display = '';
+
+      // Position on the right (default)
+      if (typeof bar.updateBarPosition === 'function') {
+        bar.updateBarPosition();
+      } else {
+        bar.style.top = '12px';
+      }
       bar.style.right = '12px';
       bar.style.left = 'auto';
       bar.style.transform = 'none';
     }
 
-    // Analyze button only on Top feed
-    if (analyzeBtn) analyzeBtn.style.display = isTopFeed() ? '' : 'none';
+    // Analyze button on all feeds except Drafts
+    if (analyzeBtn) analyzeBtn.style.display = isDrafts() ? 'none' : '';
 
     // Bookmarks button only on Drafts page
     if (bookmarksBtn) bookmarksBtn.style.display = isDrafts() ? '' : 'none';
@@ -4144,17 +5822,31 @@ async function renderAnalyzeTable(force = false) {
       lastAppliedFilterState = -1;
       if (bookmarksBtn) {
         bookmarksBtn.setActive(false);
-        bookmarksBtn.setLabel('Filter');
+        bookmarksBtn.setLabel('All Drafts');
       }
       // Invalidate draft card cache on navigation
       cachedDraftCards = null;
       cachedDraftCardsCount = 0;
       processedDraftCardsCount = 0;
       processedDraftCards = new WeakSet(); // Reset to clear stale DOM references; navigation may remove/replace draft card elements, so previous references may no longer be valid
+      
+      // Clear locks only if route truly changed; keep processed IDs for later skips
+      lockedPostIds.clear();
+      processedPostDetailIds.clear();
+      dlog('feed', 'Navigation detected - cleared locked/processed post IDs');
     }
 
     const bar = ensureControlBar();
     if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+
+    // If on a post page, try to fetch data if not available
+    if (isPost()) {
+      fetchPostDataIfNeeded();
+      // Clear cached detail badge element on navigation to force re-finding
+      if (navigated && detailBadgeEl) {
+        detailBadgeEl = null;
+      }
+    }
 
     renderBadges();
     renderDetailBadge();
@@ -4162,6 +5854,23 @@ async function renderAnalyzeTable(force = false) {
     renderBookmarkButtons();
     renderDraftButtons();
     updateControlsVisibility();
+    injectDashboardButton();
+    
+    // On post pages, retry rendering detail badge after a delay to allow DOM to settle
+    if (isPost() && navigated) {
+      setTimeout(() => {
+        detailBadgeEl = null; // Force re-find
+        renderDetailBadge();
+      }, 100);
+      setTimeout(() => {
+        detailBadgeEl = null;
+        renderDetailBadge();
+      }, 300);
+      setTimeout(() => {
+        detailBadgeEl = null;
+        renderDetailBadge();
+      }, 600);
+    }
   }
 
   // == Prefs ==
@@ -4237,14 +5946,128 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  // Inject dashboard button into left sidebar
+  function injectDashboardButton() {
+    // Check if button already exists
+    if (document.querySelector('.sora-uv-dashboard-btn')) return;
+
+    // Find the left sidebar - it has specific classes
+    const sidebar = document.querySelector('div.fixed.left-0.top-0.z-50');
+    if (!sidebar) {
+      // Retry after a delay if sidebar not found yet
+      setTimeout(injectDashboardButton, 1000);
+      return;
+    }
+
+    // Find the notification bell button (last activity button before profile)
+    const buttons = sidebar.querySelectorAll('button[aria-label="Activity"]');
+    const notificationButton = buttons[buttons.length - 1]; // Get the last "Activity" button (notification bell)
+    
+    if (!notificationButton) {
+      setTimeout(injectDashboardButton, 1000);
+      return;
+    }
+
+    // Create dashboard button matching Sora's style (slightly larger)
+    const dashboardBtn = document.createElement('button');
+    dashboardBtn.className = 'sora-uv-dashboard-btn p-3.5 group data-[state=open]:opacity-100 opacity-50 hover:opacity-100 focus-visible:opacity-100';
+    dashboardBtn.setAttribute('aria-label', 'Dashboard');
+    dashboardBtn.setAttribute('type', 'button');
+    dashboardBtn.setAttribute('data-state', 'closed');
+    // Adjust padding to match other icons better
+    dashboardBtn.style.padding = '13px';
+
+    // Create the chart icon (inline and hover/focus states) - slightly larger
+    const iconSpanInline = document.createElement('span');
+    iconSpanInline.className = 'inline group-hover:hidden group-focus-visible:hidden group-data-[state=open]:hidden';
+    iconSpanInline.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" viewBox="0 0 24 24" fill="none" class="h-6 w-6">
+      <path d="M4 4V18H20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M5 16L9 11L13 14L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>`;
+
+    const iconSpanHover = document.createElement('span');
+    iconSpanHover.className = 'hidden group-hover:inline group-focus-visible:inline group-data-[state=open]:inline';
+    iconSpanHover.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" viewBox="0 0 24 24" fill="none" class="h-6 w-6">
+      <path d="M4 4V18H20" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M5 16L9 11L13 14L18 6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>`;
+
+    const srOnly = document.createElement('div');
+    srOnly.className = 'sr-only';
+    srOnly.textContent = 'Dashboard';
+
+    dashboardBtn.appendChild(iconSpanInline);
+    dashboardBtn.appendChild(iconSpanHover);
+    dashboardBtn.appendChild(srOnly);
+
+    // Insert before the notification button (above it)
+    notificationButton.parentNode.insertBefore(dashboardBtn, notificationButton);
+    
+    try {
+      console.log('[SoraUV] Dashboard button injected into left sidebar');
+    } catch {}
+  }
+
+  // Global click delegation for the dashboard button
+  // This is more robust than attaching a listener to the element, which might be cloned or replaced by React
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.sora-uv-dashboard-btn');
+    if (!btn) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+
+    let profileHandle = null;
+    let profileUserKey = null;
+    // On profile pages, carry the profile handle into the dashboard dropdown (like Analyze)
+    if (isProfile()) {
+      profileHandle = currentProfileHandleFromURL();
+      if (profileHandle) {
+        profileUserKey = `h:${profileHandle.toLowerCase()}`;
+        analyzeCameoFilterUsername = profileHandle;
+        if (analyzeCameoSelectEl) {
+          analyzeCameoSelectEl.value = profileHandle;
+        }
+      }
+    }
+    
+    // Send message to content script
+    try {
+      window.postMessage({
+        __sora_uv__: true,
+        type: 'open_dashboard',
+        userKey: profileUserKey,
+        userHandle: profileHandle || null,
+      }, '*');
+    } catch {}
+  }, true); // Capture phase to ensure we get it first
+
+  function ensureToastStyles() {
+    if (document.getElementById('sora-uv-toast-style')) return;
+    const st = document.createElement('style');
+    st.id = 'sora-uv-toast-style';
+    st.textContent = `
+      [data-sonner-toaster="true"], 
+      section[aria-label="Notifications alt+T"],
+      ol[data-sonner-toaster="true"] {
+        z-index: 2147483647 !important;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
   function init() {
     dlog('feed', 'init');
+    ensureToastStyles();
     // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
     startObservers();
     onRouteChange();
     window.addEventListener('storage', handleStorageChange);
+
+    // Inject dashboard button into left sidebar
+    injectDashboardButton();
 
     // Check for pending redo prompt (from remix navigation)
     checkPendingRedoPrompt();

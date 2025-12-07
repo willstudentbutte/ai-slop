@@ -36,6 +36,7 @@
     </aside>
     <section class="content">
       <h3 class="section-title section-title-first">Individual Metrics</h3>
+      <p style="color: var(--muted); font-size: 14px; margin-top: -8px; margin-bottom: 16px;">Keep Gather mode running in a new window on any profile for always up-to-date data</p>
       <div class="user-select-section">
         <div class="user-select-header">
           <div class="user-picker">
@@ -45,34 +46,55 @@
           <select id="userSelect" title="All users" class="user-select-dropdown"></select>
         </div>
       </div>
-      <div id="viewsSummary" class="metric-card" title="Sum of latest views for visible posts">
-        <span class="label">Views</span>
-        <span id="viewsTotal" class="value">0</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px 8px; margin-bottom: 12px;">
+        <div id="totalViewsSummary" class="metric-card" title="Sum of latest total views for visible posts">
+          <span id="totalViewsTotal" class="value">0</span>
+          <span class="label">Total Views</span>
+        </div>
+        <div id="uniqueViewsSummary" class="metric-card" title="Sum of latest unique views for visible posts">
+          <span id="uniqueViewsTotal" class="value">0</span>
+          <span class="label">Unique Views</span>
+        </div>
+        <div id="likesSummary" class="metric-card" title="Sum of latest likes for visible posts">
+          <span id="likesTotal" class="value">0.00</span>
+          <span class="label">Likes</span>
+        </div>
+        <div id="repliesSummary" class="metric-card" title="Sum of latest replies for visible posts (non-recursive)">
+          <span id="repliesTotal" class="value">0.00</span>
+          <span class="label">Replies</span>
+        </div>
+        <div id="remixesSummary" class="metric-card" title="Sum of latest recursive remixes for visible posts">
+          <span id="remixesTotal" class="value">0.00</span>
+          <span class="label">Recursive Remixes</span>
+        </div>
+        <div id="interactionsSummary" class="metric-card" title="Sum of latest interactions (likes + comments) for visible posts">
+          <span id="interactionsTotal" class="value">0.00</span>
+          <span class="label">Interactions</span>
+        </div>
+        <div id="userCameosSummary" class="metric-card" title="Profile cast in count">
+          <span id="userCameosTotal" class="value">0</span>
+          <span class="label">Cast in</span>
+        </div>
+        <div id="userFollowersSummary" class="metric-card" title="Latest follower count">
+          <span id="userFollowersTotal" class="value">0</span>
+          <span class="label">Followers</span>
+        </div>
       </div>
-      <div id="likesSummary" class="metric-card" title="Sum of latest likes for visible posts">
-        <span class="label">Likes</span>
-        <span id="likesTotal" class="value">0.00</span>
+      <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+        <button id="uniqueViewsPill" class="views-pill active" data-type="unique">Unique Views</button>
+        <button id="totalViewsPill" class="views-pill" data-type="total">Total Views</button>
       </div>
-      <div id="repliesSummary" class="metric-card" title="Sum of latest replies for visible posts (non-recursive)">
-        <span class="label">Replies</span>
-        <span id="repliesTotal" class="value">0.00</span>
-      </div>
-      <div id="remixesSummary" class="metric-card" title="Sum of latest recursive remixes for visible posts">
-        <span class="label">Recursive Remixes</span>
-        <span id="remixesTotal" class="value">0.00</span>
-      </div>
-      <div id="interactionsSummary" class="metric-card" title="Sum of latest interactions (likes + comments) for visible posts">
-        <span class="label">Interactions</span>
-        <span id="interactionsTotal" class="value">0.00</span>
-      </div>
+      <h4 class="chart-title">Interaction Rate</h4>
       <div class="chart-wrap">
         <canvas id="chart" width="900" height="540"></canvas>
         <div id="tooltip" class="tooltip"></div>
       </div>
+      <h4 class="chart-title">Views over Time</h4>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="viewsChart" width="900" height="540"></canvas>
         <div id="viewsTooltip" class="tooltip"></div>
       </div>
+      <h4 class="chart-title">Views in First 24 Hours</h4>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="first24HoursChart" width="900" height="540"></canvas>
         <div id="first24HoursTooltip" class="tooltip"></div>
@@ -84,7 +106,20 @@
           </div>
         </div>
       </div>
+      <h4 class="chart-title">Views Per Person in First 24 Hours</h4>
+      <div class="chart-wrap" style="margin-top:10px">
+        <canvas id="viewsPerPersonChart" width="900" height="540"></canvas>
+        <div id="viewsPerPersonTooltip" class="tooltip"></div>
+        <div style="margin-top: 10px; padding: 4px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <label style="color: var(--muted); font-size: 12px; min-width: 100px; flex-shrink: 0;">Time Window</label>
+            <input type="range" id="viewsPerPersonSlider" min="15" max="1440" value="1440" step="15" style="flex: 1; height: 6px; background: var(--grid); border-radius: 3px; outline: none;" />
+            <span id="viewsPerPersonSliderValue" style="color: var(--fg); font-size: 12px; min-width: 70px; text-align: right; flex-shrink: 0;">24 hrs</span>
+          </div>
+        </div>
+      </div>
       <h3 class="section-title">BEST TIME TO POST</h3>
+      <p style="color: var(--muted); font-size: 14px; margin-top: -8px; margin-bottom: 16px;">Based on data from all the posts you've ever browsed on Sora.</p>
       <div id="bestTimeToPostSection" style="margin-bottom: 32px;">
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
           <div class="best-time-metric-card">
@@ -101,7 +136,8 @@
           </div>
         </div>
       </div>
-      <h3 class="section-title">Compare Metrics</h3>
+      <h3 class="section-title">Compare Total Metrics</h3>
+      <p style="color: var(--muted); font-size: 14px; margin-top: -8px; margin-bottom: 16px;">You must run Gather mode on any profile for up-to-date and complete data</p>
       <div class="compare-section">
         <div class="compare-header">
           <div class="compare-controls">
@@ -116,46 +152,56 @@
           </div>
         </div>
       </div>
-      <div id="allViewsSummary" class="metric-card" title="Sum of latest views across all posts (ignores visibility)">
-        <span class="label">Total views</span>
-        <span id="allViewsTotal" class="value">0</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px 8px; margin-bottom: 12px;">
+        <div id="allTotalViewsSummary" class="metric-card" title="Sum of latest total views across all posts (ignores visibility)">
+          <span id="allTotalViewsTotal" class="value">0</span>
+          <span class="label">Total Views</span>
+        </div>
+        <div id="allUniqueViewsSummary" class="metric-card" title="Sum of latest unique views across all posts (ignores visibility)">
+          <span id="allUniqueViewsTotal" class="value">0</span>
+          <span class="label">Unique Views</span>
+        </div>
+        <div id="allLikesSummary" class="metric-card" title="Sum of latest likes across all posts (ignores visibility)">
+          <span id="allLikesTotal" class="value">0.00</span>
+          <span class="label">Likes</span>
+        </div>
+        <div id="allRepliesSummary" class="metric-card" title="Sum of latest replies across all posts (ignores visibility)">
+          <span id="allRepliesTotal" class="value">0.00</span>
+          <span class="label">Replies</span>
+        </div>
+        <div id="allRemixesSummary" class="metric-card" title="Sum of latest recursive remixes across all posts (ignores visibility)">
+          <span id="allRemixesTotal" class="value">0.00</span>
+          <span class="label">Recursive Remixes</span>
+        </div>
+        <div id="allInteractionsSummary" class="metric-card" title="Sum of latest interactions across all posts (ignores visibility)">
+          <span id="allInteractionsTotal" class="value">0.00</span>
+          <span class="label">Interactions</span>
+        </div>
+        <div id="allCameosSummary" class="metric-card" title="Profile cast in count (ignores visibility)">
+          <span id="allCameosTotal" class="value">0</span>
+          <span class="label">Cast in</span>
+        </div>
+        <div id="followersSummary" class="metric-card" title="Latest follower count for the selected user">
+          <span id="followersTotal" class="value">0</span>
+          <span class="label">Followers</span>
+        </div>
       </div>
-      <div id="allLikesSummary" class="metric-card" title="Sum of latest likes across all posts (ignores visibility)">
-        <span class="label">Total likes</span>
-        <span id="allLikesTotal" class="value">0.00</span>
-      </div>
-      <div id="allRepliesSummary" class="metric-card" title="Sum of latest replies across all posts (ignores visibility)">
-        <span class="label">Total replies</span>
-        <span id="allRepliesTotal" class="value">0.00</span>
-      </div>
-      <div id="allRemixesSummary" class="metric-card" title="Sum of latest recursive remixes across all posts (ignores visibility)">
-        <span class="label">Total recursive remixes</span>
-        <span id="allRemixesTotal" class="value">0.00</span>
-      </div>
-      <div id="allInteractionsSummary" class="metric-card" title="Sum of latest interactions across all posts (ignores visibility)">
-        <span class="label">Total interactions</span>
-        <span id="allInteractionsTotal" class="value">0.00</span>
-      </div>
-      <div id="allCameosSummary" class="metric-card" title="Profile cameo count (ignores visibility)">
-        <span class="label">Total cameos</span>
-        <span id="allCameosTotal" class="value">0</span>
-      </div>
-      <div id="followersSummary" class="metric-card" title="Latest follower count for the selected user">
-        <span class="label">Total followers</span>
-        <span id="followersTotal" class="value">0</span>
-      </div>
+      <h4 class="chart-title">Followers over Time</h4>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="followersChart" width="900" height="540"></canvas>
         <div id="followersTooltip" class="tooltip"></div>
       </div>
+      <h4 class="chart-title">Total Views over Time</h4>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="allViewsChart" width="900" height="540"></canvas>
         <div id="allViewsTooltip" class="tooltip"></div>
       </div>
+      <h4 class="chart-title">Likes over Time</h4>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="allLikesChart" width="900" height="540"></canvas>
         <div id="allLikesTooltip" class="tooltip"></div>
       </div>
+      <h4 class="chart-title">Cast In over Time</h4>
       <div class="chart-wrap" style="margin-top:10px">
         <canvas id="cameosChart" width="900" height="540"></canvas>
         <div id="cameosTooltip" class="tooltip"></div>
@@ -228,18 +274,18 @@
           </div>
         </div>
 
-        <!-- Exemptions Section -->
-        <div class="purge-exemptions-section">
-          <div class="purge-exemptions-label">Exemptions</div>
-          <div class="purge-exemptions-controls">
-            <div class="purge-exemptions-search-row">
-              <div class="user-picker-exemptions">
-                <input id="exemptionsSearch" type="search" placeholder="Add user to exempt…" autocomplete="off" />
-                <div id="exemptionsSuggestions" class="suggestions"></div>
+        <!-- Exceptions Section -->
+        <div class="purge-exceptions-section">
+          <div class="purge-exceptions-label">Exceptions</div>
+          <div class="purge-exceptions-controls">
+            <div class="purge-exceptions-search-row">
+              <div class="user-picker-exceptions">
+                <input id="exceptionsSearch" type="search" placeholder="Add user to except…" autocomplete="off" />
+                <div id="exceptionsSuggestions" class="suggestions"></div>
               </div>
-              <select id="exemptionsUserSelect" title="Select user to exempt" class="exemptions-select-dropdown"></select>
+              <select id="exceptionsUserSelect" title="Select user to except" class="exceptions-select-dropdown"></select>
             </div>
-            <div id="exemptionsPills" class="exemptions-pills"></div>
+            <div id="exceptionsPills" class="exceptions-pills"></div>
           </div>
         </div>
 
@@ -255,6 +301,15 @@
         <div class="purge-actions">
           <button id="purgeExecute" class="purge-execute-btn">Purge</button>
         </div>
+
+        <!-- Storage Size Display -->
+        <div class="purge-storage-size">
+          <span id="purgeStorageSize">Sora Creator Tools currently uses 0.00MB of memory.</span>
+          <label class="purge-comb-mode-label">
+            <input type="checkbox" id="combModeCheckbox" checked />
+            <span class="purge-comb-mode-helper">Auto-purge old data captured more frequently than every hour.</span>
+          </label>
+        </div>
       </div>
     </div>
 
@@ -267,6 +322,19 @@
           <button id="purgeConfirmYes" class="purge-confirm-yes">Yes, Purge</button>
           <button id="purgeConfirmNo" class="purge-confirm-no">Cancel</button>
         </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Post Purge Confirmation Dialog -->
+  <div id="postPurgeConfirm" class="purge-confirm-dialog" style="display: none;">
+    <div class="purge-confirm-content">
+      <h3>⚠️ This cannot be undone!</h3>
+      <p id="postPurgeConfirmText">Are you sure you want to purge data tied to ""?</p>
+      <div class="purge-confirm-actions">
+        <button id="postPurgeConfirmYes" class="purge-confirm-yes">Yes, Purge</button>
+        <button id="postPurgeConfirmNo" class="purge-confirm-no">Cancel</button>
       </div>
     </div>
   </div>
