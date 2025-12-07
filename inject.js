@@ -4794,6 +4794,13 @@ async function renderAnalyzeTable(force = false) {
       const id = getItemId(it);
       if (!id) continue;
 
+      // Safety check: ensure we don't process comments/replies as if they were the main post
+      // This happens because comments often contain the post_id they belong to, and getItemId finds it via deep search
+      const rawP = it?.post || it || {};
+      if (rawP.post_id && rawP.post_id === id && rawP.id !== id) {
+        continue;
+      }
+
       const uv = getUniqueViews(it);
       const likes = getLikes(it);
       const tv = getTotalViews(it);
