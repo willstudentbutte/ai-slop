@@ -475,7 +475,13 @@
     return m ? normalizeId(m[1]) : null;
   };
   const selectAllCards = () =>
-    Array.from(document.querySelectorAll('a[href^="/p/s_"]')).map((a) => a.closest('article,div,section') || a);
+    Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
+      .filter(a => {
+        // Exclude posts inside Leaderboard dialog/popover
+        const inDialog = a.closest('[role="dialog"]');
+        return !inDialog;
+      })
+      .map((a) => a.closest('article,div,section') || a);
 
   // == Drafts helpers ==
   const extractDraftIdFromCard = (el) => {
