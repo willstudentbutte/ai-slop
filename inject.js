@@ -1898,7 +1898,8 @@
     const bg = badgeBgFor(sid, meta);
     const pillBg = bg || 'rgba(37,37,37,0.7)';
     const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
-    if (el.dataset.key === newKey) return;
+    const hasPills = el.querySelectorAll('.sora-uv-pill').length > 0;
+    if (el.dataset.key === newKey && hasPills) return;
     el.dataset.key = newKey;
     
     el.innerHTML = ''; 
@@ -4786,12 +4787,14 @@ async function renderAnalyzeTable(force = false) {
         if (val == null) return;
         const existing = map.get(id);
         const isLocked = lockedPostIds.has(id);
+
+        // never overwrite with zero
+        if (val === 0 && existing == null) return;
+
         if (isLocked) {
           // For locked posts, only allow improvements (greater than existing)
           if (existing == null || val > existing) {
             map.set(id, val);
-          } else if (existing > 0 && val === 0) {
-            dlog('feed', 'BLOCKED: locked post metric zero overwrite', { id, existing, val });
           }
         } else {
           // For unlocked posts, allow typical improvements / first set
