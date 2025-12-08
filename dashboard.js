@@ -4278,7 +4278,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const list = filterUsersByQuery(metrics, e.target.value).slice(0, 20);
       suggestions.innerHTML = list.map(([key,u])=>{
         const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+        return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
       }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#suggestions .item').forEach(it=>{
@@ -4353,10 +4353,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const list = filterUsersByQuery(metrics, e.target.value)
         .filter(([key])=>!compareUsers.has(key))
         .slice(0, 20);
-      suggestions.innerHTML = list.map(([key,u])=>{
-        const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
-      }).join('');
+        suggestions.innerHTML = list.map(([key,u])=>{
+          const count = Object.keys(u.posts||{}).length;
+          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+        }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#compareSuggestions .item').forEach(it=>{
         it.addEventListener('click', ()=>{
@@ -4782,10 +4782,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const list = filterUsersByQuery(metrics, e.target.value)
         .filter(([key])=>!exceptedUsers.has(key))
         .slice(0, 20);
-      suggestions.innerHTML = list.map(([key,u])=>{
-        const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
-      }).join('');
+        suggestions.innerHTML = list.map(([key,u])=>{
+          const count = Object.keys(u.posts||{}).length;
+          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+        }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#exceptionsSuggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{

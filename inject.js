@@ -165,6 +165,9 @@
     return s.length > max ? s.slice(0, max).trim() + '…' : s;
   }
 
+  const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC_MAP[c] || c);
+
   function fmtAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return '∞';
     const mTotal = Math.max(0, Math.floor(ageMin));
@@ -3482,8 +3485,8 @@
       
       if (analyzeCameoSelectEl) {
         analyzeCameoSelectEl.innerHTML = 
-          '<option value="">Everyone</option>' +
-          sortedCameos.map(c => `<option value="${c.username}">${c.username} (${c.count})</option>`).join('');
+        '<option value="">Everyone</option>' +
+        sortedCameos.map(c => `<option value="${esc(c.username)}">${esc(c.username)} (${fmtInt(c.count)})</option>`).join('');
         
         if (analyzeCameoFilterUsername) {
           analyzeCameoSelectEl.value = analyzeCameoFilterUsername;
