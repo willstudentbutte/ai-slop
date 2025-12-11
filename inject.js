@@ -48,7 +48,7 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
-  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors))?(\?|$)/i;
+  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
@@ -81,6 +81,8 @@
   const usernameToUserId = new Map(); // Map username to user_id for character lookup
   const lockedPostIds = new Set(); // Post IDs whose data should not be overwritten (currently viewed posts)
   const processedPostDetailIds = new Set(); // Post detail responses already applied (avoid late duplicate overwrites)
+  const pendingPostDetailIds = new Set(); // Post IDs currently being detail-fetched
+  let lastPostDetailUrlTemplate = null; // Remember a detail URL pattern to reuse across posts
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
@@ -164,6 +166,9 @@
     const s = str.replace(/\s+/g, ' ').trim();
     return s.length > max ? s.slice(0, max).trim() + '…' : s;
   }
+
+  const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC_MAP[c] || c);
 
   function fmtAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return '∞';
@@ -472,7 +477,13 @@
     return m ? normalizeId(m[1]) : null;
   };
   const selectAllCards = () =>
-    Array.from(document.querySelectorAll('a[href^="/p/s_"]')).map((a) => a.closest('article,div,section') || a);
+    Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
+      .filter(a => {
+        // Exclude posts inside Leaderboard dialog/popover
+        const inDialog = a.closest('[role="dialog"]');
+        return !inDialog;
+      })
+      .map((a) => a.closest('article,div,section') || a);
 
   // == Drafts helpers ==
   const extractDraftIdFromCard = (el) => {
@@ -1581,16 +1592,14 @@
 
 
   // Function to fetch post data when visiting a post page directly
-  async function fetchPostDataIfNeeded() {
-    if (!isPost()) return;
-    
-    const sid = currentSIdFromURL();
+  async function fetchPostDataIfNeeded(opts = {}) {
+    const forceDetail = !!opts.forceDetail;
+    const sid = opts.sidOverride || currentSIdFromURL();
     if (!sid) return;
-    
-    // Check if we already have data for this post
-    if (idToUnique.has(sid)) {
-      return; // Data already available
-    }
+    if (!isPost() && !opts.sidOverride) return;
+
+    // If we already have full data, no work.
+    if (!forceDetail && detailBadgeDataReady(sid)) return;
     
     // Try to load from storage first
     try {
@@ -1721,6 +1730,8 @@
     } catch (e) {
       dlog('feed', 'Error loading post data from storage', e);
     }
+
+    if (detailBadgeDataReady(sid)) return;
     
     // If not in storage, try fetching from feed endpoints
     // Try Top feed first (most likely to have the post)
@@ -1735,10 +1746,74 @@
         const json = await response.json();
         processFeedJson(json);
         // Check if we now have valid data (not just that the key exists)
-        if (idToUnique.get(sid) != null) return;
+        if (detailBadgeDataReady(sid)) return;
       }
     } catch (e) {
       dlog('feed', 'Error fetching Top feed for post data', e);
+    }
+
+    // As a last resort (or when forced), hit the detail endpoint once.
+    if (forceDetail || !processedPostDetailIds.has(sid)) {
+      fetchPostDetailOnce(sid);
+    }
+  }
+
+  function detailBadgeDataReady(sid) {
+    if (!sid) return false;
+    return (
+      idToUnique.get(sid) != null &&
+      idToLikes.get(sid) != null &&
+      idToViews.get(sid) != null &&
+      idToComments.get(sid) != null &&
+      idToRemixes.get(sid) != null &&
+      idToMeta.get(sid) != null
+    );
+  }
+
+  function rememberPostDetailTemplate(url) {
+    if (typeof url !== 'string') return;
+    try {
+      const m = url.match(/\/posts?\/(s_[A-Za-z0-9]+)/i);
+      if (!m) return;
+      const id = m[1];
+      lastPostDetailUrlTemplate = url.replace(id, '{sid}');
+    } catch {}
+  }
+
+  function buildPostDetailUrls(sid) {
+    const urls = [];
+    if (lastPostDetailUrlTemplate && lastPostDetailUrlTemplate.includes('{sid}')) {
+      urls.push(lastPostDetailUrlTemplate.replace('{sid}', sid));
+    }
+    // Fallback guesses; keep small and same-origin.
+    urls.push(`${location.origin}/posts/${sid}/tree`);
+    urls.push(`${location.origin}/backend/posts/${sid}/tree`);
+    return Array.from(new Set(urls));
+  }
+
+  async function fetchPostDetailOnce(sid) {
+    if (!sid) return;
+    if (processedPostDetailIds.has(sid) || pendingPostDetailIds.has(sid)) return;
+    pendingPostDetailIds.add(sid);
+    try {
+      const urls = buildPostDetailUrls(sid);
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, {
+            method: 'GET',
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' },
+          });
+          if (!res.ok) continue;
+          const json = await res.json();
+          if (!looksLikePostDetail(json)) continue;
+          processPostDetailJson(json);
+          // processPostDetailJson will mark processed for the current post.
+          if (processedPostDetailIds.has(sid)) break;
+        } catch {}
+      }
+    } finally {
+      pendingPostDetailIds.delete(sid);
     }
   }
 
@@ -1771,16 +1846,23 @@
       isLocked: lockedPostIds.has(sid)
     });
 
-    // If we don't have valid data, try to fetch it
-    // Require all primary metrics before showing pills for a clean, single render
-    const uv = idToUnique.get(sid);
-    const likes = idToLikes.get(sid);
-    const totalViews = idToViews.get(sid);
-    const comments = idToComments.get(sid);
-    const remixes = idToRemixes.get(sid);
-    const allMetricsReady = uv != null && likes != null && totalViews != null && comments != null && remixes != null;
+    // If we haven't processed the current post's detail payload yet, avoid showing
+    // placeholder/stale pills (e.g., zeros from ancestor/feed packets) until the
+    // dedicated post detail fetch lands.
+    const needsDetail = isPost() && !processedPostDetailIds.has(sid) && !detailBadgeDataReady(sid);
+    if (needsDetail) {
+      if (detailBadgeRetryInterval) {
+        clearInterval(detailBadgeRetryInterval);
+        detailBadgeRetryInterval = null;
+      }
+      fetchPostDataIfNeeded({ forceDetail: true, sidOverride: sid });
+      el.innerHTML = '';
+      return;
+    }
 
-    if (!allMetricsReady) {
+    // If we don't have valid data, try to fetch it
+    const dataReady = detailBadgeDataReady(sid);
+    if (!dataReady) {
       // Clear any existing retry interval
       if (detailBadgeRetryInterval) {
         clearInterval(detailBadgeRetryInterval);
@@ -1795,21 +1877,8 @@
       const maxRetries = 20; // Try for up to 6 seconds (20 * 300ms)
       detailBadgeRetryInterval = setInterval(() => {
         retryCount++;
-        const checkUv = idToUnique.get(sid);
-        const checkMeta = idToMeta.get(sid);
-        const checkDuration = idToDuration.get(sid);
-        const checkLikes = idToLikes.get(sid);
-        const checkViews = idToViews.get(sid);
-        const checkComments = idToComments.get(sid);
-        const checkRemixes = idToRemixes.get(sid);
-        const ready =
-          checkUv != null &&
-          checkLikes != null &&
-          checkViews != null &&
-          checkComments != null &&
-          checkRemixes != null &&
-          checkMeta != null;
-        
+        const ready = detailBadgeDataReady(sid);
+
         // Only stop if we have ALL primary metrics (and meta) or we timed out
         if (ready || retryCount >= maxRetries) {
           clearInterval(detailBadgeRetryInterval);
@@ -1829,6 +1898,11 @@
     }
 
     // All primary metrics are present; render the pills
+    const uv = idToUnique.get(sid);
+    const likes = idToLikes.get(sid);
+    const totalViews = idToViews.get(sid);
+    const comments = idToComments.get(sid) ?? 0;
+    const remixes = idToRemixes.get(sid) ?? 0;
 
     const irRaw = interactionRate(likes, comments, uv);
     const rrRaw = remixRate(likes, remixes);
@@ -1889,7 +1963,8 @@
     const bg = badgeBgFor(sid, meta);
     const pillBg = bg || 'rgba(37,37,37,0.7)';
     const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
-    if (el.dataset.key === newKey) return;
+    const hasPills = el.querySelectorAll('.sora-uv-pill').length > 0;
+    if (el.dataset.key === newKey && hasPills) return;
     el.dataset.key = newKey;
     
     el.innerHTML = ''; 
@@ -3482,8 +3557,8 @@
       
       if (analyzeCameoSelectEl) {
         analyzeCameoSelectEl.innerHTML = 
-          '<option value="">Everyone</option>' +
-          sortedCameos.map(c => `<option value="${c.username}">${c.username} (${c.count})</option>`).join('');
+        '<option value="">Everyone</option>' +
+        sortedCameos.map(c => `<option value="${esc(c.username)}">${esc(c.username)} (${fmtInt(c.count)})</option>`).join('');
         
         if (analyzeCameoFilterUsername) {
           analyzeCameoSelectEl.value = analyzeCameoFilterUsername;
@@ -3930,9 +4005,9 @@ async function renderAnalyzeTable(force = false) {
     }
 
     const table = analyzeTableEl;
-    const oldTbody = table.tBodies[0];
     const swap = () => {
-      if (oldTbody) table.replaceChild(newTbody, oldTbody);
+      const currentBody = table.tBodies[0];
+      if (currentBody) table.replaceChild(newTbody, currentBody);
       else table.appendChild(newTbody);
     };
     if ('requestAnimationFrame' in window) requestAnimationFrame(swap);
@@ -4520,6 +4595,7 @@ async function renderAnalyzeTable(force = false) {
         // Check POST_DETAIL_RE, DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
         if (POST_DETAIL_RE.test(url)) {
           dlog('feed', 'fetch matched post detail', { url });
+          rememberPostDetailTemplate(url);
           res.clone().json().then((j) => {
             dlog('feed', 'post detail parsed', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
             processPostDetailJson(j);
@@ -4586,6 +4662,7 @@ async function renderAnalyzeTable(force = false) {
             // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
             if (POST_DETAIL_RE.test(url)) {
               dlog('feed', 'xhr matched post detail', { url });
+              rememberPostDetailTemplate(url);
               try {
                 const j = JSON.parse(this.responseText);
                 dlog('feed', 'post detail parsed (XHR)', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
@@ -4777,12 +4854,22 @@ async function renderAnalyzeTable(force = false) {
         if (val == null) return;
         const existing = map.get(id);
         const isLocked = lockedPostIds.has(id);
+
+        // Allow zero for comments/remixes (legit "no activity") and for likes when we also
+        // have another primary metric in this packet. Keep guarding UV/views zeros to avoid
+        // placeholder/stale packets.
+        if (val === 0 && existing == null) {
+          const allowZero =
+            map === idToComments ||
+            map === idToRemixes ||
+            (map === idToLikes && (uv != null || tv != null));
+          if (!allowZero) return;
+        }
+
         if (isLocked) {
           // For locked posts, only allow improvements (greater than existing)
           if (existing == null || val > existing) {
             map.set(id, val);
-          } else if (existing > 0 && val === 0) {
-            dlog('feed', 'BLOCKED: locked post metric zero overwrite', { id, existing, val });
           }
         } else {
           // For unlocked posts, allow typical improvements / first set
@@ -4807,7 +4894,27 @@ async function renderAnalyzeTable(force = false) {
       // Respect locks so the current post's meta (age/timestamp) is not overwritten by other packets
       const isLockedMeta = lockedPostIds.has(id);
       const existingMeta = idToMeta.get(id);
-      if (!isLockedMeta || !existingMeta) {
+      let shouldUpdateMeta = true;
+      if (isLockedMeta) {
+        shouldUpdateMeta = false;
+      } else if (existingMeta && Number.isFinite(existingMeta.ageMin) && Number.isFinite(ageMin)) {
+        // Prevent overwriting with a significantly smaller ageMin (would make post appear newer)
+        // This protects against ancestors/related posts corrupting the main post's timestamp
+        // A post's age should only increase over time, never decrease significantly
+        if (existingMeta.ageMin > ageMin + 5) {
+          // The new ageMin is smaller - post would appear younger
+          // Only allow this if the difference is very small (natural variance)
+          shouldUpdateMeta = false;
+          dlog('feed', 'prevented meta update - new ageMin smaller than existing', {
+            id,
+            existingAgeMin: existingMeta.ageMin,
+            newAgeMin: ageMin,
+            diff: existingMeta.ageMin - ageMin
+          });
+        }
+      }
+
+      if (shouldUpdateMeta) {
         idToMeta.set(id, { ageMin, userHandle });
       }
 
@@ -5015,6 +5122,15 @@ async function renderAnalyzeTable(force = false) {
     try {
       // Process the main post FIRST and LOCK it to prevent remix/ancestor data from overwriting it
       if (json?.post && mainPostId) {
+        // For the CURRENT post, clear any stale meta before processing to ensure
+        // fresh data from the API response is always used. This fixes the bug where
+        // navigating original -> remix -> back to original could show stale timestamp
+        // data from when the original was processed as an ancestor.
+        if (isCurrentPost) {
+          idToMeta.delete(mainPostId);
+          dlog('feed', 'cleared stale meta for current post before processing', { id: mainPostId });
+        }
+        
         const postWrapper = { post: json.post };
         if (json.profile) {
           postWrapper.profile = json.profile;
@@ -5031,7 +5147,8 @@ async function renderAnalyzeTable(force = false) {
             uv: json.post.unique_view_count,
             likes: json.post.like_count,
             stored_uv: idToUnique.get(mainPostId),
-            stored_likes: idToLikes.get(mainPostId)
+            stored_likes: idToLikes.get(mainPostId),
+            stored_meta: idToMeta.get(mainPostId)
           });
         } else {
           dlog('feed', 'processed main post (not current, not locked)', { id: mainPostId, currentSid });
@@ -5713,8 +5830,7 @@ async function renderAnalyzeTable(force = false) {
       
       // Clear locks only if route truly changed; keep processed IDs for later skips
       lockedPostIds.clear();
-      processedPostDetailIds.clear();
-      dlog('feed', 'Navigation detected - cleared locked/processed post IDs');
+      dlog('feed', 'Navigation detected - cleared locked post IDs');
     }
 
     const bar = ensureControlBar();
