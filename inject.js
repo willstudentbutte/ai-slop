@@ -4819,7 +4819,16 @@ async function renderAnalyzeTable(force = false) {
       // Respect locks so the current post's meta (age/timestamp) is not overwritten by other packets
       const isLockedMeta = lockedPostIds.has(id);
       const existingMeta = idToMeta.get(id);
-      if (!isLockedMeta || !existingMeta) {
+      let shouldUpdateMeta = true;
+      if (isLockedMeta) {
+        shouldUpdateMeta = false;
+      } else if (existingMeta && Number.isFinite(existingMeta.ageMin) && Number.isFinite(ageMin)) {
+        if (existingMeta.ageMin > ageMin + 5) {
+          shouldUpdateMeta = false;
+        }
+      }
+
+      if (shouldUpdateMeta) {
         idToMeta.set(id, { ageMin, userHandle });
       }
 
