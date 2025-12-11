@@ -48,7 +48,7 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
-  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors))?(\?|$)/i;
+  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
 
   // Includes <21h (1260 minutes)
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
@@ -1785,9 +1785,9 @@
     const uv = idToUnique.get(sid);
     const likes = idToLikes.get(sid);
     const totalViews = idToViews.get(sid);
-    const comments = idToComments.get(sid);
-    const remixes = idToRemixes.get(sid);
-    const allMetricsReady = uv != null && likes != null && totalViews != null && comments != null && remixes != null;
+    const comments = idToComments.get(sid) ?? 0;
+    const remixes = idToRemixes.get(sid) ?? 0;
+    const allMetricsReady = uv != null && likes != null && totalViews != null;
 
     if (!allMetricsReady) {
       // Clear any existing retry interval
