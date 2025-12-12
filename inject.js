@@ -530,14 +530,49 @@
     const m = link.getAttribute('href').match(/\/p\/(s_[A-Za-z0-9]+)/i);
     return m ? normalizeId(m[1]) : null;
   };
+  function isBadCardContainer(el) {
+    try {
+      if (!el || el === document.body || el === document.documentElement) return true;
+      const style = getComputedStyle(el);
+      if (style.position === 'fixed' || style.position === 'sticky') return true;
+      // Avoid nav/sidebars/toolbars that sometimes contain post links.
+      const role = el.getAttribute?.('role');
+      if (role === 'navigation' || role === 'menubar' || role === 'toolbar') return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function closestPostCardFromAnchor(a) {
+    if (!a) return null;
+    let el = a;
+    let steps = 0;
+    while (el && steps < 10) {
+      if (el.tagName === 'ARTICLE' || el.getAttribute?.('role') === 'article') {
+        if (!isBadCardContainer(el)) return el;
+      }
+      const cls = typeof el.className === 'string' ? el.className : '';
+      const hasMedia = !!el.querySelector?.('video, img, canvas');
+      const looksCardy =
+        hasMedia &&
+        (cls.includes('rounded') || cls.includes('overflow-hidden') || cls.includes('shadow') || cls.includes('group'));
+      if (looksCardy && !isBadCardContainer(el)) return el;
+      el = el.parentElement;
+      steps++;
+    }
+    return null;
+  }
+
   const selectAllCards = () =>
     Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
-      .filter(a => {
+      .filter((a) => {
         // Exclude posts inside Leaderboard dialog/popover
         const inDialog = a.closest('[role="dialog"]');
         return !inDialog;
       })
-      .map((a) => a.closest('article,div,section') || a);
+      .map((a) => closestPostCardFromAnchor(a) || a.closest('article,section,div') || a)
+      .filter((el) => !isBadCardContainer(el));
 
   // == Drafts helpers ==
   const extractDraftIdFromCard = (el) => {
