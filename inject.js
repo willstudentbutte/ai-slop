@@ -4439,14 +4439,19 @@ async function renderAnalyzeTable(force = false) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
       // If we're not on a page where filters apply, don't hide anything.
-      if ((!isProfile() && !isTopFeed()) || limitMin == null || isGatheringActiveThisTab) {
+      // Apply filters on Profile and all Explore feeds.
+      // Sora may update the URL to `/explore` while still showing the same Explore tab (top/latest/following),
+      // so do not rely on `feed=top` being present to decide whether filtering should apply.
+      // Also apply on Post routes: opening a post from Explore often updates the URL to `/p/...` while the
+      // Explore grid remains mounted underneath a modal, and we want to keep the filtered view stable.
+      if ((!isProfile() && !isExplore() && !isPost()) || limitMin == null || isGatheringActiveThisTab) {
         card.style.display = '';
         continue;
       }
 
       if (limitMin === 'no_remixes') {
-        // Only meaningful on Top feed; elsewhere don't hide.
-        if (!isTopFeed()) {
+        // Only meaningful on Explore/Post (modal-over-explore); elsewhere don't hide.
+        if (!isExplore() && !isPost()) {
           card.style.display = '';
           continue;
         }
@@ -5872,6 +5877,32 @@ async function renderAnalyzeTable(force = false) {
     applyFilter();
   }
 
+  function resetFilterOnNavigation() {
+    const s = getGatherState() || {};
+    s.filterIndex = 0;
+    s.isGathering = false;
+    delete s.refreshDeadline;
+    setGatherState(s);
+    const bar = controlBar || ensureControlBar();
+    if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+    applyFilter();
+  }
+
+  function routeKindFromRouteKey(rk) {
+    const path = String(rk || '').split('?')[0] || '';
+    if (path === '/explore' || path.startsWith('/explore/')) return 'explore';
+    if (/^\/p\/s_[A-Za-z0-9]+/i.test(path)) return 'post';
+    return 'other';
+  }
+
+  function shouldPreserveFilterAcrossNavigation(prevRouteKey, nextRouteKey) {
+    const a = routeKindFromRouteKey(prevRouteKey);
+    const b = routeKindFromRouteKey(nextRouteKey);
+    // Preserve the filter when navigating between Explore and Post pages,
+    // since Sora often changes the URL without actually changing the underlying feed state.
+    return (a === 'explore' || a === 'post') && (b === 'explore' || b === 'post');
+  }
+
   function updateControlsVisibility() {
     const bar = ensureControlBar();
     if (!bar) return;
@@ -5989,11 +6020,13 @@ async function renderAnalyzeTable(force = false) {
 
   function onRouteChange() {
     const rk = routeKey();
-    const navigated = rk !== lastRouteKey;
+    const prev = lastRouteKey;
+    const navigated = rk !== prev;
     lastRouteKey = rk;
 
     if (navigated) {
       forceStopGatherOnNavigation();
+      if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
       // Reset bookmarks filter on navigation
       bookmarksFilterState = 0;
       lastAppliedFilterState = -1;
@@ -6031,6 +6064,9 @@ async function renderAnalyzeTable(force = false) {
     renderDraftButtons();
     updateControlsVisibility();
     injectDashboardButton();
+
+    // SPA navigation can update the URL without a full re-render; always re-apply current filter.
+    applyFilter();
     
     // On post pages, retry rendering detail badge after a delay to allow DOM to settle
     if (isPost() && navigated) {
