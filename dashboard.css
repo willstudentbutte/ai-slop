@@ -25,11 +25,28 @@ input[type=search]:focus, select:focus{border-color:rgba(255,255,255,0.20);outli
 .sidebar::-webkit-scrollbar{display:none}
 .sidebar h3{margin:6px 6px 10px;font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase}
 .list-actions{display:flex;flex-wrap:wrap;gap:8px;margin:0 6px 10px}
+.list-actions button.active{
+  background:#ffffff;
+  color:#0b0d10;
+  border-color:rgba(255,255,255,0.9);
+  box-shadow:inset 0 0 1px rgba(0,0,0,0.06),0 1px 10px rgba(0,0,0,0.30);
+}
+.list-actions button.active:hover{
+  background:#f5f5f5;
+  color:#0b0d10;
+  border-color:rgba(255,255,255,1);
+}
 .posts{display:flex;flex-direction:column;gap:6px}
+.posts-separator{
+  height:1px;
+  background:var(--border-subtle);
+  margin:8px 4px;
+  opacity:0.6;
+}
 /* Improve row layout so toggle doesn't hug the edge */
 .post{display:grid;grid-template-columns:auto 1fr auto;align-items:center;column-gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:var(--chip);box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);transition:border-color 120ms ease,box-shadow 120ms ease;position:relative}
 .post.selected{border-color: var(--accent); box-shadow: 0 0 0 1px rgba(125,196,255,0.2) inset, inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30)}
-.post.hidden{opacity:0.45; filter:grayscale(60%)}
+.post.hidden{opacity:0.4; filter:grayscale(100%)}
 .post .toggle{font-size:11px; color:var(--muted); cursor:pointer; padding:2px 8px; border:1px solid var(--border); border-radius:999px; justify-self:end;transition:background 120ms ease}
 .post .toggle:hover{background:rgba(48,48,48,0.5)}
 .post input{margin:0}

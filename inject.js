@@ -50,9 +50,9 @@
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
   const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
 
-  // Includes <21h (1260 minutes)
-  const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
-  const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
+  // Includes <21h (1260 minutes) plus a final special filter
+  const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260, 'no_remixes'];
+  const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours', 'No Remixes'];
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
 
   // Debug toggle for characters
@@ -190,6 +190,13 @@
     if (h) parts.push(`${h}h`);
     parts.push(`${m}m`);
     return parts.join(' ');
+  }
+
+  function fmtAgeMinPill(ageMin) {
+    if (!Number.isFinite(ageMin)) return fmtAgeMin(ageMin);
+    const mTotal = Math.max(0, Math.floor(ageMin));
+    if (mTotal <= 1) return 'Just now';
+    return fmtAgeMin(ageMin);
   }
 
   function fmtRefreshCountdown(ms) {
@@ -454,8 +461,55 @@
   const getItemId = (item) => {
     const cand = item?.post?.id || item?.post?.core_id || item?.post?.content_id || item?.id;
     if (cand && /^s_[A-Za-z0-9]+$/i.test(cand)) return normalizeId(cand);
+
+    // Guard against comment/reply objects: they often carry a parent/root post id
+    // (s_...) plus text, but are not posts themselves. Deep search would otherwise
+    // pick up the parent id and we'd treat the comment like a post.
+    try {
+      const p = item?.post ?? item ?? {};
+      const ownId = p?.id || item?.id || null;
+      const refId =
+        p?.post_id ||
+        p?.parent_post_id ||
+        p?.root_post_id ||
+        item?.post_id ||
+        item?.parent_post_id ||
+        item?.root_post_id ||
+        null;
+      const hasOwnSId = typeof ownId === 'string' && /^s_[A-Za-z0-9]+$/i.test(ownId);
+      const hasRefSId = typeof refId === 'string' && /^s_[A-Za-z0-9]+$/i.test(refId);
+      const hasMediaOrMetrics =
+        (Array.isArray(p?.attachments) && p.attachments.length > 0) ||
+        typeof p?.preview_image_url === 'string' ||
+        p?.unique_view_count != null ||
+        p?.view_count != null ||
+        p?.like_count != null;
+      if (!hasOwnSId && hasRefSId && !hasMediaOrMetrics) return null;
+    } catch {}
+
     const deep = findSIdDeep(item);
-    return deep ? normalizeId(deep) : null;
+    if (!deep) return null;
+    try {
+      const p = item?.post ?? item ?? {};
+      const ownId = p?.id || item?.id || null;
+      const hasOwnSId = typeof ownId === 'string' && /^s_[A-Za-z0-9]+$/i.test(ownId);
+      if (!hasOwnSId) {
+        const refs = [
+          p?.post_id,
+          p?.parent_post_id,
+          p?.root_post_id,
+          p?.source_post_id,
+          p?.remix_target_post_id,
+          item?.post_id,
+          item?.parent_post_id,
+          item?.root_post_id,
+          item?.source_post_id,
+          item?.remix_target_post_id,
+        ];
+        if (refs.some((r) => typeof r === 'string' && r === deep)) return null;
+      }
+    } catch {}
+    return normalizeId(deep);
   };
   function findSIdDeep(obj) {
     try {
@@ -1288,7 +1342,7 @@
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
-    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
+    const ageStr = Number.isFinite(ageMin) ? fmtAgeMinPill(ageMin) : null;
     const emojiStr = badgeEmojiFor(id, meta);
     const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
 
@@ -1764,10 +1818,25 @@
       idToUnique.get(sid) != null &&
       idToLikes.get(sid) != null &&
       idToViews.get(sid) != null &&
-      idToComments.get(sid) != null &&
       idToRemixes.get(sid) != null &&
       idToMeta.get(sid) != null
     );
+  }
+
+  function detailBadgeCommentsReady(sid) {
+    if (!sid) return false;
+    return idToComments.get(sid) != null;
+  }
+
+  function renderDetailLoading(el) {
+    if (!el) return;
+    if (el.dataset.key === 'loading') return;
+    el.dataset.key = 'loading';
+    el.innerHTML = '';
+    try {
+      const pill = createPill(el, 'Loading...', null, false);
+      if (pill) pill.style.background = 'rgba(37,37,37,0.7)';
+    } catch {}
   }
 
   function rememberPostDetailTemplate(url) {
@@ -1856,7 +1925,7 @@
         detailBadgeRetryInterval = null;
       }
       fetchPostDataIfNeeded({ forceDetail: true, sidOverride: sid });
-      el.innerHTML = '';
+      renderDetailLoading(el);
       return;
     }
 
@@ -1888,6 +1957,7 @@
       }, 300);
       
       el.innerHTML = ''; // Clear while loading
+      renderDetailLoading(el);
       return;
     }
     
@@ -1901,10 +1971,11 @@
     const uv = idToUnique.get(sid);
     const likes = idToLikes.get(sid);
     const totalViews = idToViews.get(sid);
-    const comments = idToComments.get(sid) ?? 0;
+    const commentsVal = idToComments.get(sid);
+    const comments = commentsVal ?? 0;
     const remixes = idToRemixes.get(sid) ?? 0;
 
-    const irRaw = interactionRate(likes, comments, uv);
+    const irRaw = commentsVal == null ? null : interactionRate(likes, comments, uv);
     const rrRaw = remixRate(likes, remixes);
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
     const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
@@ -1924,7 +1995,7 @@
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
-    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
+    const ageStr = Number.isFinite(ageMin) ? fmtAgeMinPill(ageMin) : null;
     const emojiStr = badgeEmojiFor(sid, meta);
     const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
 
@@ -2440,6 +2511,8 @@
       let dropdownLabel;
       if (index === 0) {
         dropdownLabel = 'All Posts';
+      } else if (FILTER_STEPS_MIN[index] === 'no_remixes') {
+        dropdownLabel = 'No Remixes';
       } else {
         const hours = FILTER_STEPS_MIN[index] / 60; // Convert minutes to hours
         dropdownLabel = `Past ${hours} hours`;
@@ -4016,23 +4089,36 @@ async function renderAnalyzeTable(force = false) {
     const isAnalyzing = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
     if (!isAnalyzing && analyzeHeaderTextEl) {
       const hoursLabel = (n) => (Number(n) === 1 ? '1 hour' : `${n} hours`);
+      const fmtNum = (n) => (Number.isFinite(n) ? n.toLocaleString('en-US') : '0');
+      const totals = rows.reduce(
+        (acc, r) => {
+          acc.views += Number.isFinite(r.views) ? r.views : 0;
+          acc.likes += Number.isFinite(r.likes) ? r.likes : 0;
+          acc.remixes += Number.isFinite(r.remixes) ? r.remixes : 0;
+          acc.comments += Number.isFinite(r.comments) ? r.comments : 0;
+          return acc;
+        },
+        { views: 0, likes: 0, remixes: 0, comments: 0 }
+      );
       const username = analyzeCameoFilterUsername;
       if (username) {
         // User selected in dropdown
         analyzeHeaderTextEl.textContent = rows.length
-          ? `${rows.length} top gen${rows.length === 1 ? '' : 's'} tied to ${username} from the last ${hoursLabel(analyzeWindowHours)}`
+          ? `You've seen ${rows.length} top gen${rows.length === 1 ? '' : 's'} tied to ${username} in the last ${hoursLabel(analyzeWindowHours)} totalling ${fmtNum(totals.views)} views, ${fmtNum(totals.likes)} likes, ${fmtNum(totals.remixes)} remixes, and ${fmtNum(totals.comments)} comments.`
           : `No top gens tied to ${username} for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
       } else {
         // Everyone selected (no filter)
         analyzeHeaderTextEl.textContent = rows.length
-          ? `You've seen ${rows.length} top gens in the last ${hoursLabel(analyzeWindowHours)}.`
+          ? `You've seen ${rows.length} top gen${rows.length === 1 ? '' : 's'} in the last ${hoursLabel(analyzeWindowHours)} totalling ${fmtNum(totals.views)} views, ${fmtNum(totals.likes)} likes, ${fmtNum(totals.remixes)} remixes, and ${fmtNum(totals.comments)} comments.`
           : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
       }
       // Show helper text if there are rows
       // BUT hide it during gather mode OR during rapid analyze gather
       if (analyzeHelperTextEl) {
         const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-        const shouldShow = rows.length > 0 && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+        const winH = Number(analyzeWindowHours) || 24;
+        const shouldShow =
+          (rows.length > 0 || winH <= 1) && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
         analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
       }
     }
@@ -4062,49 +4148,61 @@ async function renderAnalyzeTable(force = false) {
     analyzeTableEl.style.display = show ? '' : 'none';
   }
 
-  function sortRows(rows) {
-    const key = analyzeSortKey;
-    const dir = analyzeSortDir === 'asc' ? 1 : -1;
-    rows.sort((a, b) => {
-      if (key === 'prompt') {
-        const aLen = (a.caption || '').replace(/\s+/g, ' ').trim().length;
-        const bLen = (b.caption || '').replace(/\s+/g, ' ').trim().length;
-        return (aLen - bLen) * dir;
-      }
-      if (key === 'post') {
-        const aUser = (a.ownerHandle || '').toLowerCase();
-        const bUser = (b.ownerHandle || '').toLowerCase();
-        if (aUser !== bUser) return aUser.localeCompare(bUser) * dir;
-        const aCap = (a.caption || a.id || '').toLowerCase();
-        const bCap = (b.caption || b.id || '').toLowerCase();
-        return aCap.localeCompare(bCap) * dir;
-      }
-      if (key === 'views') return (a.views - b.views) * dir;
-      if (key === 'duration') {
-        // Parse duration strings like "10s" or "10.5s" to numeric values for sorting
-        const parseDuration = (d) => {
-          if (!d || d === '—') return -1;
-          const match = d.match(/^(\d+(?:\.\d+)?)s$/);
-          return match ? parseFloat(match[1]) : -1;
-        };
-        const aDur = parseDuration(a.duration);
-        const bDur = parseDuration(b.duration);
-        if (aDur !== bDur) {
-          return (aDur - bDur) * dir;
-        }
-        // If durations are equal, sort by views (descending)
-        return b.views - a.views;
-      }
-      if (key === 'likes') return (a.likes - b.likes) * dir;
-      if (key === 'remixes') return (a.remixes - b.remixes) * dir;
-      if (key === 'comments') return (a.comments - b.comments) * dir;
-      if (key === 'rr') return ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
-      if (key === 'ir') return ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
-      if (key === 'expiring') return (a.expiringMin - b.expiringMin) * dir;
-      return 0;
-    });
-    return rows;
-  }
+	  function sortRows(rows) {
+	    const key = analyzeSortKey;
+	    const dir = analyzeSortDir === 'asc' ? 1 : -1;
+	    rows.sort((a, b) => {
+	      const aViews = Number(a.views) || 0;
+	      const bViews = Number(b.views) || 0;
+	      let primary = 0;
+	      if (key === 'prompt') {
+	        const aLen = (a.caption || '').replace(/\s+/g, ' ').trim().length;
+	        const bLen = (b.caption || '').replace(/\s+/g, ' ').trim().length;
+	        primary = (aLen - bLen) * dir;
+	      }
+	      else if (key === 'post') {
+	        const aUser = (a.ownerHandle || '').toLowerCase();
+	        const bUser = (b.ownerHandle || '').toLowerCase();
+	        if (aUser !== bUser) primary = aUser.localeCompare(bUser) * dir;
+	        const aCap = (a.caption || a.id || '').toLowerCase();
+	        const bCap = (b.caption || b.id || '').toLowerCase();
+	        if (!primary) primary = aCap.localeCompare(bCap) * dir;
+	      }
+	      else if (key === 'views') {
+	        primary = (aViews - bViews) * dir;
+	      }
+	      else if (key === 'duration') {
+	        // Parse duration strings like "10s" or "10.5s" to numeric values for sorting
+	        const parseDuration = (d) => {
+	          if (!d || d === '—') return -1;
+	          const match = d.match(/^(\d+(?:\.\d+)?)s$/);
+	          return match ? parseFloat(match[1]) : -1;
+	        };
+	        const aDur = parseDuration(a.duration);
+	        const bDur = parseDuration(b.duration);
+	        if (aDur !== bDur) {
+	          primary = (aDur - bDur) * dir;
+	        }
+	        // If durations are equal, fall through to views tiebreaker below
+	      }
+	      else if (key === 'likes') primary = (a.likes - b.likes) * dir;
+	      else if (key === 'remixes') primary = (a.remixes - b.remixes) * dir;
+	      else if (key === 'comments') primary = (a.comments - b.comments) * dir;
+	      else if (key === 'rr') primary = ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
+	      else if (key === 'ir') primary = ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
+	      else if (key === 'expiring') primary = (a.expiringMin - b.expiringMin) * dir;
+
+	      if (primary) return primary;
+	      // For any tie in the active sort column, secondary-sort by decreasing views.
+	      if (key !== 'views') {
+	        const viewDiff = bViews - aViews;
+	        if (viewDiff) return viewDiff;
+	      }
+	      // Final deterministic tiebreaker.
+	      return String(a.id || '').localeCompare(String(b.id || ''));
+	    });
+	    return rows;
+	  }
 
 
   function hideAllCards(hide) {
@@ -4155,7 +4253,9 @@ async function renderAnalyzeTable(force = false) {
           const hasRows = !!(analyzeTableEl && analyzeTableEl.tBodies[0] && analyzeTableEl.tBodies[0].rows.length);
           // After rapid gather completes, show helper text if there are rows
           if (analyzeHelperTextEl) {
-            analyzeHelperTextEl.style.display = hasRows ? '' : 'none';
+            const winH = Number(analyzeWindowHours) || 24;
+            const shouldShow = hasRows || winH <= 1;
+            analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
           }
         } catch {}
       }, 0);
@@ -4232,7 +4332,9 @@ async function renderAnalyzeTable(force = false) {
           // Hide helper text during gather mode OR during rapid analyze gather
           if (analyzeHelperTextEl) {
             const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-            const shouldShow = hasRows && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+            const winH = Number(analyzeWindowHours) || 24;
+            const shouldShow =
+              (hasRows || winH <= 1) && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
             analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
           }
         } catch {}
@@ -4253,7 +4355,9 @@ async function renderAnalyzeTable(force = false) {
           // Hide helper text during gather mode OR during rapid analyze gather
           if (analyzeHelperTextEl) {
             const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-            const shouldShow = hasRows && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+            const winH = Number(analyzeWindowHours) || 24;
+            const shouldShow =
+              (hasRows || winH <= 1) && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
             analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
           }
         } catch {}
@@ -4299,10 +4403,27 @@ async function renderAnalyzeTable(force = false) {
     for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
-      if (limitMin == null || isGatheringActiveThisTab) {
+      // If we're not on a page where filters apply, don't hide anything.
+      if ((!isProfile() && !isTopFeed()) || limitMin == null || isGatheringActiveThisTab) {
         card.style.display = '';
         continue;
       }
+
+      if (limitMin === 'no_remixes') {
+        // Only meaningful on Top feed; elsewhere don't hide.
+        if (!isTopFeed()) {
+          card.style.display = '';
+          continue;
+        }
+        const rx = idToRemixes.get(id);
+        // Show only posts we definitively know have zero remixes.
+        // If remix count is unknown yet, hide until data arrives (like time filters).
+        const nRx = Number(rx);
+        const show = Number.isFinite(nRx) && nRx === 0;
+        card.style.display = show ? '' : 'none';
+        continue;
+      }
+
       const show = Number.isFinite(meta?.ageMin) && meta.ageMin <= limitMin;
       card.style.display = show ? '' : 'none';
     }
@@ -4755,8 +4876,15 @@ async function renderAnalyzeTable(force = false) {
       // Safety check: ensure we don't process comments/replies as if they were the main post
       // This happens because comments often contain the post_id they belong to, and getItemId finds it via deep search
       const rawP = it?.post || it || {};
-      if (rawP.post_id && rawP.post_id === id && rawP.id !== id) {
-        continue;
+      if (rawP.id !== id) {
+        const refs = [
+          rawP.post_id,
+          rawP.parent_post_id,
+          rawP.root_post_id,
+          rawP.source_post_id,
+          rawP.remix_target_post_id,
+        ];
+        if (refs.some((r) => typeof r === 'string' && r === id)) continue;
       }
 
       const uv = getUniqueViews(it);
@@ -5175,10 +5303,9 @@ async function renderAnalyzeTable(force = false) {
         dlog('feed', 'processed remix_posts', { count: json.remix_posts.items.length });
       }
       
-      // Process children (replies/comments)
+      // Skip children (replies/comments). We only collect posts and remixes.
       if (json?.children?.items && Array.isArray(json.children.items)) {
-        processFeedJson({ items: json.children.items });
-        dlog('feed', 'processed children', { count: json.children.items.length });
+        dlog('feed', 'skipped children (comments)', { count: json.children.items.length });
       }
       
       // Verify main post data is still correct after all processing
@@ -5519,9 +5646,22 @@ async function renderAnalyzeTable(force = false) {
     dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
   }
 
-  function renderCharacterStats() {
-    // Add sort button if dialog is open
-    addCharacterSortButton();
+	  function renderCharacterStats() {
+	    // On profile pages, the character dialog can get too narrow.
+	    // Ensure the dialog content has a reasonable min width.
+	    try {
+	      if (location.pathname.includes('/profile')) {
+	        const anyCharLink = document.querySelector('div[role="dialog"] a[href^="/profile/"]');
+	        const dialog = anyCharLink?.closest?.('div[role="dialog"]');
+	        const headerText = dialog?.querySelector?.('h2, [role="heading"]')?.textContent || '';
+	        if (dialog && /edit characters/i.test(headerText) && !dialog.dataset.soraUvMinWidthSet) {
+	          if (!dialog.style.minWidth) dialog.style.minWidth = '524px';
+	          dialog.dataset.soraUvMinWidthSet = 'true';
+	        }
+	      }
+	    } catch {}
+	    // Add sort button if dialog is open
+	    addCharacterSortButton();
 
     // Find all character links in the dialog
     const characterLinks = document.querySelectorAll('a[href^="/profile/"]');
@@ -5685,7 +5825,11 @@ async function renderAnalyzeTable(force = false) {
     if (isGatheringActiveThisTab) console.log('Sora UV: Route change — stopping gather for this tab.');
     isGatheringActiveThisTab = false;
     stopGathering(false);
-    setGatherState({ filterIndex: 0, isGathering: false });
+    // Preserve any active filter across navigation; only stop gather state.
+    const s = getGatherState() || {};
+    s.isGathering = false;
+    delete s.refreshDeadline;
+    setGatherState(s);
     const bar = controlBar || ensureControlBar();
     if (bar && typeof bar.updateGatherState === 'function') bar.updateGatherState();
     if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();

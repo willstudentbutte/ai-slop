@@ -408,6 +408,7 @@
       const postTime = getPostTimeStrict(p) || 0;
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
+      const views = num(last?.views);
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
       const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
       const owner = user?.handle || '';
@@ -430,7 +431,7 @@
       if (DBG_SORT){
         try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
       }
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap };
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap, views };
     });
     // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -439,6 +440,77 @@
       return a.pidBI < b.pidBI ? 1 : -1; // descending: bigger id => newer first
     });
     const posts = withTs.concat(noTs);
+
+    // If a list-action filter is active, surface selected posts to top.
+    let orderedPosts = posts;
+    const activeActionId = opts.activeActionId || null;
+    if (activeActionId && visibleSet && visibleSet.size > 0 && visibleSet.size < posts.length) {
+      const pidToPost = new Map(posts.map(p=>[p.pid, p]));
+      const bottomComparator = (a,b)=>{
+        const dv = a.views - b.views;
+        if (dv !== 0) return dv;
+        const dt = (a.postTime || 0) - (b.postTime || 0);
+        if (dt !== 0) return dt;
+        if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+        return a.pidBI < b.pidBI ? -1 : 1;
+      };
+      const topComparator = (a,b)=>{
+        const dv = b.views - a.views;
+        if (dv !== 0) return dv;
+        const dt = (b.postTime || 0) - (a.postTime || 0);
+        if (dt !== 0) return dt;
+        if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+        return a.pidBI < b.pidBI ? 1 : -1;
+      };
+
+      let selectedOrdered = [];
+      if (activeActionId === 'top5' || activeActionId === 'top10') {
+        selectedOrdered = posts.filter(p=>visibleSet.has(p.pid)).slice().sort(topComparator);
+      } else if (activeActionId === 'bottom5' || activeActionId === 'bottom10') {
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const withAge = posts.map(p=>({ ...p, ageMs: p.postTime ? now - p.postTime : Infinity }));
+        const olderThan24h = withAge.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS).sort(bottomComparator);
+        const allSorted = withAge.slice().sort(bottomComparator);
+        for (const it of olderThan24h) {
+          if (visibleSet.has(it.pid)) selectedOrdered.push(pidToPost.get(it.pid));
+        }
+        for (const it of allSorted) {
+          if (visibleSet.has(it.pid) && !selectedOrdered.find(p=>p.pid===it.pid)) {
+            selectedOrdered.push(pidToPost.get(it.pid));
+          }
+        }
+      } else if (activeActionId === 'stale') {
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        selectedOrdered = posts
+          .filter(p=>visibleSet.has(p.pid))
+          .slice()
+          .sort((a,b)=>{
+            const at = toTs(a.last?.t) || 0;
+            const bt = toTs(b.last?.t) || 0;
+            const aAge = at ? now - at : Infinity;
+            const bAge = bt ? now - bt : Infinity;
+            const dAge = bAge - aAge; // most stale first
+            if (dAge !== 0) return dAge;
+            return bottomComparator(a,b);
+          })
+          .filter(p=>{
+            const t = toTs(p.last?.t) || 0;
+            const ageMs = t ? now - t : Infinity;
+            return ageMs > TWENTY_FOUR_HOURS_MS;
+          });
+      } else {
+        // last5/last10 or other actions: keep default newest-first order.
+        selectedOrdered = posts.filter(p=>visibleSet.has(p.pid));
+      }
+
+      const unselected = posts.filter(p=>!visibleSet.has(p.pid));
+      orderedPosts = [];
+      orderedPosts.push(...selectedOrdered);
+      if (selectedOrdered.length && unselected.length) orderedPosts.push({ __separator: true });
+      orderedPosts.push(...unselected);
+    }
 
     // Update metric cards (sum of latest values for visible posts)
     try{
@@ -481,8 +553,14 @@
       }
     } catch {}
 
-    for (let i=0;i<posts.length;i++){
-      const p = posts[i];
+    for (let i=0;i<orderedPosts.length;i++){
+      const p = orderedPosts[i];
+      if (p && p.__separator) {
+        const sep = document.createElement('div');
+        sep.className = 'posts-separator';
+        wrap.appendChild(sep);
+        continue;
+      }
       const row = document.createElement('div');
       row.className='post';
       row.dataset.pid = p.pid;
@@ -2977,12 +3055,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
     const visibleSet = new Set();
+    // On each dashboard open, start from Show All for the selected user.
+    // Do not persist this reset; user selections still persist across sessions.
+    let forceShowAllOnLoad = true;
     let visibilityByUser = {};
     try {
       const st = await chrome.storage.local.get('visibilityByUser');
       visibilityByUser = st.visibilityByUser || {};
     } catch {}
     let pendingPostPurge = null;
+    let currentListActionId = null;
     
     // Compare users state
     const compareUsers = new Set();
@@ -3897,25 +3979,33 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       viewsPerPersonChart.setData(vppSeries, timeWindowMinutes);
     }
 
-    async function refreshUserUI(opts={}){
-      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
-      const user = metrics.users[currentUserKey];
-      if (!user){
-        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
-      }
+	    async function refreshUserUI(opts={}){
+	      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
+	      const user = metrics.users[currentUserKey];
+	      // Always reset list actions to "Show All" on initial dashboard open,
+	      // even if there is no selected user yet.
+	      if (forceShowAllOnLoad) setListActionActive('showAll');
+	      if (!user){
+	        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
+	      }
       // No precompute needed for IR; use latest available remix count only for cards
       // Integrity check: remove posts incorrectly attributed to this user
       // Reconcile ownership (selected user only), then reclaim, then remove empty posts
       await pruneMismatchedPostsForUser(metrics, currentUserKey);
       await reclaimFromUnknownForUser(metrics, currentUserKey);
       await pruneEmptyPostsForUser(metrics, currentUserKey);
-      const colorFor = makeColorMap(user);
-      if (visibleSet.size === 0 && !preserveEmpty){
-        // Restore from saved state (including empty) or default to last 20 most recent posts when no saved state
-        if (Object.prototype.hasOwnProperty.call(visibilityByUser, currentUserKey)){
-          const saved = visibilityByUser[currentUserKey];
-          if (Array.isArray(saved)) saved.forEach(pid=>visibleSet.add(pid));
-        } else {
+	      const colorFor = makeColorMap(user);
+	      if (forceShowAllOnLoad){
+	        visibleSet.clear();
+	        Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+	        setListActionActive('showAll');
+	        forceShowAllOnLoad = false;
+	      } else if (visibleSet.size === 0 && !preserveEmpty){
+	        // Restore from saved state (including empty) or default to last 20 most recent posts when no saved state
+	        if (Object.prototype.hasOwnProperty.call(visibilityByUser, currentUserKey)){
+	          const saved = visibilityByUser[currentUserKey];
+	          if (Array.isArray(saved)) saved.forEach(pid=>visibleSet.add(pid));
+	        } else {
           // Only include posts with a valid post_time when choosing the default 20
           const dated = Object.entries(user.posts||{})
             .map(([pid,p])=>({ pid, t: getPostTimeStrict(p) || 0 }))
@@ -3933,6 +4023,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
       }
       buildPostsList(user, colorFor, visibleSet, { 
+        activeActionId: currentListActionId,
         onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); viewsPerPersonChart.setHoverSeries(pid); },
         onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
       });
@@ -5090,9 +5181,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
+
+    function setListActionActive(activeId){
+      currentListActionId = activeId || null;
+      try{
+        const wrap = document.querySelector('.list-actions');
+        if (!wrap) return;
+        wrap.querySelectorAll('button').forEach(btn=>{
+          if (btn.id === activeId) btn.classList.add('active');
+          else btn.classList.remove('active');
+        });
+      } catch {}
+    }
+
       $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      $('#showAll').addEventListener('click', ()=>{ setListActionActive('showAll'); const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ setListActionActive('hideAll'); visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
       // First 24 hours slider
       function fmtSliderTime(minutes){
         if (minutes < 60) return `${minutes}m`;
@@ -5122,6 +5226,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         viewsPerPersonSliderValue.textContent = fmtSliderTime(parseInt(viewsPerPersonSlider.value) || 1440);
       }
       $('#last5').addEventListener('click', ()=>{
+        setListActionActive('last5');
         const u = metrics.users[currentUserKey];
         if (!u) return;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
@@ -5141,6 +5246,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#last10').addEventListener('click', ()=>{
+        setListActionActive('last10');
         const u = metrics.users[currentUserKey];
         if (!u) return;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
@@ -5160,38 +5266,59 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top5').addEventListener('click', ()=>{
+        setListActionActive('top5');
         const u = metrics.users[currentUserKey];
         if (!u) return;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
-            views: num(last?.views)
+            views: num(last?.views),
+            postTime: getPostTimeStrict(p) || 0,
+            pidBI: pidBigInt(pid)
           };
         });
-        const sorted = mapped.sort((a,b)=>b.views - a.views);
+        const sorted = mapped.sort((a,b)=>{
+          const dv = b.views - a.views;
+          if (dv !== 0) return dv;
+          const dt = (b.postTime || 0) - (a.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
         visibleSet.clear();
         sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top10').addEventListener('click', ()=>{
+        setListActionActive('top10');
         const u = metrics.users[currentUserKey];
         if (!u) return;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
-            views: num(last?.views)
+            views: num(last?.views),
+            postTime: getPostTimeStrict(p) || 0,
+            pidBI: pidBigInt(pid)
           };
         });
-        const sorted = mapped.sort((a,b)=>b.views - a.views);
+        const sorted = mapped.sort((a,b)=>{
+          const dv = b.views - a.views;
+          if (dv !== 0) return dv;
+          const dt = (b.postTime || 0) - (a.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
         visibleSet.clear();
         sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom5').addEventListener('click', ()=>{
+        setListActionActive('bottom5');
         const u = metrics.users[currentUserKey];
         if (!u) return;
         const now = Date.now();
@@ -5204,17 +5331,47 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             pid,
             postTime,
             views: num(last?.views),
-            ageMs
+            ageMs,
+            pidBI: pidBigInt(pid)
           };
         });
         const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
-        const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
+        const sortedOlder = olderThan24h.sort((a,b)=>{
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0); // tie-break oldest first
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1; // final tie-break oldest-ish first
+        });
+        const sortedAll = mapped.slice().sort((a,b)=>{
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        });
+        const picked = [];
+        for (const it of sortedOlder) {
+          if (picked.length >= 5) break;
+          picked.push(it);
+        }
+        if (picked.length < 5) {
+          const seen = new Set(picked.map(p=>p.pid));
+          for (const it of sortedAll) {
+            if (picked.length >= 5) break;
+            if (seen.has(it.pid)) continue;
+            picked.push(it);
+          }
+        }
         visibleSet.clear();
-        sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
+        picked.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
-        refreshUserUI(); persistVisibility();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom10').addEventListener('click', ()=>{
+        setListActionActive('bottom10');
         const u = metrics.users[currentUserKey];
         if (!u) return;
         const now = Date.now();
@@ -5227,13 +5384,62 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             pid,
             postTime,
             views: num(last?.views),
-            ageMs
+            ageMs,
+            pidBI: pidBigInt(pid)
           };
         });
         const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
-        const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
+        const sortedOlder = olderThan24h.sort((a,b)=>{
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        });
+        const sortedAll = mapped.slice().sort((a,b)=>{
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        });
+        const picked = [];
+        for (const it of sortedOlder) {
+          if (picked.length >= 10) break;
+          picked.push(it);
+        }
+        if (picked.length < 10) {
+          const seen = new Set(picked.map(p=>p.pid));
+          for (const it of sortedAll) {
+            if (picked.length >= 10) break;
+            if (seen.has(it.pid)) continue;
+            picked.push(it);
+          }
+        }
         visibleSet.clear();
-        sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
+        picked.forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+      });
+
+      const staleBtn = $('#stale');
+      if (staleBtn) staleBtn.addEventListener('click', ()=>{
+        setListActionActive('stale');
+        const u = metrics.users[currentUserKey];
+        if (!u) return;
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
+          const last = latestSnapshot(p.snapshots);
+          const lastRefresh = toTs(last?.t) || 0;
+          const ageMs = lastRefresh ? now - lastRefresh : Infinity;
+          return { pid, ageMs };
+        });
+        const stale = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        visibleSet.clear();
+        stale.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
