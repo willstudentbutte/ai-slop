@@ -20,8 +20,9 @@
 
   // Listen for metrics snapshots posted from the injected script and persist to storage.
   (function () {
-    const PENDING = [];
-    let flushTimer = null;
+  const PENDING = [];
+  let flushTimer = null;
+  let metricsCache = { users: {} }; // in-memory fallback so Analyze still works if storage is unavailable
 
   // Debug toggles
   const DEBUG = { storage: false, thumbs: false };
@@ -56,11 +57,14 @@
       const req = d.req;
       (async () => {
         try {
-          const { metrics = { users:{} } } = await chrome.storage.local.get('metrics');
+          const { metrics: rawMetrics } = await chrome.storage.local.get('metrics');
+          const metrics = normalizeMetrics(rawMetrics) || metricsCache || { users: {} };
+          metricsCache = metrics;
           // Reply back into the page
           window.postMessage({ __sora_uv__: true, type: 'metrics_response', req, metrics }, '*');
         } catch {
-          window.postMessage({ __sora_uv__: true, type: 'metrics_response', req, metrics: { users:{} } }, '*');
+          // Fall back to in-memory cache if storage is unavailable
+          window.postMessage({ __sora_uv__: true, type: 'metrics_response', req, metrics: metricsCache || { users:{} } }, '*');
         }
       })();
     }
@@ -118,7 +122,7 @@
       
       try {
         const { metrics: rawMetrics } = await chrome.storage.local.get('metrics');
-        const metrics = normalizeMetrics(rawMetrics);
+        const metrics = normalizeMetrics(rawMetrics || metricsCache);
         dlog('storage', 'flush begin', { count: items.length });
         for (const snap of items) {
           const userKey = snap.userKey || snap.pageUserKey || 'unknown';
@@ -251,6 +255,7 @@
         }
         try {
           await chrome.storage.local.set({ metrics });
+          metricsCache = metrics; // keep a hot copy for quick responses even if storage hiccups
           
           // Debug: Verify duration is in the metrics we just saved
           if (DEBUG.storage) {
