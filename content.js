@@ -3,23 +3,38 @@
  * Licensed under the MIT License. See the LICENSE file for details.
  */
 
-// Inject inject.js into the page context so we can monkey-patch window.fetch/XHR.
 (() => {
-  try { console.log('[SoraUV] content: start, injecting inject.js'); } catch {}
-  const s = document.createElement('script');
-  s.src = chrome.runtime.getURL('inject.js');
-  s.onload = () => { try { console.log('[SoraUV] content: inject.js attached'); } catch {} s.remove(); };
-  (document.head || document.documentElement).appendChild(s);
-})();
+  // Hard-disable all extension behavior on draft detail pages (/d/...), per performance issues.
+  const p = String(location.pathname || '');
+  if (p === '/d' || p.startsWith('/d/')) {
+    return;
+  }
 
-// Listen for metrics snapshots posted from the injected script and persist to storage.
-(function () {
-  const PENDING = [];
-  let flushTimer = null;
+  // Inject inject.js into the page context so we can monkey-patch window.fetch/XHR.
+  (() => {
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('inject.js');
+    s.onload = () => { s.remove(); };
+    (document.head || document.documentElement).appendChild(s);
+  })();
+
+  // Listen for metrics snapshots posted from the injected script and persist to storage.
+  (function () {
+    const PENDING = [];
+    let flushTimer = null;
 
   // Debug toggles
-  const DEBUG = { storage: true, thumbs: true };
+  const DEBUG = { storage: false, thumbs: false };
   const dlog = (topic, ...args) => { try { if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args); } catch {} };
+
+  const DEFAULT_METRICS = { users: {} };
+
+  function normalizeMetrics(raw) {
+    if (!raw || typeof raw !== 'object') return { ...DEFAULT_METRICS };
+    const users = raw.users;
+    if (!users || typeof users !== 'object' || Array.isArray(users)) return { ...DEFAULT_METRICS };
+    return { ...raw, users };
+  }
 
   function scheduleFlush() {
     if (flushTimer) return;
@@ -102,11 +117,13 @@
       const items = PENDING.splice(0, PENDING.length);
       
       try {
-        const { metrics = { users: {} } } = await chrome.storage.local.get('metrics');
+        const { metrics: rawMetrics } = await chrome.storage.local.get('metrics');
+        const metrics = normalizeMetrics(rawMetrics);
         dlog('storage', 'flush begin', { count: items.length });
         for (const snap of items) {
           const userKey = snap.userKey || snap.pageUserKey || 'unknown';
           const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [], cameos: [] });
+          if (!userEntry.posts || typeof userEntry.posts !== 'object' || Array.isArray(userEntry.posts)) userEntry.posts = {};
           if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
           if (snap.postId) {
             const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
@@ -263,5 +280,6 @@
     }
   }
 
-  window.addEventListener('message', onMessage);
+    window.addEventListener('message', onMessage);
+  })();
 })();

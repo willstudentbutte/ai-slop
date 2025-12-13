@@ -26,11 +26,10 @@
   'use strict';
 
   try {
-    console.log('[SoraUV] inject.js loaded');
   } catch {}
 
   // Debug toggles
-  const DEBUG = { feed: true, thumbs: true, analyze: true, drafts: false };
+  const DEBUG = { feed: false, thumbs: false, analyze: false, drafts: false };
   const dlog = (topic, ...args) => {
     try {
       if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args);
@@ -56,7 +55,7 @@
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
 
   // Debug toggle for characters
-  DEBUG.characters = true;
+  DEBUG.characters = false;
 
   // == State Maps ==
   const idToUnique = new Map();
@@ -135,6 +134,13 @@
   // 0 = show all, 1 = show bookmarked only, 2 = show unbookmarked only, 3 = violations only
   let bookmarksFilterState = 0;
   let bookmarksBtn = null;
+
+  // Dashboard injection perf guards
+  let dashboardBtnEl = null;
+  let dashboardInjectRafId = null;
+  let dashboardInjectRetryId = null;
+  let dashboardInjectLastAttemptMs = 0;
+  const DASHBOARD_INJECT_THROTTLE_MS = 1500;
 
   // Performance: Cache draft cards to avoid constant DOM queries
   let cachedDraftCards = null;
@@ -244,6 +250,7 @@
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
+  const isDraftDetail = () => location.pathname === '/d' || location.pathname.startsWith('/d/');
 
   const isTopFeed = () => {
     try {
@@ -1393,25 +1400,6 @@
     badge.dataset.key = newKey;
 
     badge.innerHTML = '';
-    if (durationStr) {
-      const dims = idToDimensions.get(id);
-      let modelName = '';
-      if (dims) {
-        const w = dims.width;
-        const h = dims.height;
-        // Check for Sora 2 (352x640 or 640x352)
-        if ((w === 352 && h === 640) || (w === 640 && h === 352)) {
-          modelName = ' Sora 2';
-        }
-        // Check for Sora 2 Pro (512x896 or 896x512)
-        else if ((w === 512 && h === 896) || (w === 896 && h === 512)) {
-          modelName = ' Sora 2 Pro';
-        }
-      }
-      const tooltip = `${durationStr}${modelName} video`;
-      const el = createPill(badge, `⏱ ${durationStr}`, tooltip, true);
-      el.style.background = pillBg;
-    }
     if (viewsStr) {
       let tooltip = `${fmtInt(uv)} Unique Views`;
       if (impactStr) {
@@ -1437,6 +1425,25 @@
       if (isSuperHot) {
         el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
       }
+    }
+    if (durationStr) {
+      const dims = idToDimensions.get(id);
+      let modelName = '';
+      if (dims) {
+        const w = dims.width;
+        const h = dims.height;
+        // Check for Sora 2 (352x640 or 640x352)
+        if ((w === 352 && h === 640) || (w === 640 && h === 352)) {
+          modelName = ' Sora 2';
+        }
+        // Check for Sora 2 Pro (512x896 or 896x512)
+        else if ((w === 512 && h === 896) || (w === 896 && h === 512)) {
+          modelName = ' Sora 2 Pro';
+        }
+      }
+      const tooltip = `${durationStr}${modelName} video`;
+      const el = createPill(badge, `${durationStr}`, tooltip, true);
+      el.style.background = pillBg;
     }
   } 
 
@@ -1578,6 +1585,19 @@
 
   // == Detail badge (post page only) ==
   
+  function teardownDetailBadge() {
+    if (detailBadgeRetryInterval) {
+      clearInterval(detailBadgeRetryInterval);
+      detailBadgeRetryInterval = null;
+    }
+    if (detailBadgeEl && document.contains(detailBadgeEl)) {
+      try {
+        detailBadgeEl.remove();
+      } catch {}
+    }
+    detailBadgeEl = null;
+  }
+
   // This function targets the visible video container
   function findDetailBadgeTarget() {
     // We look for the specific structure of the detail modal/page
@@ -1922,6 +1942,11 @@
   }
 
   function renderDetailBadge() {
+    if (!isPost()) {
+      teardownDetailBadge();
+      return;
+    }
+
     const el = ensureDetailBadgeContainer();
     
     // If no container found, or if we have one but want to clear it (e.g. navigated away)
@@ -2075,7 +2100,47 @@
     
     el.innerHTML = ''; 
     
-    // 1. Duration Pill (first position for prominence) - match feed badge exactly
+    // 1. Views Pill - match feed badge exactly
+    if (viewsStr) {
+      let tooltip = `${fmtInt(uv)} Unique Views`;
+      if (impactStr) {
+        tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
+      }
+      const metEl = createPill(el, viewsStr, tooltip, true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 2. IR Pill - match feed badge exactly
+    if (irStr) {
+      const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 3. RR Pill - match feed badge exactly
+    if (rrStr) {
+      const metEl = createPill(el, rrStr, 'Total Remixes relative to Likes', true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 4. Time/Age Pill - match feed badge exactly
+    if (timeEmojiStr) {
+      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
+      const nearDay = isNearWholeDay(ageMin);
+      const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
+      
+      const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
+      timeEl.style.background = pillBg;
+      timeEl.style.pointerEvents = 'auto';
+
+      if (isSuperHot) {
+        timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      }
+    }
+
+    // 5. Duration Pill - moved to end
     if (durationStr) {
       const dims = idToDimensions.get(sid);
       let modelName = '';
@@ -2092,49 +2157,9 @@
         }
       }
       const tooltip = `${durationStr}${modelName} video`;
-      const metEl = createPill(el, `⏱ ${durationStr}`, tooltip, true);
+      const metEl = createPill(el, `${durationStr}`, tooltip, true);
       metEl.style.background = pillBg;
       metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 2. Views Pill - match feed badge exactly
-    if (viewsStr) {
-      let tooltip = `${fmtInt(uv)} Unique Views`;
-      if (impactStr) {
-        tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
-      }
-      const metEl = createPill(el, viewsStr, tooltip, true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 3. IR Pill - match feed badge exactly
-    if (irStr) {
-      const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 4. RR Pill - match feed badge exactly
-    if (rrStr) {
-      const metEl = createPill(el, rrStr, 'Total Remixes relative to Likes', true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 5. Time/Age Pill - match feed badge exactly
-    if (timeEmojiStr) {
-      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
-      const nearDay = isNearWholeDay(ageMin);
-      const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
-      
-      const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
-      timeEl.style.background = pillBg;
-      timeEl.style.pointerEvents = 'auto';
-
-      if (isSuperHot) {
-        timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
-      }
     }
 
     // Keep container pointerEvents: none to allow clicks to pass through to video controls, 
@@ -2453,14 +2478,13 @@
     
     // Try immediately and after a delay
     tryUpdateFeedButton();
-    setTimeout(tryUpdateFeedButton, 100);
-    setTimeout(tryUpdateFeedButton, 500);
     
     // Watch for DOM changes in case button is added dynamically
     const observer = new MutationObserver(() => {
       tryUpdateFeedButton();
     });
     observer.observe(document.body, { childList: true, subtree: true });
+    bar._feedButtonObserver = observer;
     
     // Add scroll event listener - update directly on every scroll
     const handleScroll = () => {
@@ -2468,6 +2492,11 @@
       updateFeedButtonPosition();
     };
     window.addEventListener('scroll', handleScroll, { passive: true });
+    bar._handleScroll = handleScroll;
+    bar._feedButtonTimers = [
+      setTimeout(tryUpdateFeedButton, 100),
+      setTimeout(tryUpdateFeedButton, 500),
+    ];
     
     // Store the update function on the bar for later use
     bar.updateBarPosition = updateBarPosition;
@@ -2926,6 +2955,25 @@
     document.documentElement.appendChild(bar);
     controlBar = bar;
     return bar;
+  }
+
+  function teardownControlBar() {
+    const bar = controlBar;
+    if (!bar) return;
+    try {
+      if (bar._handleScroll) window.removeEventListener('scroll', bar._handleScroll);
+    } catch {}
+    try {
+      if (bar._feedButtonObserver) bar._feedButtonObserver.disconnect();
+    } catch {}
+    try {
+      const timers = Array.isArray(bar._feedButtonTimers) ? bar._feedButtonTimers : [];
+      for (const t of timers) clearTimeout(t);
+    } catch {}
+    try {
+      if (document.contains(bar)) bar.remove();
+    } catch {}
+    controlBar = null;
   }
 
 
@@ -4731,10 +4779,19 @@ async function renderAnalyzeTable(force = false) {
 
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
+    const isLikelyJsonResponse = (res) => {
+      try {
+        const ct = String(res?.headers?.get?.('content-type') || '').toLowerCase();
+        return ct.includes('application/json') || ct.includes('+json');
+      } catch {
+        return false;
+      }
+    };
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
       const res = await origFetch.apply(this, arguments);
       try {
+        if (isDraftDetail()) return res;
         const url = typeof input === 'string' ? input : input?.url || '';
 
         // Intercept /backend/nf/create to capture task_id -> source draft mapping for draft remixes
@@ -4782,19 +4839,22 @@ async function renderAnalyzeTable(force = false) {
             })
             .catch(() => {});
         } else if (typeof url === 'string' && url.startsWith(location.origin)) {
-          res
-            .clone()
-            .json()
-            .then((j) => {
-              if (looksLikePostDetail(j)) {
-                dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
-                processPostDetailJson(j);
-              } else if (looksLikeSoraFeed(j)) {
-                dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
-                processFeedJson(j);
-              }
-            })
-            .catch(() => {});
+          // Avoid cloning/parsing bodies for non-JSON same-origin requests (can be very expensive on /d/...).
+          if (isLikelyJsonResponse(res)) {
+            res
+              .clone()
+              .json()
+              .then((j) => {
+                if (looksLikePostDetail(j)) {
+                  dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
+                  processPostDetailJson(j);
+                } else if (looksLikeSoraFeed(j)) {
+                  dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
+                  processFeedJson(j);
+                }
+              })
+              .catch(() => {});
+          }
         }
       } catch {}
       return res;
@@ -4803,6 +4863,7 @@ async function renderAnalyzeTable(force = false) {
     XMLHttpRequest.prototype.open = function (method, url) {
       this.addEventListener('load', function () {
         try {
+          if (isDraftDetail()) return;
           if (typeof url === 'string') {
             // Intercept /backend/nf/create for draft remix tracking
             if (NF_CREATE_RE.test(url)) {
@@ -4852,13 +4913,16 @@ async function renderAnalyzeTable(force = false) {
               } catch {}
             } else if (url.startsWith(location.origin)) {
               try {
-                const j = JSON.parse(this.responseText);
-                if (looksLikePostDetail(j)) {
-                  dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
-                  processPostDetailJson(j);
-                } else if (looksLikeSoraFeed(j)) {
-                  dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
-                  processFeedJson(j);
+                const ct = String(this.getResponseHeader('content-type') || '').toLowerCase();
+                if (ct.includes('application/json') || ct.includes('+json')) {
+                  const j = JSON.parse(this.responseText);
+                  if (looksLikePostDetail(j)) {
+                    dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
+                    processPostDetailJson(j);
+                  } else if (looksLikeSoraFeed(j)) {
+                    dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
+                    processFeedJson(j);
+                  }
                 }
               } catch {}
             }
@@ -5687,28 +5751,34 @@ async function renderAnalyzeTable(force = false) {
   }
 
 	  function renderCharacterStats() {
-	    // On profile pages, the character dialog can get too narrow.
-	    // Ensure the dialog content has a reasonable min width.
+	    // Only do work when we're actually in the Characters UI (dialog or characters page).
+	    let dialog = null;
+	    let inCharDialog = false;
 	    try {
-	      if (location.pathname.includes('/profile')) {
-	        const anyCharLink = document.querySelector('div[role="dialog"] a[href^="/profile/"]');
-	        const dialog = anyCharLink?.closest?.('div[role="dialog"]');
-	        const headerText = dialog?.querySelector?.('h2, [role="heading"]')?.textContent || '';
-	        if (dialog && /edit characters/i.test(headerText) && !dialog.dataset.soraUvMinWidthSet) {
-	          if (!dialog.style.minWidth) dialog.style.minWidth = '524px';
-	          dialog.dataset.soraUvMinWidthSet = 'true';
-	        }
+	      const anyCharLink = document.querySelector('div[role="dialog"] a[href^="/profile/"]');
+	      dialog = anyCharLink?.closest?.('div[role="dialog"]') || null;
+	      const headerText = dialog?.querySelector?.('h2, [role="heading"]')?.textContent || '';
+	      inCharDialog = !!(dialog && /edit characters/i.test(headerText));
+	      // On profile pages, the character dialog can get too narrow; enforce a min width once.
+	      if (inCharDialog && !dialog.dataset.soraUvMinWidthSet) {
+	        if (!dialog.style.minWidth) dialog.style.minWidth = '524px';
+	        dialog.dataset.soraUvMinWidthSet = 'true';
 	      }
 	    } catch {}
+
+	    const inCharactersPage = /\/characters($|\?)/i.test(`${location.pathname}${location.search || ''}`);
+	    if (!inCharDialog && !inCharactersPage) return;
+
 	    // Add sort button if dialog is open
 	    addCharacterSortButton();
 
-    // Find all character links in the dialog
-    const characterLinks = document.querySelectorAll('a[href^="/profile/"]');
+	    // Find all character links (prefer scoping to dialog when present)
+	    const root = inCharDialog && dialog ? dialog : document;
+	    const characterLinks = root.querySelectorAll('a[href^="/profile/"]');
 
-    let hasNewStats = false;
+	    let hasNewStats = false;
 
-    for (const link of characterLinks) {
+	    for (const link of characterLinks) {
       // Skip if we've already added stats to this link
       if (link.querySelector('.sora-uv-char-stats')) continue;
 
@@ -5810,29 +5880,54 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // == Observers & Lifecycle ==
+  function runRenderPass() {
+    if (isDraftDetail()) return;
+    const onExplore = isExplore();
+    const onProfile = isProfile();
+    const onPost = isPost();
+    const onDrafts = isDrafts();
+    const shouldRenderCards = onExplore || onProfile || onPost;
+
+    if (shouldRenderCards) renderBadges();
+    if (onPost) renderDetailBadge();
+    else teardownDetailBadge();
+    if (onProfile) renderProfileImpact();
+    if (onDrafts) {
+      renderBookmarkButtons();
+      renderDraftButtons();
+    }
+    // Character stats only matters on profile/characters views; it does its own internal gating.
+    if (location.pathname.includes('/profile')) renderCharacterStats();
+    updateControlsVisibility();
+    scheduleInjectDashboardButton();
+  }
+
   const mo = new MutationObserver(() => {
     if (mo._raf) cancelAnimationFrame(mo._raf);
     mo._raf = requestAnimationFrame(() => {
-      renderBadges();
-      renderDetailBadge();
-      renderProfileImpact();
-      renderBookmarkButtons();
-      renderDraftButtons();
-      renderCharacterStats();
-      updateControlsVisibility();
-      injectDashboardButton();
+      runRenderPass();
     });
   });
 
+  let observersActive = false;
+
   function startObservers() {
+    if (observersActive) return;
+    observersActive = true;
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    renderBadges();
-    renderDetailBadge();
-    renderProfileImpact();
-    renderBookmarkButtons();
-    renderDraftButtons();
-    updateControlsVisibility();
-    injectDashboardButton();
+    runRenderPass();
+  }
+
+  function stopObservers() {
+    if (!observersActive) return;
+    observersActive = false;
+    try {
+      mo.disconnect();
+    } catch {}
+    try {
+      if (mo._raf) cancelAnimationFrame(mo._raf);
+    } catch {}
+    mo._raf = null;
   }
 
   function resetFilterFreshSlate() {
@@ -5862,7 +5957,7 @@ async function renderAnalyzeTable(force = false) {
   })();
 
   function forceStopGatherOnNavigation() {
-    if (isGatheringActiveThisTab) console.log('Sora UV: Route change — stopping gather for this tab.');
+    if (isGatheringActiveThisTab && DEBUG.feed) dlog('feed', 'Route change — stopping gather for this tab.');
     isGatheringActiveThisTab = false;
     stopGathering(false);
     // Preserve any active filter across navigation; only stop gather state.
@@ -6024,6 +6119,48 @@ async function renderAnalyzeTable(force = false) {
     const navigated = rk !== prev;
     lastRouteKey = rk;
 
+    if (isDraftDetail()) {
+      // /d/... draft detail pages are extremely sensitive; avoid all injected work here.
+      try {
+        stopRapidAnalyzeGather();
+        stopAnalyzeAutoRefresh();
+      } catch {}
+      analyzeActive = false;
+      try {
+        if (analyzeOverlayEl) analyzeOverlayEl.style.display = 'none';
+      } catch {}
+
+      try {
+        isGatheringActiveThisTab = false;
+        stopGathering(false);
+        const s = getGatherState() || {};
+        s.isGathering = false;
+        delete s.refreshDeadline;
+        setGatherState(s);
+      } catch {}
+
+      teardownDetailBadge();
+      teardownControlBar();
+      stopObservers();
+
+      try {
+        if (dashboardInjectRafId) cancelAnimationFrame(dashboardInjectRafId);
+      } catch {}
+      dashboardInjectRafId = null;
+      try {
+        if (dashboardInjectRetryId) clearTimeout(dashboardInjectRetryId);
+      } catch {}
+      dashboardInjectRetryId = null;
+      try {
+        if (dashboardBtnEl && document.contains(dashboardBtnEl)) dashboardBtnEl.remove();
+      } catch {}
+      dashboardBtnEl = null;
+      return;
+    } else if (!observersActive) {
+      // If we previously disabled for /d/... and navigated back, resume observers.
+      startObservers();
+    }
+
     if (navigated) {
       forceStopGatherOnNavigation();
       if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
@@ -6057,13 +6194,7 @@ async function renderAnalyzeTable(force = false) {
       }
     }
 
-    renderBadges();
-    renderDetailBadge();
-    renderProfileImpact();
-    renderBookmarkButtons();
-    renderDraftButtons();
-    updateControlsVisibility();
-    injectDashboardButton();
+    runRenderPass();
 
     // SPA navigation can update the URL without a full re-render; always re-apply current filter.
     applyFilter();
@@ -6159,15 +6290,55 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // Inject dashboard button into left sidebar
+  function scheduleDashboardInjectRetry(ms = 1000) {
+    if (dashboardInjectRetryId) return;
+    dashboardInjectRetryId = setTimeout(() => {
+      dashboardInjectRetryId = null;
+      scheduleInjectDashboardButton();
+    }, ms);
+  }
+
+  function isDashboardButtonPresent() {
+    try {
+      if (dashboardBtnEl && document.contains(dashboardBtnEl)) return true;
+      const existing = document.querySelector('.sora-uv-dashboard-btn');
+      if (existing) {
+        dashboardBtnEl = existing;
+        return true;
+      }
+    } catch {}
+    dashboardBtnEl = null;
+    return false;
+  }
+
+  function scheduleInjectDashboardButton() {
+    // Fast path: if we already hold a live reference, do nothing.
+    if (dashboardBtnEl && document.contains(dashboardBtnEl)) return;
+
+    const now = Date.now();
+    const since = now - dashboardInjectLastAttemptMs;
+    if (since < DASHBOARD_INJECT_THROTTLE_MS) {
+      scheduleDashboardInjectRetry(DASHBOARD_INJECT_THROTTLE_MS - since);
+      return;
+    }
+
+    if (dashboardInjectRafId) return;
+    dashboardInjectRafId = requestAnimationFrame(() => {
+      dashboardInjectRafId = null;
+      dashboardInjectLastAttemptMs = Date.now();
+      injectDashboardButton();
+    });
+  }
+
   function injectDashboardButton() {
     // Check if button already exists
-    if (document.querySelector('.sora-uv-dashboard-btn')) return;
+    if (isDashboardButtonPresent()) return;
 
     // Find the left sidebar - it has specific classes
     const sidebar = document.querySelector('div.fixed.left-0.top-0.z-50');
     if (!sidebar) {
       // Retry after a delay if sidebar not found yet
-      setTimeout(injectDashboardButton, 1000);
+      scheduleDashboardInjectRetry(1000);
       return;
     }
 
@@ -6176,7 +6347,7 @@ async function renderAnalyzeTable(force = false) {
     const notificationButton = buttons[buttons.length - 1]; // Get the last "Activity" button (notification bell)
     
     if (!notificationButton) {
-      setTimeout(injectDashboardButton, 1000);
+      scheduleDashboardInjectRetry(1000);
       return;
     }
 
@@ -6214,9 +6385,17 @@ async function renderAnalyzeTable(force = false) {
 
     // Insert before the notification button (above it)
     notificationButton.parentNode.insertBefore(dashboardBtn, notificationButton);
+
+    // Cache a stable reference; React may clone/replace later, but this avoids repeated document-wide lookups.
+    dashboardBtnEl = dashboardBtn;
+
+    if (dashboardInjectRetryId) {
+      clearTimeout(dashboardInjectRetryId);
+      dashboardInjectRetryId = null;
+    }
     
     try {
-      console.log('[SoraUV] Dashboard button injected into left sidebar');
+      dlog('feed', 'Dashboard button injected into left sidebar');
     } catch {}
   }
 
@@ -6271,6 +6450,10 @@ async function renderAnalyzeTable(force = false) {
   function init() {
     dlog('feed', 'init');
     ensureToastStyles();
+    if (isDraftDetail()) {
+      dlog('feed', 'draft detail route detected; not initializing');
+      return;
+    }
     // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
@@ -6279,7 +6462,7 @@ async function renderAnalyzeTable(force = false) {
     window.addEventListener('storage', handleStorageChange);
 
     // Inject dashboard button into left sidebar
-    injectDashboardButton();
+    scheduleInjectDashboardButton();
 
     // Check for pending redo prompt (from remix navigation)
     checkPendingRedoPrompt();

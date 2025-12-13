@@ -136,6 +136,13 @@
     return 0;
   }
 
+  function lastRefreshMsForPost(post){
+    const last = latestSnapshot(post?.snapshots);
+    const snapT = toTs(last?.t) || 0;
+    const seenT = toTs(post?.lastSeen) || 0;
+    return Math.max(snapT, seenT);
+  }
+
   // Timestamp helpers
   function toTs(v){
     if (typeof v === 'number' && isFinite(v)){
@@ -461,15 +468,18 @@
     const wrap = $('#posts');
     wrap.innerHTML='';
     if (!user) return;
+    const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
     // Build and sort: known-dated posts first (newest → oldest), undated go to bottom
     const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
       const last = latestSnapshot(p.snapshots) || {};
       const first = p.snapshots?.[0] || {};
       const rawPT = p?.post_time ?? p?.postTime ?? p?.post?.post_time ?? p?.post?.postTime ?? p?.meta?.post_time ?? null;
-      const postTime = getPostTimeStrict(p) || 0;
+      const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
       const views = num(last?.views);
+      const likes = num(last?.likes);
+      const lastSeen = p?.lastSeen || 0;
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
       const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
       const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
@@ -489,10 +499,7 @@
         title = captionText;
       }
       
-      if (DBG_SORT){
-        try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
-      }
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap, views };
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap, views, likes, lastSeen };
     });
     // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -505,9 +512,11 @@
     // If a list-action filter is active, surface selected posts to top.
     let orderedPosts = posts;
     const activeActionId = opts.activeActionId || null;
-    if (activeActionId && visibleSet && visibleSet.size > 0 && visibleSet.size < posts.length) {
+    if (activeActionId && visibleSet && visibleSet.size > 0) {
       const pidToPost = new Map(posts.map(p=>[p.pid, p]));
       const bottomComparator = (a,b)=>{
+        const dl = (a.likes - b.likes);
+        if (dl !== 0) return dl;
         const dv = a.views - b.views;
         if (dv !== 0) return dv;
         const dt = (a.postTime || 0) - (b.postTime || 0);
@@ -516,6 +525,8 @@
         return a.pidBI < b.pidBI ? -1 : 1;
       };
       const topComparator = (a,b)=>{
+        const dl = (b.likes - a.likes);
+        if (dl !== 0) return dl;
         const dv = b.views - a.views;
         if (dv !== 0) return dv;
         const dt = (b.postTime || 0) - (a.postTime || 0);
@@ -528,17 +539,21 @@
       if (activeActionId === 'top5' || activeActionId === 'top10') {
         selectedOrdered = posts.filter(p=>visibleSet.has(p.pid)).slice().sort(topComparator);
       } else if (activeActionId === 'bottom5' || activeActionId === 'bottom10') {
-        const now = Date.now();
-        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-        const withAge = posts.map(p=>({ ...p, ageMs: p.postTime ? now - p.postTime : Infinity }));
-        const olderThan24h = withAge.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS).sort(bottomComparator);
-        const allSorted = withAge.slice().sort(bottomComparator);
-        for (const it of olderThan24h) {
-          if (visibleSet.has(it.pid)) selectedOrdered.push(pidToPost.get(it.pid));
-        }
-        for (const it of allSorted) {
-          if (visibleSet.has(it.pid) && !selectedOrdered.find(p=>p.pid===it.pid)) {
-            selectedOrdered.push(pidToPost.get(it.pid));
+        if (isTopToday) {
+          selectedOrdered = posts.filter(p=>visibleSet.has(p.pid)).slice().sort(bottomComparator);
+        } else {
+          const now = Date.now();
+          const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+          const withAge = posts.map(p=>({ ...p, ageMs: p.postTime ? now - p.postTime : Infinity }));
+          const olderThan24h = withAge.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS).sort(bottomComparator);
+          const allSorted = withAge.slice().sort(bottomComparator);
+          for (const it of olderThan24h) {
+            if (visibleSet.has(it.pid)) selectedOrdered.push(pidToPost.get(it.pid));
+          }
+          for (const it of allSorted) {
+            if (visibleSet.has(it.pid) && !selectedOrdered.find(p=>p.pid===it.pid)) {
+              selectedOrdered.push(pidToPost.get(it.pid));
+            }
           }
         }
       } else if (activeActionId === 'stale') {
@@ -548,8 +563,8 @@
           .filter(p=>visibleSet.has(p.pid))
           .slice()
           .sort((a,b)=>{
-            const at = toTs(a.last?.t) || 0;
-            const bt = toTs(b.last?.t) || 0;
+            const at = Math.max(toTs(a.last?.t) || 0, toTs(a.lastSeen) || 0);
+            const bt = Math.max(toTs(b.last?.t) || 0, toTs(b.lastSeen) || 0);
             const aAge = at ? now - at : Infinity;
             const bAge = bt ? now - bt : Infinity;
             const dAge = bAge - aAge; // most stale first
@@ -557,7 +572,7 @@
             return bottomComparator(a,b);
           })
           .filter(p=>{
-            const t = toTs(p.last?.t) || 0;
+            const t = Math.max(toTs(p.last?.t) || 0, toTs(p.lastSeen) || 0);
             const ageMs = t ? now - t : Infinity;
             return ageMs > TWENTY_FOUR_HOURS_MS;
           });
@@ -4092,11 +4107,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         await pruneEmptyPostsForUser(metrics, currentUserKey);
       }
 	      const colorFor = makeColorMap(user);
-	      if (isTopTodayKey(currentUserKey)){
-          visibleSet.clear();
-          Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
-          setListActionActive('showAll');
-          forceShowAllOnLoad = false;
+        const isTopToday = isTopTodayKey(currentUserKey);
+
+        // Top Today is a dynamic, virtual user: keep selections, but reconcile against the live post set.
+        if (isTopToday){
+          const allPids = Object.keys(user.posts||{});
+          const valid = new Set(allPids);
+          for (const pid of Array.from(visibleSet)){
+            if (!valid.has(pid)) visibleSet.delete(pid);
+          }
+          if (forceShowAllOnLoad || (visibleSet.size === 0 && !preserveEmpty)){
+            visibleSet.clear();
+            allPids.forEach(pid=>visibleSet.add(pid));
+            if (forceShowAllOnLoad) setListActionActive('showAll');
+            forceShowAllOnLoad = false;
+          }
         } else if (forceShowAllOnLoad){
 	        visibleSet.clear();
 	        Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
@@ -4605,14 +4630,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
     }
 
-    // Exceptions state
-    const exceptedUsers = new Set();
-    const MAX_EXCEPTED_USERS = 50;
-    const EXCEPTIONS_STORAGE_KEY = 'purgeExceptions';
-    const COMB_MODE_STORAGE_KEY = 'combModeEnabled';
-    const COMB_MODE_LAST_RUN_KEY = 'combModeLastRun';
-    let combModeEnabled = true; // Default to enabled
-    let combModeDailyTimer = null;
+	    // Exceptions state
+	    const exceptedUsers = new Set();
+	    const MAX_EXCEPTED_USERS = 50;
+	    const EXCEPTIONS_STORAGE_KEY = 'purgeExceptions';
+	    const COMB_MODE_STORAGE_KEY = 'combModeEnabled';
+	    const COMB_MODE_LAST_RUN_KEY = 'combModeLastRun';
+	    let combModeEnabled = true; // Default to enabled
+	    let combModeDailyTimer = null;
 
     async function loadExceptedUsers(){
       try {
@@ -4642,11 +4667,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       return combModeEnabled;
     }
 
-    async function saveCombModePreference(){
-      try {
-        await chrome.storage.local.set({ [COMB_MODE_STORAGE_KEY]: combModeEnabled });
-      } catch {}
-    }
+	    async function saveCombModePreference(){
+	      try {
+	        await chrome.storage.local.set({ [COMB_MODE_STORAGE_KEY]: combModeEnabled });
+	      } catch {}
+	    }
 
     async function updateStorageSizeDisplay(){
       try {
@@ -4728,7 +4753,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           await chrome.storage.local.set({ metrics });
           // Update last run time
           await chrome.storage.local.set({ [COMB_MODE_LAST_RUN_KEY]: now });
-          console.log(`[Comb Mode] Purged ${purgedSnapshots} snapshot(s)`);
           // Update storage size display if purge modal is open
           if (purgeModal && purgeModal.style.display !== 'none') {
             await updateStorageSizeDisplay();
@@ -4880,16 +4904,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     postCountSlider.addEventListener('input', updateSliderValues);
     followerCountSlider.addEventListener('input', updateSliderValues);
 
-    // Comb Mode checkbox handler
-    const combModeCheckbox = $('#combModeCheckbox');
-    if (combModeCheckbox) {
-      combModeCheckbox.addEventListener('change', async (e) => {
-        combModeEnabled = e.target.checked;
-        await saveCombModePreference();
-        // Reschedule daily timer based on new preference
-        scheduleCombModeDaily();
-      });
-    }
+	    // Comb Mode checkbox handler
+	    const combModeCheckbox = $('#combModeCheckbox');
+	    if (combModeCheckbox) {
+	      combModeCheckbox.addEventListener('change', async (e) => {
+	        combModeEnabled = e.target.checked;
+	        await saveCombModePreference();
+	        // Reschedule daily timer based on new preference
+	        scheduleCombModeDaily();
+	      });
+	    }
 
     // Exceptions functionality
     function buildExceptionsDropdown(){
@@ -5008,16 +5032,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       saved.forEach(key => exceptedUsers.add(key));
       renderExceptionPills();
       buildExceptionsDropdown();
-      updateSliderValues();
-      // Load comb mode preference
-      await loadCombModePreference();
-      const combModeCheckbox = $('#combModeCheckbox');
-      if (combModeCheckbox) {
-        combModeCheckbox.checked = combModeEnabled;
-      }
-      // Update storage size display
-      await updateStorageSizeDisplay();
-    });
+	      updateSliderValues();
+	      // Load comb mode preference
+	      await loadCombModePreference();
+	      const combModeCheckbox = $('#combModeCheckbox');
+	      if (combModeCheckbox) {
+	        combModeCheckbox.checked = combModeEnabled;
+	      }
+	      // Update storage size display
+	      await updateStorageSizeDisplay();
+	    });
 
     $('#purgeExecute').addEventListener('click', ()=>{
       const description = getPurgeDescription();
@@ -5062,7 +5086,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         let purgedUsers = 0;
         let purgedPosts = 0;
         
-        console.log('[Purge] Starting purge with cutoff:', new Date(cutoffTime).toISOString(), 'excepted users:', Array.from(exceptedUsers));
         
         // Process each user
         for (const [userKey, user] of Object.entries(metrics.users || {})){
@@ -5094,7 +5117,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             }
             const purgedCount = originalPostCount - Object.keys(postsToKeep).length;
             if (purgedCount > 0) {
-              console.log(`[Purge] User ${user.handle || userKey}: removed ${purgedCount}/${originalPostCount} posts`);
             }
           } else {
             // If days > 365, keep all posts (no date-based purging)
@@ -5138,7 +5160,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         }
         
-        console.log('[Purge] Complete. Total removed:', purgedUsers, 'users,', purgedPosts, 'posts');
         
         // Save purged metrics
         await chrome.storage.local.set({ metrics });
@@ -5343,9 +5364,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         setListActionActive('last5');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
           pid,
-          postTime: getPostTimeStrict(p) || 0,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
           pidBI: pidBigInt(pid)
         }));
         const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -5363,9 +5385,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         setListActionActive('last10');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
           pid,
-          postTime: getPostTimeStrict(p) || 0,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
           pidBI: pidBigInt(pid)
         }));
         const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -5388,11 +5411,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           return {
             pid,
             views: num(last?.views),
+            likes: num(last?.likes),
             postTime: getPostTimeStrict(p) || 0,
             pidBI: pidBigInt(pid)
           };
         });
         const sorted = mapped.sort((a,b)=>{
+          const dl = b.likes - a.likes;
+          if (dl !== 0) return dl;
           const dv = b.views - a.views;
           if (dv !== 0) return dv;
           const dt = (b.postTime || 0) - (a.postTime || 0);
@@ -5414,11 +5440,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           return {
             pid,
             views: num(last?.views),
+            likes: num(last?.likes),
             postTime: getPostTimeStrict(p) || 0,
             pidBI: pidBigInt(pid)
           };
         });
         const sorted = mapped.sort((a,b)=>{
+          const dl = b.likes - a.likes;
+          if (dl !== 0) return dl;
           const dv = b.views - a.views;
           if (dv !== 0) return dv;
           const dt = (b.postTime || 0) - (a.postTime || 0);
@@ -5435,50 +5464,72 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         setListActionActive('bottom5');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const now = Date.now();
         const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
-          const postTime = getPostTimeStrict(p) || 0;
+          const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
           const ageMs = postTime ? now - postTime : Infinity;
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
             postTime,
             views: num(last?.views),
+            likes: num(last?.likes),
             ageMs,
             pidBI: pidBigInt(pid)
           };
         });
-        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
-        const sortedOlder = olderThan24h.sort((a,b)=>{
-          const dv = a.views - b.views;
-          if (dv !== 0) return dv;
-          const dt = (a.postTime || 0) - (b.postTime || 0); // tie-break oldest first
-          if (dt !== 0) return dt;
-          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
-          return a.pidBI < b.pidBI ? -1 : 1; // final tie-break oldest-ish first
-        });
-        const sortedAll = mapped.slice().sort((a,b)=>{
-          const dv = a.views - b.views;
-          if (dv !== 0) return dv;
-          const dt = (a.postTime || 0) - (b.postTime || 0);
-          if (dt !== 0) return dt;
-          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
-          return a.pidBI < b.pidBI ? -1 : 1;
-        });
-        const picked = [];
-        for (const it of sortedOlder) {
-          if (picked.length >= 5) break;
-          picked.push(it);
-        }
-        if (picked.length < 5) {
-          const seen = new Set(picked.map(p=>p.pid));
-          for (const it of sortedAll) {
-            if (picked.length >= 5) break;
-            if (seen.has(it.pid)) continue;
-            picked.push(it);
+        const picked = (function(){
+          if (isTopToday){
+            const sorted = mapped.slice().sort((a,b)=>{
+              const dl = a.likes - b.likes;
+              if (dl !== 0) return dl;
+              const dv = a.views - b.views;
+              if (dv !== 0) return dv;
+              const dt = (a.postTime || 0) - (b.postTime || 0);
+              if (dt !== 0) return dt;
+              if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+              return a.pidBI < b.pidBI ? -1 : 1;
+            });
+            return sorted.slice(0, 5);
           }
-        }
+          const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+          const sortedOlder = olderThan24h.sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0); // tie-break oldest first
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1; // final tie-break oldest-ish first
+          });
+          const sortedAll = mapped.slice().sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          const out = [];
+          for (const it of sortedOlder) {
+            if (out.length >= 5) break;
+            out.push(it);
+          }
+          if (out.length < 5) {
+            const seen = new Set(out.map(p=>p.pid));
+            for (const it of sortedAll) {
+              if (out.length >= 5) break;
+              if (seen.has(it.pid)) continue;
+              out.push(it);
+            }
+          }
+          return out;
+        })();
         visibleSet.clear();
         picked.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
@@ -5488,50 +5539,72 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         setListActionActive('bottom10');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const now = Date.now();
         const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
-          const postTime = getPostTimeStrict(p) || 0;
+          const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
           const ageMs = postTime ? now - postTime : Infinity;
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
             postTime,
             views: num(last?.views),
+            likes: num(last?.likes),
             ageMs,
             pidBI: pidBigInt(pid)
           };
         });
-        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
-        const sortedOlder = olderThan24h.sort((a,b)=>{
-          const dv = a.views - b.views;
-          if (dv !== 0) return dv;
-          const dt = (a.postTime || 0) - (b.postTime || 0);
-          if (dt !== 0) return dt;
-          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
-          return a.pidBI < b.pidBI ? -1 : 1;
-        });
-        const sortedAll = mapped.slice().sort((a,b)=>{
-          const dv = a.views - b.views;
-          if (dv !== 0) return dv;
-          const dt = (a.postTime || 0) - (b.postTime || 0);
-          if (dt !== 0) return dt;
-          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
-          return a.pidBI < b.pidBI ? -1 : 1;
-        });
-        const picked = [];
-        for (const it of sortedOlder) {
-          if (picked.length >= 10) break;
-          picked.push(it);
-        }
-        if (picked.length < 10) {
-          const seen = new Set(picked.map(p=>p.pid));
-          for (const it of sortedAll) {
-            if (picked.length >= 10) break;
-            if (seen.has(it.pid)) continue;
-            picked.push(it);
+        const picked = (function(){
+          if (isTopToday){
+            const sorted = mapped.slice().sort((a,b)=>{
+              const dl = a.likes - b.likes;
+              if (dl !== 0) return dl;
+              const dv = a.views - b.views;
+              if (dv !== 0) return dv;
+              const dt = (a.postTime || 0) - (b.postTime || 0);
+              if (dt !== 0) return dt;
+              if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+              return a.pidBI < b.pidBI ? -1 : 1;
+            });
+            return sorted.slice(0, 10);
           }
-        }
+          const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+          const sortedOlder = olderThan24h.sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          const sortedAll = mapped.slice().sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          const out = [];
+          for (const it of sortedOlder) {
+            if (out.length >= 10) break;
+            out.push(it);
+          }
+          if (out.length < 10) {
+            const seen = new Set(out.map(p=>p.pid));
+            for (const it of sortedAll) {
+              if (out.length >= 10) break;
+              if (seen.has(it.pid)) continue;
+              out.push(it);
+            }
+          }
+          return out;
+        })();
         visibleSet.clear();
         picked.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
@@ -5546,8 +5619,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const now = Date.now();
         const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
-          const last = latestSnapshot(p.snapshots);
-          const lastRefresh = toTs(last?.t) || 0;
+          const lastRefresh = lastRefreshMsForPost(p);
           const ageMs = lastRefresh ? now - lastRefresh : Infinity;
           return { pid, ageMs };
         });
