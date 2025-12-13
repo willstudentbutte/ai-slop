@@ -641,6 +641,36 @@
     return filtered;
   };
 
+  function bestDraftDownloadUrl(item) {
+    if (!item || typeof item !== 'object') return null;
+    const source = item?.encodings?.source?.path;
+    const sourceWm = item?.encodings?.source_wm?.path;
+    const legacyDownloadUrl = item?.downloadable_url;
+    const legacyNoWm = item?.download_urls?.no_watermark;
+    const legacyWm = item?.download_urls?.watermark;
+    return [source, sourceWm, legacyDownloadUrl, legacyNoWm, legacyWm].find((u) => typeof u === 'string' && u);
+  }
+
+  function applyBestDownloadUrlToItem(item) {
+    const downloadUrl = bestDraftDownloadUrl(item);
+    if (!downloadUrl) return null;
+
+    // Normalize primary field for downstream consumers (including native Sora)
+    item.downloadable_url = downloadUrl;
+    item.url = downloadUrl;
+
+    // Normalize download_urls collection while preserving existing values
+    const downloadUrls = { ...(item.download_urls || {}) };
+    if (!downloadUrls.no_watermark) downloadUrls.no_watermark = downloadUrl;
+    if (!downloadUrls.watermark) {
+      const wm = item?.encodings?.source_wm?.path;
+      if (wm) downloadUrls.watermark = wm;
+    }
+    item.download_urls = downloadUrls;
+
+    return downloadUrl;
+  }
+
   // == Badge & UI (Feed) ==
   function colorForAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return null;
@@ -4777,6 +4807,29 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function decorateDraftsResponse(res) {
+    if (!res || typeof res.json !== 'function' || res._soraUvDraftsPatched) return res;
+    res._soraUvDraftsPatched = true;
+
+    const origJson = res.json.bind(res);
+    res.json = async () => {
+      const data = await origJson();
+      return normalizeDraftsJsonForDownload(data);
+    };
+
+    const origClone = typeof res.clone === 'function' ? res.clone.bind(res) : null;
+    if (origClone) {
+      res.clone = () => {
+        const cloned = origClone();
+        try {
+          decorateDraftsResponse(cloned);
+        } catch {}
+        return cloned;
+      };
+    }
+    return res;
+  }
+
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
     const isLikelyJsonResponse = (res) => {
@@ -4825,6 +4878,7 @@ async function renderAnalyzeTable(force = false) {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
         } else if (DRAFTS_RE.test(url)) {
+          decorateDraftsResponse(res);
           res.clone().json().then(processDraftsJson).catch((err) => {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
@@ -5459,11 +5513,9 @@ async function renderAnalyzeTable(force = false) {
           idToPrompt.set(draftId, prompt);
         }
 
-        // Extract downloadable_url
-        const downloadUrl = item?.downloadable_url;
-        if (downloadUrl && typeof downloadUrl === 'string') {
-          idToDownloadUrl.set(draftId, downloadUrl);
-        }
+        // Normalize best download URL for both Sora-native button and our buttons
+        const downloadUrl = applyBestDownloadUrlToItem(item);
+        if (downloadUrl) idToDownloadUrl.set(draftId, downloadUrl);
 
         // Extract content violation status
         if (item?.kind === 'sora_content_violation') {
@@ -5494,6 +5546,19 @@ async function renderAnalyzeTable(force = false) {
 
     // Trigger render to show all draft buttons and badges
     renderDraftButtons();
+  }
+
+  function normalizeDraftsJsonForDownload(json) {
+    try {
+      const items = json?.items || json?.data?.items || json?.generations || [];
+      if (!Array.isArray(items)) return json;
+      for (const item of items) {
+        applyBestDownloadUrlToItem(item);
+      }
+    } catch (e) {
+      console.error('[SoraUV] Error normalizing drafts JSON for download:', e);
+    }
+    return json;
   }
 
   function processCharactersJson(json) {
