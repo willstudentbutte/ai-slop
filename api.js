@@ -20,6 +20,8 @@
 
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
   const DURATION_OVERRIDE_KEY = 'SCT_DURATION_OVERRIDE_V1'; // stored in sora.chatgpt.com localStorage
+  const UV_TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID (draft remix redo)
+  const UV_REDO_PROMPT_KEY = 'SORA_UV_REDO_PROMPT';
 
   const isStoryboardRoute = () => {
     try {
@@ -40,6 +42,74 @@
       return false;
     }
   };
+
+  const isRemixRoute = () => {
+    try {
+      return String(location?.search || '').includes('remix');
+    } catch {
+      return false;
+    }
+  };
+
+  const getDraftIdFromDraftRoute = () => {
+    try {
+      const m = String(location?.pathname || '').match(/^\/d\/([A-Za-z0-9_-]+)/i);
+      return m && m[1] ? String(m[1]) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const isDraftRemixRoute = () => {
+    return !!getDraftIdFromDraftRoute() && isRemixRoute();
+  };
+
+  function saveTaskToSourceDraft(taskId, sourceDraftId) {
+    if (!taskId || !sourceDraftId) return;
+    try {
+      const raw = localStorage.getItem(UV_TASK_TO_DRAFT_KEY) || '{}';
+      const data = safeJsonParse(raw) || {};
+      if (!data || typeof data !== 'object') return;
+      data[String(taskId)] = String(sourceDraftId);
+      localStorage.setItem(UV_TASK_TO_DRAFT_KEY, JSON.stringify(data));
+    } catch {}
+  }
+
+  function checkPendingRedoPrompt() {
+    const pendingPrompt = sessionStorage.getItem(UV_REDO_PROMPT_KEY);
+    if (!pendingPrompt) return;
+
+    // Only apply on remix pages to avoid stomping the primary prompt box.
+    if (!isRemixRoute()) return;
+
+    // Clear it immediately to prevent re-triggering.
+    sessionStorage.removeItem(UV_REDO_PROMPT_KEY);
+
+    const attemptFill = (retries = 0) => {
+      const textarea =
+        document.querySelector('textarea[placeholder="Describe changes..."]') ||
+        document.querySelector('textarea[placeholder^="Describe changes"]') ||
+        document.querySelector('textarea[placeholder*="Describe changes"]');
+
+      if (textarea) {
+        try {
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')
+            .set;
+          nativeInputValueSetter.call(textarea, pendingPrompt);
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          textarea.dispatchEvent(new Event('change', { bubbles: true }));
+          textarea.focus();
+          textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch {}
+        return;
+      }
+
+      if (retries < 30) setTimeout(() => attemptFill(retries + 1), 100);
+    };
+
+    // Start attempting after a short delay for page render.
+    setTimeout(() => attemptFill(), 300);
+  }
 
   let __sct_videoGensRaf = 0;
   let __sct_keepSettingsOpenToken = 0;
@@ -452,25 +522,53 @@
 
     const origFetch = window.fetch;
     function patchedFetch(input, init) {
-      if (!durationOverride) return origFetch.apply(this, arguments);
+      let url = '';
       try {
-        const url = typeof input === 'string' ? input : input?.url || '';
-        if (typeof url === 'string' && NF_CREATE_RE.test(url)) {
-          const method = (init && init.method) || (typeof input === 'object' && input?.method) || 'GET';
-          if (String(method).toUpperCase() === 'POST') {
-            const override = getDurationOverride();
-            if (override && Number.isFinite(override.frames) && init && typeof init === 'object') {
-              const nextInit = { ...init };
-              if (nextInit.body != null) {
-                nextInit.body = rewriteNFramesInBodyString(nextInit.body, override.frames);
-                dlog('fetch rewrite', { url, frames: override.frames });
-                return origFetch.call(this, input, nextInit);
-              }
+        url = typeof input === 'string' ? input : input?.url || '';
+      } catch {}
+      const method = (init && init.method) || (typeof input === 'object' && input?.method) || 'GET';
+      const isCreate = typeof url === 'string' && NF_CREATE_RE.test(url) && String(method).toUpperCase() === 'POST';
+
+      // Draft remix task tracking (used by inject.js to enable correct redo behavior later).
+      const sourceDraftId = isCreate && isRemixRoute() ? getDraftIdFromDraftRoute() : null;
+      const shouldCaptureTaskId = !!sourceDraftId;
+
+      let p = null;
+      try {
+        if (isCreate && durationOverride) {
+          const override = getDurationOverride();
+          if (override && Number.isFinite(override.frames) && init && typeof init === 'object') {
+            const nextInit = { ...init };
+            if (nextInit.body != null) {
+              nextInit.body = rewriteNFramesInBodyString(nextInit.body, override.frames);
+              dlog('fetch rewrite', { url, frames: override.frames });
+              p = origFetch.call(this, input, nextInit);
             }
           }
         }
       } catch {}
-      return origFetch.apply(this, arguments);
+
+      if (!p) p = origFetch.apply(this, arguments);
+
+      if (shouldCaptureTaskId) {
+        try {
+          p.then((res) => {
+            try {
+              res
+                .clone()
+                .json()
+                .then((json) => {
+                  const taskId = json?.id;
+                  if (taskId) saveTaskToSourceDraft(taskId, sourceDraftId);
+                })
+                .catch(() => {});
+            } catch {}
+            return res;
+          }).catch(() => {});
+        } catch {}
+      }
+
+      return p;
     }
 
     patchedFetch.__sct_patched = true;
@@ -490,6 +588,25 @@
       try {
         this.__sct_method = method;
         this.__sct_url = url;
+
+        // Draft remix task tracking (XHR code path).
+        const m = String(method || 'GET').toUpperCase();
+        const u = String(url || '');
+        const isCreate = m === 'POST' && NF_CREATE_RE.test(u);
+        const sourceDraftId = isCreate && isRemixRoute() ? getDraftIdFromDraftRoute() : null;
+        if (sourceDraftId) {
+          this.addEventListener(
+            'load',
+            () => {
+              try {
+                const j = safeJsonParse(this.responseText);
+                const taskId = j?.id;
+                if (taskId) saveTaskToSourceDraft(taskId, sourceDraftId);
+              } catch {}
+            },
+            { once: true }
+          );
+        }
       } catch {}
       return origOpen.apply(this, arguments);
     };
@@ -1013,5 +1130,6 @@
   // Install
   patchFetch();
   patchXHR();
+  checkPendingRedoPrompt();
   installDurationDropdownEnhancer();
 })();

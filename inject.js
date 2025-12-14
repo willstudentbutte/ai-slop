@@ -47,6 +47,7 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
+  const NF_PENDING_V2_RE = /\/backend\/nf\/pending\/v2/i;
   const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
 
   // Includes <21h (1260 minutes) plus a final special filter
@@ -73,6 +74,7 @@
   const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
   const idToRemixTargetDraft = new Map(); // Draft remix target draft ID (if it's a remix of a draft)
   const taskToSourceDraft = new Map(); // task_id -> source draft gen ID (for draft remix tracking)
+  const taskToPrompt = new Map(); // task_id -> prompt (from pending v2)
   const charToCameoCount = new Map(); // Character cameo count
   const charToLikesCount = new Map(); // Character likes received count
   const charToCanCameo = new Map(); // Character can_cameo permission
@@ -4830,6 +4832,25 @@ async function renderAnalyzeTable(force = false) {
     return res;
   }
 
+  // If pending v2 is unavailable, we can still populate drafts metadata by calling the drafts endpoint directly.
+  // Throttle to avoid spamming in case Sora repeatedly polls a broken endpoint.
+  const DRAFTS_BACKUP_THROTTLE_MS = 15000;
+  let draftsBackupInFlight = false;
+  let draftsBackupLastAttemptMs = 0;
+  function scheduleDraftsBackupFetch(reason) {
+    try {
+      if (!isDrafts()) return;
+      const now = Date.now();
+      if (draftsBackupInFlight) return;
+      if (now - draftsBackupLastAttemptMs < DRAFTS_BACKUP_THROTTLE_MS) return;
+      draftsBackupLastAttemptMs = now;
+      draftsBackupInFlight = true;
+      const url = `${location.origin}/backend/project_y/profile/drafts?limit=15`;
+      fetch(url).catch(() => {}).finally(() => { draftsBackupInFlight = false; });
+      dlog('drafts', 'scheduled drafts backup fetch', { reason });
+    } catch {}
+  }
+
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
     const isLikelyJsonResponse = (res) => {
@@ -4861,6 +4882,15 @@ async function renderAnalyzeTable(force = false) {
               }
             }).catch(() => {});
           }
+        }
+
+        // Pending tasks (v2): used by Sora to show running gens; parse to hydrate prompts/drafts.
+        if (NF_PENDING_V2_RE.test(url)) {
+          if (!res.ok) scheduleDraftsBackupFetch('pending_v2_not_ok');
+          res.clone().json().then(processPendingV2Json).catch(() => {
+            scheduleDraftsBackupFetch('pending_v2_parse_failed');
+          });
+          return res;
         }
 
         // Check POST_DETAIL_RE, DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
@@ -4918,11 +4948,11 @@ async function renderAnalyzeTable(force = false) {
       this.addEventListener('load', function () {
         try {
           if (isDraftDetail()) return;
-          if (typeof url === 'string') {
-            // Intercept /backend/nf/create for draft remix tracking
-            if (NF_CREATE_RE.test(url)) {
-              const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
-              if (draftRemixMatch && location.search.includes('remix')) {
+            if (typeof url === 'string') {
+              // Intercept /backend/nf/create for draft remix tracking
+              if (NF_CREATE_RE.test(url)) {
+                const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
+                if (draftRemixMatch && location.search.includes('remix')) {
                 const sourceDraftId = draftRemixMatch[1];
                 try {
                   const json = JSON.parse(this.responseText);
@@ -4932,14 +4962,25 @@ async function renderAnalyzeTable(force = false) {
                     dlog('drafts', `Saved task->draft mapping (XHR): ${taskId} -> ${sourceDraftId}`);
                   }
                 } catch {}
+                }
               }
-            }
 
-            // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
-            if (POST_DETAIL_RE.test(url)) {
-              dlog('feed', 'xhr matched post detail', { url });
-              rememberPostDetailTemplate(url);
-              try {
+              // Pending tasks (v2): parse to hydrate prompts/drafts; fall back to drafts endpoint if unavailable.
+              if (NF_PENDING_V2_RE.test(url)) {
+                if (this.status && this.status >= 400) scheduleDraftsBackupFetch('pending_v2_xhr_not_ok');
+                try {
+                  processPendingV2Json(JSON.parse(this.responseText));
+                } catch {
+                  scheduleDraftsBackupFetch('pending_v2_xhr_parse_failed');
+                }
+                return;
+              }
+
+              // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
+              if (POST_DETAIL_RE.test(url)) {
+                dlog('feed', 'xhr matched post detail', { url });
+                rememberPostDetailTemplate(url);
+                try {
                 const j = JSON.parse(this.responseText);
                 dlog('feed', 'post detail parsed (XHR)', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
                 processPostDetailJson(j);
@@ -5483,9 +5524,65 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function looksLikePendingV2Task(item) {
+    if (!item || typeof item !== 'object') return false;
+    const id = item?.id;
+    const status = item?.status;
+    const hasGenerationsArray = Array.isArray(item?.generations);
+    return typeof id === 'string' && id.startsWith('task_') && typeof status === 'string' && hasGenerationsArray;
+  }
+
+  function extractDraftItemsFromPayload(json) {
+    if (!json) return [];
+
+    // Pending v2: array of tasks with nested `generations`
+    if (Array.isArray(json)) {
+      const isPendingV2 = json.some(looksLikePendingV2Task);
+      if (!isPendingV2) return json;
+
+      const gens = [];
+      for (const task of json) {
+        if (!looksLikePendingV2Task(task)) continue;
+        const taskId = task?.id;
+        const taskPrompt = typeof task?.prompt === 'string' ? task.prompt : null;
+        if (taskId && taskPrompt) taskToPrompt.set(taskId, taskPrompt);
+
+        const taskGens = Array.isArray(task?.generations) ? task.generations : [];
+        for (const gen of taskGens) {
+          if (!gen || typeof gen !== 'object') continue;
+
+          // Annotate generations with their originating task for downstream draft-remix mapping.
+          if (taskId && gen.task_id == null) gen.task_id = taskId;
+
+          // Pending v2 tasks include `prompt`; drafts payloads often include it under `creation_config.prompt`.
+          if (taskPrompt) {
+            const cc = gen?.creation_config;
+            if (!cc || typeof cc !== 'object') gen.creation_config = {};
+            if (!gen.creation_config.prompt) gen.creation_config.prompt = taskPrompt;
+          }
+
+          gens.push(gen);
+        }
+      }
+      return gens;
+    }
+
+    // Drafts endpoint: { items: [...] } (sometimes wrapped), plus legacy shapes.
+    const items = json?.items || json?.data?.items || json?.generations || [];
+    return Array.isArray(items) ? items : [];
+  }
+
+  function processPendingV2Json(json) {
+    const gens = extractDraftItemsFromPayload(json);
+    if (!Array.isArray(gens) || gens.length === 0) return;
+
+    // Reuse draft processing pipeline.
+    processDraftsJson({ generations: gens });
+  }
+
   function processDraftsJson(json) {
     // Extract draft data from API response
-    const items = json?.items || json?.data?.items || json?.generations || [];
+    const items = extractDraftItemsFromPayload(json);
     if (!Array.isArray(items) || items.length === 0) return;
 
     for (const item of items) {
@@ -5508,7 +5605,11 @@ async function renderAnalyzeTable(force = false) {
         }
 
         // Extract prompt from creation_config
-        const prompt = item?.creation_config?.prompt;
+        const taskIdForPrompt = item?.task_id;
+        const prompt =
+          (typeof item?.creation_config?.prompt === 'string' && item.creation_config.prompt) ||
+          (typeof item?.prompt === 'string' && item.prompt) ||
+          (taskIdForPrompt && taskToPrompt.has(taskIdForPrompt) ? taskToPrompt.get(taskIdForPrompt) : null);
         if (prompt && typeof prompt === 'string') {
           idToPrompt.set(draftId, prompt);
         }
@@ -5550,7 +5651,7 @@ async function renderAnalyzeTable(force = false) {
 
   function normalizeDraftsJsonForDownload(json) {
     try {
-      const items = json?.items || json?.data?.items || json?.generations || [];
+      const items = extractDraftItemsFromPayload(json);
       if (!Array.isArray(items)) return json;
       for (const item of items) {
         applyBestDownloadUrlToItem(item);
