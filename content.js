@@ -4,19 +4,42 @@
  */
 
 (() => {
-  // Hard-disable all extension behavior on draft detail pages (/d/...), per performance issues.
   const p = String(location.pathname || '');
-  if (p === '/d' || p.startsWith('/d/')) {
-    return;
+  const isDraftDetail = p === '/d' || p.startsWith('/d/');
+
+  function injectPageScript(filename, next) {
+    try {
+      const s = document.createElement('script');
+      s.src = chrome.runtime.getURL(filename);
+      s.async = false;
+      s.onload = () => {
+        try {
+          s.remove();
+        } catch {}
+        try {
+          if (typeof next === 'function') next();
+        } catch {}
+      };
+      s.onerror = () => {
+        try {
+          if (typeof next === 'function') next();
+        } catch {}
+      };
+      (document.head || document.documentElement).appendChild(s);
+    } catch {
+      try {
+        if (typeof next === 'function') next();
+      } catch {}
+    }
   }
 
-  // Inject inject.js into the page context so we can monkey-patch window.fetch/XHR.
-  (() => {
-    const s = document.createElement('script');
-    s.src = chrome.runtime.getURL('inject.js');
-    s.onload = () => { s.remove(); };
-    (document.head || document.documentElement).appendChild(s);
-  })();
+  // Always inject api.js (request/body rewriter + duration dropdown enhancer).
+  // Keep inject.js (heavy overlays/metrics) disabled on draft detail pages (/d/...) per performance issues.
+  injectPageScript('api.js', () => {
+    if (!isDraftDetail) injectPageScript('inject.js');
+  });
+
+  if (isDraftDetail) return;
 
   // Listen for metrics snapshots posted from the injected script and persist to storage.
   (function () {
@@ -72,22 +95,61 @@
   })();
 
   // Listen for dashboard open requests from inject.js and relay to background
+  let dashboardOpenLock = false;
+  let dashboardOpenLockTimer = null;
+  function openDashboardTab(opts){
+    try {
+      if (dashboardOpenLock) return;
+      dashboardOpenLock = true;
+      if (dashboardOpenLockTimer) clearTimeout(dashboardOpenLockTimer);
+      dashboardOpenLockTimer = setTimeout(()=>{ dashboardOpenLock = false; }, 1000);
+      const payload = {};
+      if (opts?.userKey) payload.lastUserKey = opts.userKey;
+      if (opts?.userHandle) payload.lastUserHandle = opts.userHandle;
+      if (Object.keys(payload).length) chrome.storage.local.set(payload);
+      const url = chrome.runtime.getURL('dashboard.html');
+      let fallbackTimer = null;
+      const openDirect = ()=>{
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+        try { window.open(url, '_blank'); } catch {}
+      };
+      try {
+        fallbackTimer = setTimeout(openDirect, 800);
+        chrome.runtime.sendMessage({ action: 'open_dashboard' }, (resp)=>{
+          if (fallbackTimer) clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+          // If background didn't acknowledge, use direct open as a safety net
+          if (chrome.runtime.lastError || !resp || resp.success !== true) {
+            openDirect();
+          }
+        });
+      } catch {
+        openDirect();
+      }
+    } catch {
+      dashboardOpenLock = false;
+    }
+  }
+
   window.addEventListener('message', function(ev) {
     const d = ev?.data;
     if (!d || d.__sora_uv__ !== true || d.type !== 'open_dashboard') return;
-    try {
-      // Persist the requested user so the dashboard can preselect it.
-      // Prefer the provided userKey, but fall back to handle if needed.
-      const userKey = d.userKey || (d.userHandle ? `h:${String(d.userHandle).toLowerCase()}` : null);
-      const payload = {};
-      if (userKey) payload.lastUserKey = userKey;
-      if (d.userHandle) payload.lastUserHandle = d.userHandle;
-      if (Object.keys(payload).length) chrome.storage.local.set(payload);
-    } catch {}
-    try {
-      chrome.runtime.sendMessage({ action: 'open_dashboard' });
-    } catch {}
+    const userKey = d.userKey || (d.userHandle ? `h:${String(d.userHandle).toLowerCase()}` : null);
+    openDashboardTab({ userKey, userHandle: d.userHandle });
   });
+
+  // Fallback: also listen directly for clicks on the injected dashboard button in the page DOM.
+  const dashboardClickHandler = (ev)=>{
+    const btn = ev.target && ev.target.closest && ev.target.closest('.sora-uv-dashboard-btn');
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    openDashboardTab({});
+  };
+  document.addEventListener('click', dashboardClickHandler, true);
+  document.addEventListener('pointerup', dashboardClickHandler, true);
+  document.addEventListener('touchend', dashboardClickHandler, true);
 
   let isFlushing = false;
   let needsFlush = false;

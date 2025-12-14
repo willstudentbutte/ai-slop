@@ -7,8 +7,8 @@
   const TOP_TODAY_KEY = '__top_today__';
   const TOP_TODAY_WINDOW_MS = 24 * 60 * 60 * 1000;
   const TOP_TODAY_MIN_UNIQUE_VIEWS = 100;
-  const TOP_TODAY_MIN_LIKES = 15;
-  const SITE_ORIGIN = 'https://sora.chatgpt.com';
+    const TOP_TODAY_MIN_LIKES = 15;
+    const SITE_ORIGIN = 'https://sora.chatgpt.com';
   const absUrl = (u, pid) => {
     if (!u && pid) return `${SITE_ORIGIN}/p/${pid}`;
     if (!u) return null;
@@ -3128,18 +3128,41 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Total Views', fmt2);
     const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
     const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cast in', fmt2);
+    const PRESET_VISIBILITY_ACTIONS = new Set(['last5','last10','top5','top10','bottom5','bottom10','stale']);
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
     const visibleSet = new Set();
-    // On each dashboard open, start from Show All for the selected user.
-    // Do not persist this reset; user selections still persist across sessions.
-    let forceShowAllOnLoad = true;
     let visibilityByUser = {};
+    const sessionVisibilityByUser = (function(){
+      try { return JSON.parse(sessionStorage.getItem('visibilityByUserSession') || '{}'); } catch { return {}; }
+    })();
     try {
       const st = await chrome.storage.local.get('visibilityByUser');
-      visibilityByUser = st.visibilityByUser || {};
+      visibilityByUser = (function(raw){
+        const out = {};
+        if (!raw || typeof raw !== 'object') return out;
+        for (const [userKey, entry] of Object.entries(raw)){
+          if (Array.isArray(entry)) out[userKey] = { ids: entry, source: 'legacy' };
+          else if (entry && typeof entry === 'object'){
+            const ids = Array.isArray(entry.ids) ? entry.ids : [];
+            const source = typeof entry.source === 'string' ? entry.source : 'legacy';
+            out[userKey] = { ids, source };
+          }
+        }
+        return out;
+      })(st.visibilityByUser);
     } catch {}
+    let listActionByUser = (function(){
+      try { return JSON.parse(sessionStorage.getItem('listActionByUserSession') || '{}'); } catch { return {}; }
+    })();
+    function persistListActionForUser(userKey, actionId){
+      if (!userKey) return;
+      if (actionId) listActionByUser[userKey] = actionId;
+      else delete listActionByUser[userKey];
+      try { sessionStorage.setItem('listActionByUserSession', JSON.stringify(listActionByUser)); } catch {}
+    }
+    let currentVisibilitySource = 'showAll';
     let pendingPostPurge = null;
     let currentListActionId = null;
     
@@ -3147,9 +3170,146 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const compareUsers = new Set();
     const MAX_COMPARE_USERS = 10;
 
+    function getSavedVisibilityEntry(userKey){
+      const entry = sessionVisibilityByUser?.[userKey] || visibilityByUser?.[userKey];
+      if (!entry) return null;
+      const ids = Array.isArray(entry.ids) ? entry.ids : [];
+      const source = typeof entry.source === 'string' ? entry.source : 'legacy';
+      const out = { ids, source };
+      if (sessionVisibilityByUser?.[userKey]) out.__fromSession = true;
+      return out;
+    }
+    function isPresetVisibilitySource(source){
+      return PRESET_VISIBILITY_ACTIONS.has(source);
+    }
+    function isDefaultVisibilitySource(source){
+      if (!source || source === 'showAll' || source === 'hideAll') return true;
+      if (source === 'legacy') return true;
+      return isPresetVisibilitySource(source);
+    }
+    function buildPresetIds(action, user){
+      if (!user) return [];
+      const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
+      if (action === 'last5' || action === 'last10'){
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
+        const noTs = mapped.filter(x=>x.postTime<=0).sort((a,b)=>{
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        const sorted = withTs.concat(noTs);
+        return sorted.slice(0, action === 'last5' ? 5 : 10).map(it=>it.pid);
+      }
+      if (action === 'top5' || action === 'top10'){
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            views: num(last?.views),
+            likes: num(last?.likes),
+            postTime: getPostTimeStrict(p) || 0,
+            pidBI: pidBigInt(pid)
+          };
+        });
+        const sorted = mapped.sort((a,b)=>{
+          const dl = b.likes - a.likes;
+          if (dl !== 0) return dl;
+          const dv = b.views - a.views;
+          if (dv !== 0) return dv;
+          const dt = (b.postTime || 0) - (a.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        return sorted.slice(0, action === 'top5' ? 5 : 10).map(it=>it.pid);
+      }
+      if (action === 'bottom5' || action === 'bottom10'){
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
+          const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
+          const ageMs = postTime ? now - postTime : Infinity;
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            postTime,
+            views: num(last?.views),
+            likes: num(last?.likes),
+            ageMs,
+            pidBI: pidBigInt(pid)
+          };
+        });
+        const bottomComparator = (a,b)=>{
+          const dl = a.likes - b.likes;
+          if (dl !== 0) return dl;
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        };
+        const picked = (function(){
+          if (isTopToday){
+            const sorted = mapped.slice().sort(bottomComparator);
+            return sorted.slice(0, action === 'bottom5' ? 5 : 10);
+          }
+          const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+          const sortedOlder = olderThan24h.sort(bottomComparator);
+          const sortedAll = mapped.slice().sort(bottomComparator);
+          const need = action === 'bottom5' ? 5 : 10;
+          const out = [];
+          for (const it of sortedOlder){
+            if (out.length >= need) break;
+            out.push(it);
+          }
+          if (out.length < need){
+            const seen = new Set(out.map(p=>p.pid));
+            for (const it of sortedAll){
+              if (out.length >= need) break;
+              if (seen.has(it.pid)) continue;
+              out.push(it);
+            }
+          }
+          return out;
+        })();
+        return picked.map(it=>it.pid);
+      }
+      if (action === 'stale'){
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const stale = Object.entries(user.posts||{}).map(([pid,p])=>{
+          const lastRefresh = lastRefreshMsForPost(p);
+          const ageMs = lastRefresh ? now - lastRefresh : Infinity;
+          return { pid, ageMs };
+        }).filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        return stale.map(it=>it.pid);
+      }
+      return [];
+    }
+    function isLegacyDefaultVisibility(user, ids){
+      if (!user) return false;
+      const idsSet = new Set((ids||[]).filter(Boolean));
+      const allPids = Object.keys(user.posts||{});
+      if (idsSet.size === 0) return true; // Hide all legacy state
+      if (idsSet.size === allPids.length && allPids.every(pid=>idsSet.has(pid))) return true; // Show all legacy state
+      for (const action of PRESET_VISIBILITY_ACTIONS){
+        const presetIds = buildPresetIds(action, user);
+        if (!presetIds.length) continue;
+        if (presetIds.length === idsSet.size && presetIds.every(pid=>idsSet.has(pid))) return true;
+      }
+      return false;
+    }
     function persistVisibility(){
       if (isTopTodayKey(currentUserKey)) return;
-      visibilityByUser[currentUserKey] = Array.from(visibleSet);
+      const source = currentVisibilitySource || currentListActionId || 'custom';
+      const payload = { ids: Array.from(visibleSet), source };
+      visibilityByUser[currentUserKey] = payload;
+      try { sessionVisibilityByUser[currentUserKey] = payload; sessionStorage.setItem('visibilityByUserSession', JSON.stringify(sessionVisibilityByUser)); } catch {}
       try { chrome.storage.local.set({ visibilityByUser }); } catch {}
     }
 
@@ -4092,10 +4252,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 	    async function refreshUserUI(opts={}){
 	      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
 	      const user = resolveUserForKey(metrics, currentUserKey);
-	      // Always reset list actions to "Show All" on initial dashboard open,
-	      // even if there is no selected user yet.
-	      if (forceShowAllOnLoad) setListActionActive('showAll');
 	      if (!user){
+          setListActionActive('showAll');
+          currentVisibilitySource = 'showAll';
 	        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
 	      }
       // No precompute needed for IR; use latest available remix count only for cards
@@ -4108,6 +4267,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
 	      const colorFor = makeColorMap(user);
         const isTopToday = isTopTodayKey(currentUserKey);
+        const savedVisibility = getSavedVisibilityEntry(currentUserKey);
+        let effectiveSaved = savedVisibility;
+        if (savedVisibility && savedVisibility.source === 'legacy'){
+          if (isLegacyDefaultVisibility(user, savedVisibility.ids)){
+            effectiveSaved = null;
+          } else {
+            effectiveSaved = { ids: savedVisibility.ids, source: 'custom' };
+          }
+        }
+        const canRestoreSaved = effectiveSaved && (!isDefaultVisibilitySource(effectiveSaved.source) || savedVisibility?.__fromSession);
 
         // Top Today is a dynamic, virtual user: keep selections, but reconcile against the live post set.
         if (isTopToday){
@@ -4116,38 +4285,38 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           for (const pid of Array.from(visibleSet)){
             if (!valid.has(pid)) visibleSet.delete(pid);
           }
-          if (forceShowAllOnLoad || (visibleSet.size === 0 && !preserveEmpty)){
+          if (visibleSet.size === 0 && !preserveEmpty){
             visibleSet.clear();
             allPids.forEach(pid=>visibleSet.add(pid));
-            if (forceShowAllOnLoad) setListActionActive('showAll');
-            forceShowAllOnLoad = false;
+            setListActionActive('showAll');
+            currentVisibilitySource = 'showAll';
           }
-        } else if (forceShowAllOnLoad){
-	        visibleSet.clear();
-	        Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
-	        setListActionActive('showAll');
-	        forceShowAllOnLoad = false;
-	      } else if (visibleSet.size === 0 && !preserveEmpty){
-	        // Restore from saved state (including empty) or default to last 20 most recent posts when no saved state
-	        if (Object.prototype.hasOwnProperty.call(visibilityByUser, currentUserKey)){
-	          const saved = visibilityByUser[currentUserKey];
-	          if (Array.isArray(saved)) saved.forEach(pid=>visibleSet.add(pid));
-	        } else {
-          // Only include posts with a valid post_time when choosing the default 20
-          const dated = Object.entries(user.posts||{})
-            .map(([pid,p])=>({ pid, t: getPostTimeStrict(p) || 0 }))
-            .filter(it=>it.t>0)
-            .sort((a,b)=>b.t-a.t);
-          if (dated.length){
-            dated.slice(0,20).forEach(it=>visibleSet.add(it.pid));
-          } else {
-            // Fallback: choose by GUID numeric (descending) when no post_time
-            const fallback = Object.keys(user.posts||{})
-              .map(pid=>({ pid, bi: pidBigInt(pid) }))
-              .sort((a,b)=> (a.bi===b.bi ? a.pid.localeCompare(b.pid) : (a.bi < b.bi ? 1 : -1)));
-            fallback.slice(0,20).forEach(it=>visibleSet.add(it.pid));
+        } else if (visibleSet.size === 0){
+          if (canRestoreSaved){
+            visibleSet.clear();
+            (effectiveSaved.ids || []).forEach(pid=>{
+              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+            });
+            currentVisibilitySource = effectiveSaved.source || 'custom';
+            currentListActionId = effectiveSaved.source || null;
+            setListActionActive(currentListActionId);
+            persistListActionForUser(currentUserKey, currentListActionId);
+            if (visibleSet.size === 0 && !preserveEmpty){
+              visibleSet.clear();
+              Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+              setListActionActive('showAll');
+              currentVisibilitySource = 'showAll';
+            }
+          } else if (!preserveEmpty){
+            visibleSet.clear();
+            Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+            setListActionActive('showAll');
+            currentVisibilitySource = 'showAll';
           }
         }
+      if (listActionByUser[currentUserKey]) {
+        currentListActionId = listActionByUser[currentUserKey];
+        setListActionActive(currentListActionId);
       }
       buildPostsList(user, colorFor, visibleSet, { 
         activeActionId: currentListActionId,
@@ -4344,6 +4513,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       // wire visibility toggles
       $$('#posts .toggle').forEach(btn=>{
         btn.addEventListener('click', ()=>{
+          currentVisibilitySource = 'custom';
+          setListActionActive(null);
           const pid = btn.dataset.pid; const row = btn.closest('.post');
           if (visibleSet.has(pid)) { visibleSet.delete(pid); row.classList.add('hidden'); btn.textContent='Show'; }
           else { visibleSet.add(pid); row.classList.remove('hidden'); btn.textContent='Hide'; }
@@ -4414,12 +4585,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
 
     $('#userSelect').addEventListener('change', async (e)=>{
-      currentUserKey = e.target.value; visibleSet.clear();
+      currentUserKey = e.target.value; visibleSet.clear(); currentVisibilitySource = null; currentListActionId = null; setListActionActive(null);
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
-      // Reset to "Show All" when selecting a new user
       const u = resolveUserForKey(metrics, currentUserKey);
       if (u) {
-        Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
         chart.resetZoom();
         viewsPerPersonChart.resetZoom();
         viewsChart.resetZoom();
@@ -4437,7 +4606,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       else if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
         addCompareUser(currentUserKey);
       }
-      refreshUserUI({ preserveEmpty: true });
+      await refreshUserUI();
       persistVisibility();
     });
 
@@ -4503,12 +4672,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#suggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{
-          currentUserKey = it.dataset.key; visibleSet.clear(); $('#search').value = ''; suggestions.style.display='none';
+          currentUserKey = it.dataset.key; visibleSet.clear(); currentVisibilitySource = null; currentListActionId = null; setListActionActive(null); $('#search').value = ''; suggestions.style.display='none';
           const sel = $('#userSelect'); sel.value = currentUserKey;
-          // Reset to "Show All" when selecting a new user
           const u = resolveUserForKey(metrics, currentUserKey);
           if (u) {
-            Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
             chart.resetZoom();
             viewsChart.resetZoom();
             followersChart.resetZoom();
@@ -4525,8 +4692,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           else if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
             addCompareUser(currentUserKey);
           }
-          refreshUserUI();
+          await refreshUserUI();
           try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+          persistVisibility();
         });
       });
     });
@@ -5327,11 +5495,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           else btn.classList.remove('active');
         });
       } catch {}
+      persistListActionForUser(currentUserKey, currentListActionId);
     }
 
       $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
-      $('#showAll').addEventListener('click', ()=>{ setListActionActive('showAll'); const u = resolveUserForKey(metrics, currentUserKey); if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ setListActionActive('hideAll'); visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      $('#showAll').addEventListener('click', ()=>{ currentVisibilitySource = 'showAll'; setListActionActive('showAll'); const u = resolveUserForKey(metrics, currentUserKey); if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ currentVisibilitySource = 'hideAll'; setListActionActive('hideAll'); visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
       // First 24 hours slider
       function fmtSliderTime(minutes){
         if (minutes < 60) return `${minutes}m`;
@@ -5361,6 +5530,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         viewsPerPersonSliderValue.textContent = fmtSliderTime(parseInt(viewsPerPersonSlider.value) || 1440);
       }
       $('#last5').addEventListener('click', ()=>{
+        currentVisibilitySource = 'last5';
         setListActionActive('last5');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5382,6 +5552,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#last10').addEventListener('click', ()=>{
+        currentVisibilitySource = 'last10';
         setListActionActive('last10');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5403,6 +5574,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top5').addEventListener('click', ()=>{
+        currentVisibilitySource = 'top5';
         setListActionActive('top5');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5432,6 +5604,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top10').addEventListener('click', ()=>{
+        currentVisibilitySource = 'top10';
         setListActionActive('top10');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5461,6 +5634,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom5').addEventListener('click', ()=>{
+        currentVisibilitySource = 'bottom5';
         setListActionActive('bottom5');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5536,6 +5710,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom10').addEventListener('click', ()=>{
+        currentVisibilitySource = 'bottom10';
         setListActionActive('bottom10');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5613,6 +5788,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
       const staleBtn = $('#stale');
       if (staleBtn) staleBtn.addEventListener('click', ()=>{
+        currentVisibilitySource = 'stale';
         setListActionActive('stale');
         const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
@@ -5627,7 +5803,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         visibleSet.clear();
         stale.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
-        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
+        refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility();
       });
 
     // If compare section is empty on initial load, add current user to show who we're looking at

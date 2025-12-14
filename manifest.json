@@ -17,7 +17,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["inject.js", "dashboard.html"],
+      "resources": ["api.js", "inject.js", "dashboard.html"],
       "matches": ["https://sora.chatgpt.com/*"]
     }
   ],
