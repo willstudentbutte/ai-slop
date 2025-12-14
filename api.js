@@ -29,6 +29,15 @@
     }
   };
 
+  const isRemixEmptyQuery = () => {
+    try {
+      // Requirement: URL ends with `?remix=`
+      return String(location?.search || '') === '?remix=';
+    } catch {
+      return false;
+    }
+  };
+
   let __sct_videoGensRaf = 0;
   let __sct_keepSettingsOpenToken = 0;
 
@@ -90,22 +99,80 @@
     requestAnimationFrame(ensure);
   };
 
+  const findOpenSettingsRootMenuEl = () => {
+    try {
+      const openMenus = Array.from(document.querySelectorAll('[data-radix-menu-content][role="menu"][data-state="open"]'));
+      // Prefer the top-level settings menu (contains the Duration menu item).
+      const preferred = openMenus.find((m) => m.querySelector && m.querySelector('[data-sct-duration-menuitem="1"]'));
+      if (preferred) return preferred;
+      return openMenus.find((m) => (m.textContent || '').includes('Duration')) || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const getSettingsValueText = (label, menuEl) => {
+    try {
+      const menu = menuEl || findOpenSettingsRootMenuEl();
+      if (!menu) return null;
+      const items = Array.from(menu.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]'));
+      const mi = items.find((el) => (el.textContent || '').includes(label));
+      if (!mi) return null;
+      const valueEl = findDurationMenuValueEl(mi);
+      const t = (valueEl?.textContent || '').trim();
+      return t || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const getSoraSettings = (menuEl) => {
+    const modelText = getSettingsValueText('Model', menuEl) || '';
+    const resolutionText = getSettingsValueText('Resolution', menuEl) || '';
+    const model = /sora\s*2\s*pro/i.test(modelText) ? 'sora2pro' : /sora\s*2/i.test(modelText) ? 'sora2' : null;
+    const resolution = /high/i.test(resolutionText) ? 'high' : /standard/i.test(resolutionText) ? 'standard' : null;
+    return { model, resolution };
+  };
+
+  const getGenCost = (seconds, settings) => {
+    const s = Number(seconds);
+    if (!Number.isFinite(s)) return null;
+    const model = settings?.model || null;
+    const resolution = settings?.resolution || null;
+
+    if (model === 'sora2') {
+      const costs = { 5: 1, 10: 1, 15: 2, 25: 3 };
+      return costs[s] ?? null;
+    }
+
+    if (model === 'sora2pro') {
+      if (resolution === 'high') {
+        const costs = { 5: 5, 10: 5, 15: 10, 25: null };
+        return costs[s] ?? null;
+      }
+      // Default to Standard if not present/unknown.
+      const costs = { 5: 2, 10: 2, 15: 4, 25: 12 };
+      return costs[s] ?? null;
+    }
+
+    // Fallback: keep old behavior.
+    if (s === 25) return 3;
+    if (s === 15) return 2;
+    return 1;
+  };
+
+  const shouldOffer25s = (settings) => {
+    // 25s is not available for Sora 2 Pro when Resolution is High.
+    // Allow when Sora 2 Pro + Standard (or unknown) and for Sora 2.
+    return !(settings?.model === 'sora2pro' && settings?.resolution === 'high');
+  };
+
   function ensureVideoGensWarning(seconds) {
     if (!Number.isFinite(seconds) || seconds <= 0) return false;
-    const desiredCount = seconds === 25 ? 3 : seconds === 15 ? 2 : 1;
-    const forceShow = seconds === 5 || seconds === 10 || seconds === 25;
-
-    const findOpenSettingsMenuEl = () => {
-      try {
-        const openMenus = Array.from(document.querySelectorAll('[data-radix-menu-content][role="menu"][data-state="open"]'));
-        // Prefer the top-level settings menu (contains the Duration menu item).
-        const preferred = openMenus.find((m) => m.querySelector && m.querySelector('[data-sct-duration-menuitem="1"]'));
-        if (preferred) return preferred;
-        return openMenus.find((m) => (m.textContent || '').includes('Duration')) || null;
-      } catch {
-        return null;
-      }
-    };
+    const menu = findOpenSettingsRootMenuEl();
+    const settings = getSoraSettings(menu);
+    const desiredCount = getGenCost(seconds, settings);
+    const forceShow = true;
 
     const removeInjectedHelperFromMenu = (menu) => {
       if (!menu) return;
@@ -139,7 +206,7 @@
 
     const ensureHelperRowInMenu = () => {
       if (!forceShow) return null;
-      const menu = findOpenSettingsMenuEl();
+      const menu = findOpenSettingsRootMenuEl();
       if (!menu) return null;
 
       try {
@@ -176,7 +243,7 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 16 16" class="h-5 w-5">
                 <path fill="currentColor" fill-rule="evenodd" d="M7.57 1.387c.9-.04 1.746.373 2.318 1.068 1.032-.36 2.204-.085 3.007.8.811.894 1.03 2.169.682 3.27.814.78 1.187 2.01.898 3.202-.288 1.181-1.165 2.057-2.235 2.303-.206 1.132-.976 2.129-2.112 2.465-.573.169-1.212.113-1.803.113a2.83 2.83 0 0 1-2.062-.902l-1.248-.025c-2.034 0-3.135-2.498-2.593-4.216-.813-.78-1.185-2.01-.896-3.2.288-1.184 1.169-2.063 2.242-2.307.714-2.307 1.943-2.522 3.801-2.575zM9.247 3.39c-.418-.704-1.162-1.055-1.89-.909l-.144.036c-.784.232-1.356 1.01-1.404 1.935a.53.53 0 0 1-.499.503c-.757.047-1.484.629-1.71 1.561-.229.938.139 1.876.802 2.354a.53.53 0 0 1 .173.653c-.374.816-.245 1.835.358 2.5.591.651 1.455.767 2.141.385l.097-.042a.53.53 0 0 1 .62.235c.446.75 1.263 1.1 2.034.873.784-.231 1.358-1.01 1.404-1.936a.533.533 0 0 1 .5-.504c.757-.046 1.484-.627 1.711-1.559.228-.938-.14-1.876-.805-2.355a.53.53 0 0 1-.172-.654c.374-.815.246-1.832-.357-2.496-.592-.652-1.457-.77-2.143-.387a.53.53 0 0 1-.716-.193" clip-rule="evenodd"></path>
               </svg>
-              <div class="font-medium">${String(desiredCount)}</div>
+              <div class="font-medium">${String(desiredCount ?? '')}</div>
             </div>
           </div>
         `;
@@ -191,7 +258,7 @@
 
     const findWarningRoot = () => {
       try {
-        const menu = findOpenSettingsMenuEl();
+        const menu = findOpenSettingsRootMenuEl();
         if (menu) {
           // Prefer Sora's native helper row when available (prevents duplicates).
           const native = findNativeHelperRowInMenu(menu);
@@ -250,7 +317,7 @@
         );
         const countEl = countEls[countEls.length - 1];
         if (!countEl) return false;
-        countEl.textContent = String(desiredCount);
+        countEl.textContent = desiredCount == null ? '' : String(desiredCount);
         return true;
       } catch {
         return false;
@@ -261,15 +328,15 @@
 
     // If the native helper exists, ensure we don't have our injected one too.
     try {
-      const menu = findOpenSettingsMenuEl();
+      const menu = findOpenSettingsRootMenuEl();
       const native = menu && findNativeHelperRowInMenu(menu);
       if (native) removeInjectedHelperFromMenu(menu);
     } catch {}
 
     if (tryApply()) return true;
 
-    // If switching from low durations to 25, Sora may not render the helper row; inject it.
-    if (forceShow && (seconds === 5 || seconds === 10 || seconds === 25)) {
+    // If Sora doesn't render the helper row for some selections, inject it.
+    if (forceShow) {
       try {
         ensureHelperRowInMenu();
       } catch {}
@@ -478,6 +545,9 @@
 
     const override = getDurationOverride();
     const isChecked = (d) => override && override.seconds === d.seconds && override.frames === d.frames;
+    const settings = getSoraSettings();
+    const allow25 = shouldOffer25s(settings);
+    const allow5 = !isRemixEmptyQuery();
 
     const getMenuItemSeconds = (el) => {
       const label = (el?.querySelector?.('span.truncate')?.textContent || el?.textContent || '').trim();
@@ -495,6 +565,51 @@
         return false;
       }
     };
+
+    // Remove 5s option when remix is active.
+    if (!allow5) {
+      try {
+        const radios = Array.from(group.querySelectorAll('[role="menuitemradio"]'));
+        radios.forEach((el) => {
+          const sec = getMenuItemSeconds(el);
+          if (sec === 5) el.remove();
+        });
+      } catch {}
+
+      try {
+        if (override && override.seconds === 5) clearDurationOverride();
+      } catch {}
+    }
+
+    // Remove 25s option when not allowed for the current model/resolution.
+    if (!allow25) {
+      try {
+        const radios = Array.from(group.querySelectorAll('[role="menuitemradio"]'));
+        radios.forEach((el) => {
+          const sec = getMenuItemSeconds(el);
+          if (sec === 25) el.remove();
+        });
+      } catch {}
+
+      // If 25s was selected via override, clear it so we don't keep rewriting API requests.
+      try {
+        if (override && override.seconds === 25) {
+          clearDurationOverride();
+          // Best-effort: update the parent menu value label to whichever built-in option is selected.
+          const checked = group.querySelector('[role="menuitemradio"][aria-checked="true"]');
+          const sec = getMenuItemSeconds(checked);
+          if (sec != null) {
+            const durationMenuItems = Array.from(document.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')).filter((mi) =>
+              (mi.textContent || '').includes('Duration')
+            );
+            for (const mi of durationMenuItems) {
+              const valueEl = findDurationMenuValueEl(mi);
+              if (valueEl) valueEl.textContent = `${sec}s`;
+            }
+          }
+        }
+      } catch {}
+    }
 
     const getClockSvg = (menuItemEl) => {
       if (!menuItemEl) return null;
@@ -629,6 +744,8 @@
     }
 
     for (const d of EXTRA_DURATIONS) {
+      if (d.seconds === 5 && !allow5) continue;
+      if (d.seconds === 25 && !allow25) continue;
       if (group.querySelector(`[data-sct-duration-option="${d.seconds}"]`)) {
         // Keep state in sync when the submenu is re-opened/re-rendered.
         const existing = group.querySelector(`[data-sct-duration-option="${d.seconds}"]`);
@@ -657,7 +774,7 @@
 
     // Re-order to: 5, 7, 10, 15, 20, 25 (others after).
     try {
-      const desired = [5, 10, 15, 25];
+      const desired = [allow5 ? 5 : null, 10, 15, allow25 ? 25 : null].filter((n) => n != null);
       const radios = Array.from(group.querySelectorAll('[role="menuitemradio"]'));
       const withMeta = radios.map((el, idx) => {
         const sec = getMenuItemSeconds(el);
@@ -698,7 +815,13 @@
           (el.textContent || '').includes('Duration')
         );
 
-        const override = getDurationOverride();
+        let override = getDurationOverride();
+        const settings = getSoraSettings();
+        if (override && override.seconds === 25 && !shouldOffer25s(settings)) {
+          clearDurationOverride();
+          override = null;
+        }
+
         if (override) {
           scheduleVideoGensWarning(override.seconds);
         } else {
@@ -733,6 +856,27 @@
         }
       } catch {}
     };
+
+    // SPA route changes can update `location.search` without DOM mutations; reschedule when URL changes.
+    try {
+      window.addEventListener('popstate', scheduleProcess, true);
+      const origPushState = history.pushState;
+      const origReplaceState = history.replaceState;
+      history.pushState = function () {
+        const ret = origPushState.apply(this, arguments);
+        try {
+          scheduleProcess();
+        } catch {}
+        return ret;
+      };
+      history.replaceState = function () {
+        const ret = origReplaceState.apply(this, arguments);
+        try {
+          scheduleProcess();
+        } catch {}
+        return ret;
+      };
+    } catch {}
 
     // Clear override when selecting any built-in duration option
     document.addEventListener(
@@ -796,6 +940,7 @@
           const rootMenu = getSettingsRootMenuFromMenuEl(menuEl);
           if (!rootMenu) return;
           keepSettingsMenuOpenSoon();
+          scheduleProcess();
         } catch {}
       },
       true
