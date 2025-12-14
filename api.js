@@ -31,8 +31,9 @@
 
   const isRemixEmptyQuery = () => {
     try {
-      // Requirement: URL ends with `?remix=`
-      return String(location?.search || '') === '?remix=';
+      // Requirement: URL ends with `?remix=` AND path contains `/p/` (but not e.g. `/d/`).
+      if (String(location?.search || '') !== '?remix=') return false;
+      return /\/p\//i.test(String(location?.pathname || ''));
     } catch {
       return false;
     }
