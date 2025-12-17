@@ -100,6 +100,7 @@
   let detailBadgeRetryInterval = null;
   let characterSortBtn = null;
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
+  let charAutoLoadLastAttemptMs = 0;
   let suppressDetailBadgeRender = false; // Flag to prevent renderDetailBadge during bulk processing
 
   let gatherScrollIntervalId = null;
@@ -5712,24 +5713,163 @@ async function renderAnalyzeTable(force = false) {
     renderCharacterStats();
   }
 
-  function addCharacterSortButton() {
-    // Find the Characters dialog header by looking for dialog with "Characters" title
-    const dialog = document.querySelector('div[role="dialog"]');
-    if (!dialog) {
-      // Dialog closed, reset button reference
-      characterSortBtn = null;
-      return;
+  function scheduleEnsureAllCharactersLoadedInDialog(dialog) {
+    try {
+      if (!dialog || !dialog.isConnected) return;
+      if (dialog.dataset.soraUvCharAutoLoadDone === '1') return;
+      if (dialog.dataset.soraUvCharAutoLoadScheduled === '1') return;
+      dialog.dataset.soraUvCharAutoLoadScheduled = '1';
+      setTimeout(() => {
+        try {
+          delete dialog.dataset.soraUvCharAutoLoadScheduled;
+          ensureAllCharactersLoadedInDialog(dialog);
+        } catch {}
+      }, 50);
+    } catch {}
+  }
+
+  async function ensureAllCharactersLoadedInDialog(dialog) {
+    try {
+      if (!dialog || !dialog.isConnected) return;
+      if (dialog.dataset.soraUvCharAutoLoadDone === '1') return;
+      if (dialog.dataset.soraUvCharAutoLoadRunning === '1') return;
+
+      const now = Date.now();
+      if (now - charAutoLoadLastAttemptMs < 1500) return;
+      charAutoLoadLastAttemptMs = now;
+
+      dialog.dataset.soraUvCharAutoLoadRunning = '1';
+
+      const waitForCountChange = (prevCount, timeoutMs) =>
+        new Promise((resolve) => {
+          let done = false;
+          const finish = (count) => {
+            if (done) return;
+            done = true;
+            try {
+              obs.disconnect();
+            } catch {}
+            try {
+              clearTimeout(t);
+            } catch {}
+            resolve(count);
+          };
+          const obs = new MutationObserver(() => {
+            try {
+              const next = dialog.querySelectorAll('a[href^="/profile/"]').length;
+              if (next !== prevCount) finish(next);
+            } catch {}
+          });
+          try {
+            obs.observe(dialog, { childList: true, subtree: true });
+          } catch {}
+          const t = setTimeout(() => finish(prevCount), timeoutMs);
+        });
+
+      const findScrollContainer = () => {
+        const cand = dialog.querySelector('.overflow-y-auto');
+        if (cand && cand.scrollHeight > cand.clientHeight + 4) return cand;
+        const kids = Array.from(dialog.querySelectorAll('*'));
+        for (const el of kids) {
+          try {
+            if (el.scrollHeight > el.clientHeight + 4) {
+              const oy = getComputedStyle(el).overflowY;
+              if (oy === 'auto' || oy === 'scroll') return el;
+            }
+          } catch {}
+        }
+        return null;
+      };
+
+      const scroller = findScrollContainer();
+      if (!scroller) {
+        dialog.dataset.soraUvCharAutoLoadDone = '1';
+        return;
+      }
+
+      const startTop = scroller.scrollTop;
+      const MAX_EXPECTED = 25;
+      let prevCount = dialog.querySelectorAll('a[href^="/profile/"]').length;
+      let stableRounds = 0;
+
+      for (let i = 0; i < 14; i++) {
+        if (!dialog.isConnected) break;
+        if (prevCount >= MAX_EXPECTED) break;
+
+        // Force a "near bottom" scroll to trigger lazy-loading.
+        const prevTop = scroller.scrollTop;
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 1);
+        scroller.scrollTop = scroller.scrollHeight;
+        if (scroller.scrollTop === prevTop) {
+          scroller.scrollTop = Math.max(0, prevTop - 1);
+          scroller.scrollTop = scroller.scrollHeight;
+        }
+        try {
+          scroller.dispatchEvent(new Event('scroll'));
+        } catch {}
+
+        const nextCount = await waitForCountChange(prevCount, 1600);
+        if (nextCount > prevCount) {
+          prevCount = nextCount;
+          stableRounds = 0;
+          continue;
+        }
+        stableRounds++;
+        if (stableRounds >= 3) break;
+      }
+
+      // If the user was at the top when the dialog opened, put them back there.
+      if (startTop <= 2) scroller.scrollTop = 0;
+
+      const loadedAll = prevCount >= MAX_EXPECTED || stableRounds >= 3;
+      if (loadedAll) dialog.dataset.soraUvCharAutoLoadDone = '1';
+
+      // Trigger another pass to apply stats/sort to newly-loaded items.
+      try {
+        requestAnimationFrame(() => {
+          try {
+            renderCharacterStats();
+          } catch {}
+        });
+      } catch {}
+    } catch {} finally {
+      try {
+        if (dialog) delete dialog.dataset.soraUvCharAutoLoadRunning;
+      } catch {}
     }
+  }
 
-    // Check if button already exists
-    if (dialog.querySelector('.sora-uv-char-sort-btn')) return;
+	  function addCharacterSortButton() {
+	    const findCharactersDialog = () => {
+	      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+	      for (const dialog of dialogs) {
+	        const headerText = dialog.querySelector('h2, [role="heading"]')?.textContent?.trim() || '';
+	        if (/edit characters/i.test(headerText)) return dialog;
+	      }
+	      for (const dialog of dialogs) {
+	        const headerText = dialog.querySelector('h2, [role="heading"]')?.textContent?.trim() || '';
+	        if (/characters/i.test(headerText)) return dialog;
+	      }
+	      return null;
+	    };
 
-    // Find the header by text content
-    const dialogHeader = Array.from(dialog.querySelectorAll('h2')).find(h => h.textContent === 'Characters');
-    if (!dialogHeader) return;
+	    const dialog = findCharactersDialog();
+	    if (!dialog) {
+	      characterSortBtn = null;
+	      return;
+	    }
 
-    const headerContainer = dialogHeader.parentElement;
-    if (!headerContainer) return;
+	    // Check if button already exists
+	    if (dialog.querySelector('.sora-uv-char-sort-btn')) return;
+
+	    // Find the header by text content
+	    const dialogHeader = Array.from(dialog.querySelectorAll('h2, [role="heading"]')).find(h =>
+	      /edit characters|characters/i.test(h.textContent || '')
+	    );
+	    if (!dialogHeader) return;
+
+	    const headerContainer = dialogHeader.parentElement;
+	    if (!headerContainer) return;
 
     // Create custom dropdown container
     const dropdownContainer = document.createElement('div');
@@ -5856,91 +5996,172 @@ async function renderAnalyzeTable(force = false) {
     headerContainer.appendChild(dropdownContainer);
   }
 
-  function sortCharacterList() {
-    // Find the character list container
-    const listContainer = document.querySelector('div[role="dialog"] .flex.flex-col.gap-1');
-    if (!listContainer) return;
-
-    // Get all character link elements
-    const characterLinks = Array.from(listContainer.querySelectorAll('a[href^="/profile/"]'));
-    if (characterLinks.length === 0) return;
-
-    // Create array of {element, username, stats} for sorting
-    const charactersData = characterLinks.map(link => {
-      const href = link.getAttribute('href');
-      const match = href?.match(/\/profile\/([^/?]+)/);
-      if (!match) return null;
-
-      const username = match[1];
-      const userId = usernameToUserId.get(username.toLowerCase());
-
-      const likes = userId ? (charToLikesCount.get(userId) || 0) : 0;
-      const createdAt = userId ? charToCreatedAt.get(userId) : null;
-      let likesPerDay = 0;
-      if (createdAt && likes > 0) {
-        // createdAt is a Unix timestamp in seconds, convert to milliseconds
-        const created = new Date(createdAt * 1000);
-        const now = new Date();
-        const daysSinceCreation = Math.max(1, (now - created) / (1000 * 60 * 60 * 24));
-        likesPerDay = likes / daysSinceCreation;
-      }
-
-      return {
-        element: link,
-        username,
-        userId,
-        likes,
-        likesPerDay,
-        cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
-        originalIndex: userId ? (charToOriginalIndex.get(userId) ?? 9999) : 9999
-      };
-    }).filter(Boolean);
-
-    // Sort based on current mode
-    if (characterSortMode === 'likes') {
-      charactersData.sort((a, b) => b.likes - a.likes);
-    } else if (characterSortMode === 'likesPerDay') {
-      charactersData.sort((a, b) => b.likesPerDay - a.likesPerDay);
-    } else if (characterSortMode === 'cameos') {
-      charactersData.sort((a, b) => b.cameos - a.cameos);
-    } else if (characterSortMode === 'date') {
-      // Sort by original index to restore default order
-      charactersData.sort((a, b) => a.originalIndex - b.originalIndex);
-    }
-
-    // Reorder DOM elements
-    charactersData.forEach(char => {
-      listContainer.appendChild(char.element);
-    });
-
-    dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
-  }
-
-	  function renderCharacterStats() {
-	    // Only do work when we're actually in the Characters UI (dialog or characters page).
-	    let dialog = null;
-	    let inCharDialog = false;
-	    try {
-	      const anyCharLink = document.querySelector('div[role="dialog"] a[href^="/profile/"]');
-	      dialog = anyCharLink?.closest?.('div[role="dialog"]') || null;
-	      const headerText = dialog?.querySelector?.('h2, [role="heading"]')?.textContent || '';
-	      inCharDialog = !!(dialog && /edit characters/i.test(headerText));
-	      // On profile pages, the character dialog can get too narrow; enforce a min width once.
-	      if (inCharDialog && !dialog.dataset.soraUvMinWidthSet) {
-	        if (!dialog.style.minWidth) dialog.style.minWidth = '524px';
-	        dialog.dataset.soraUvMinWidthSet = 'true';
+	  function sortCharacterList() {
+	    const findCharactersDialog = () => {
+	      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+	      for (const dialog of dialogs) {
+	        const headerText = dialog.querySelector('h2, [role="heading"]')?.textContent?.trim() || '';
+	        if (/edit characters/i.test(headerText)) return dialog;
 	      }
-	    } catch {}
+	      return null;
+	    };
 
-	    const inCharactersPage = /\/characters($|\?)/i.test(`${location.pathname}${location.search || ''}`);
-	    if (!inCharDialog && !inCharactersPage) return;
+	    const findCharacterListContainer = (root) => {
+	      const anchors = Array.from(root.querySelectorAll('a[href^="/profile/"]'));
+	      if (anchors.length === 0) return null;
 
-	    // Add sort button if dialog is open
-	    addCharacterSortButton();
+	      const parentToCount = new Map();
+	      for (const a of anchors) {
+	        const parent = a.parentElement;
+	        if (!parent) continue;
+	        const n = parent.querySelectorAll(':scope > a[href^="/profile/"]').length;
+	        if (n >= 2) parentToCount.set(parent, Math.max(n, parentToCount.get(parent) || 0));
+	      }
 
-	    // Find all character links (prefer scoping to dialog when present)
-	    const root = inCharDialog && dialog ? dialog : document;
-	    const characterLinks = root.querySelectorAll('a[href^="/profile/"]');
+	      let best = null;
+	      let bestN = 0;
+	      for (const [el, n] of parentToCount.entries()) {
+	        if (n > bestN) {
+	          best = el;
+	          bestN = n;
+	        }
+	      }
+	      return best || anchors[0].parentElement || null;
+	    };
+
+	    const dialog = findCharactersDialog();
+	    const root = dialog || document;
+	    const listContainer = findCharacterListContainer(root);
+	    if (!listContainer) return;
+
+	    // Only sort actual character rows; keep any non-character rows/buttons in place.
+	    const children = Array.from(listContainer.children);
+	    const sortableIndices = [];
+	    const characterLinks = [];
+	    for (let i = 0; i < children.length; i++) {
+	      const el = children[i];
+	      if (el?.matches?.('a[href^="/profile/"]')) {
+	        sortableIndices.push(i);
+	        characterLinks.push(el);
+	      }
+	    }
+	    if (characterLinks.length === 0) return;
+
+	    // Create array of {element, username, stats} for sorting
+	    const charactersData = characterLinks.map((link, i) => {
+	      const href = link.getAttribute('href') || '';
+	      const match = href.match(/\/profile\/([^/?]+)/);
+	      const username = match ? match[1] : '';
+	      const userId = username ? usernameToUserId.get(username.toLowerCase()) : null;
+
+	      const likes = userId ? (charToLikesCount.get(userId) || 0) : 0;
+	      const createdAt = userId ? charToCreatedAt.get(userId) : null;
+	      let likesPerDay = 0;
+	      if (createdAt && likes > 0) {
+	        // createdAt is a Unix timestamp in seconds, convert to milliseconds
+	        const created = new Date(createdAt * 1000);
+	        const now = new Date();
+	        const daysSinceCreation = Math.max(1, (now - created) / (1000 * 60 * 60 * 24));
+	        likesPerDay = likes / daysSinceCreation;
+	      }
+
+	      // Capture initial order for "date" fallback (before any sort).
+	      if (!link.dataset.soraUvCharOriginalIndex) {
+	        link.dataset.soraUvCharOriginalIndex = String(i);
+	      }
+	      const parsedFallback = Number.parseInt(link.dataset.soraUvCharOriginalIndex || '9999', 10);
+	      const fallbackOriginalIndex = Number.isFinite(parsedFallback) ? parsedFallback : 9999;
+
+	      return {
+	        element: link,
+	        username,
+	        userId,
+	        likes,
+	        likesPerDay,
+	        cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
+	        originalIndex: userId ? (charToOriginalIndex.get(userId) ?? fallbackOriginalIndex) : fallbackOriginalIndex
+	      };
+	    });
+
+	    // Sort based on current mode
+	    if (characterSortMode === 'likes') {
+	      charactersData.sort((a, b) => (b.likes - a.likes) || (a.originalIndex - b.originalIndex));
+	    } else if (characterSortMode === 'likesPerDay') {
+	      charactersData.sort((a, b) => (b.likesPerDay - a.likesPerDay) || (a.originalIndex - b.originalIndex));
+	    } else if (characterSortMode === 'cameos') {
+	      charactersData.sort((a, b) => (b.cameos - a.cameos) || (a.originalIndex - b.originalIndex));
+	    } else if (characterSortMode === 'date') {
+	      // Sort by original index to restore default order
+	      charactersData.sort((a, b) => a.originalIndex - b.originalIndex);
+	    }
+
+	    // Reorder only the character rows; keep non-character rows (e.g. pinned top row, "create" row) in place.
+	    const sortedLinks = charactersData.map(c => c.element);
+	    const newChildren = children.slice();
+	    for (let i = 0; i < sortableIndices.length; i++) {
+	      newChildren[sortableIndices[i]] = sortedLinks[i];
+	    }
+	    for (const el of newChildren) listContainer.appendChild(el);
+
+	    dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
+	  }
+
+		  function renderCharacterStats() {
+		    // Only do work when we're actually in the Characters UI (dialog or characters page).
+		    let dialog = null;
+		    let inCharDialog = false;
+		    try {
+		      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+		      dialog =
+		        dialogs.find(d => /edit characters/i.test(d.querySelector('h2, [role="heading"]')?.textContent || '')) || null;
+		      const headerText = dialog?.querySelector?.('h2, [role="heading"]')?.textContent || '';
+		      inCharDialog = !!(dialog && /edit characters/i.test(headerText));
+		      // On profile pages, the character dialog can get too narrow; enforce a min width once.
+		      if (inCharDialog && !dialog.dataset.soraUvMinWidthSet) {
+		        if (!dialog.style.minWidth) dialog.style.minWidth = '524px';
+		        dialog.dataset.soraUvMinWidthSet = 'true';
+		      }
+		    } catch {}
+
+		    const inCharactersPage = /\/characters($|\?)/i.test(`${location.pathname}${location.search || ''}`);
+		    if (!inCharDialog && !inCharactersPage) return;
+
+		    // Add sort button if dialog is open
+		    addCharacterSortButton();
+
+		    // Force-load all characters in the dialog (lazy loads on scroll).
+		    if (inCharDialog && dialog) scheduleEnsureAllCharactersLoadedInDialog(dialog);
+
+		    // Capture default order for "date" fallback before any sorting.
+		    if (inCharDialog && dialog) {
+		      try {
+		        const anchors = Array.from(dialog.querySelectorAll('a[href^="/profile/"]'));
+		        const parentToCount = new Map();
+		        for (const a of anchors) {
+		          const parent = a.parentElement;
+		          if (!parent) continue;
+		          const n = parent.querySelectorAll(':scope > a[href^="/profile/"]').length;
+		          if (n >= 2) parentToCount.set(parent, Math.max(n, parentToCount.get(parent) || 0));
+		        }
+		        let listContainer = null;
+		        let bestN = 0;
+		        for (const [el, n] of parentToCount.entries()) {
+		          if (n > bestN) {
+		            listContainer = el;
+		            bestN = n;
+		          }
+		        }
+		        const directLinks = listContainer ? Array.from(listContainer.querySelectorAll(':scope > a[href^="/profile/"]')) : [];
+		        for (let i = 0; i < directLinks.length; i++) {
+		          const link = directLinks[i];
+		          if (!link.dataset.soraUvCharOriginalIndex) link.dataset.soraUvCharOriginalIndex = String(i);
+		        }
+		      } catch {}
+		    }
+
+		    // Find all character links (prefer scoping to dialog when present)
+		    const root = inCharDialog && dialog ? dialog : document;
+		    const characterLinks = root.querySelectorAll('a[href^="/profile/"]');
 
 	    let hasNewStats = false;
 
