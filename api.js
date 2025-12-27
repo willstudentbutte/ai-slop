@@ -20,6 +20,7 @@
 
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
   const DURATION_OVERRIDE_KEY = 'SCT_DURATION_OVERRIDE_V1'; // stored in sora.chatgpt.com localStorage
+  const GENS_COUNT_KEY = 'SCT_GENS_COUNT_V1'; // stored in sora.chatgpt.com localStorage
   const UV_TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID (draft remix redo)
   const UV_REDO_PROMPT_KEY = 'SORA_UV_REDO_PROMPT';
 
@@ -124,9 +125,34 @@
     } catch {}
   };
 
+  const isVisibleEl = (el) => {
+    try {
+      if (!el || el.nodeType !== 1) return false;
+      if (!el.getClientRects || el.getClientRects().length === 0) return false;
+      const style = window.getComputedStyle ? getComputedStyle(el) : null;
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const getSettingsTriggerButtons = () => {
+    try {
+      return Array.from(document.querySelectorAll('button[aria-label="Settings"][aria-haspopup="menu"]'));
+    } catch {
+      return [];
+    }
+  };
+
   const findSettingsTriggerButton = () => {
     try {
-      return document.querySelector('button[aria-label="Settings"][aria-haspopup="menu"]');
+      const buttons = getSettingsTriggerButtons();
+      if (!buttons.length) return null;
+      const expanded = buttons.find((btn) => btn.getAttribute('aria-expanded') === 'true');
+      if (expanded) return expanded;
+      const visible = buttons.find((btn) => isVisibleEl(btn));
+      return visible || buttons[0] || null;
     } catch {
       return null;
     }
@@ -438,12 +464,71 @@
     { seconds: 25, frames: 750, label: '25 seconds', shortLabel: '25s' },
   ];
 
+  const GENS_COUNT_MIN = 1;
+  const GENS_COUNT_MAX = 20;
+
   function safeJsonParse(str) {
     try {
       return JSON.parse(str);
     } catch {
       return null;
     }
+  }
+
+  function clampGensCount(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return GENS_COUNT_MIN;
+    return Math.min(GENS_COUNT_MAX, Math.max(GENS_COUNT_MIN, Math.round(n)));
+  }
+
+  function getGensFillPercent(value) {
+    const n = clampGensCount(value);
+    const range = GENS_COUNT_MAX - GENS_COUNT_MIN;
+    if (range <= 0) return 100;
+    const pct = ((n - GENS_COUNT_MIN) / range) * 100;
+    return Math.min(100, Math.max(0, pct));
+  }
+
+  function loadGensCountFromStorage() {
+    try {
+      const raw = localStorage.getItem(GENS_COUNT_KEY);
+      if (!raw) return GENS_COUNT_MIN;
+      const parsed = safeJsonParse(raw);
+      const v = parsed && typeof parsed === 'object' ? parsed.count : raw;
+      return clampGensCount(v);
+    } catch {
+      return GENS_COUNT_MIN;
+    }
+  }
+
+  function syncGensControlUI() {
+    try {
+      const controls = document.querySelectorAll('[data-sct-gens-control="1"]');
+      controls.forEach((control) => {
+        const labelEl = control.querySelector('[data-sct-gens-label="1"]');
+        if (labelEl) labelEl.textContent = `Gens ${gensCount}`;
+        const valueEl = control.querySelector('[data-sct-gens-value="1"]');
+        if (valueEl) valueEl.textContent = String(gensCount);
+        const slider = control.querySelector('input[type="range"][data-sct-gens-slider="1"]');
+        if (slider) slider.value = String(gensCount);
+        const fill = control.querySelector('[data-sct-gens-fill="1"]');
+        if (fill) fill.style.width = `${getGensFillPercent(gensCount)}%`;
+      });
+    } catch {}
+  }
+
+  function writeGensCount(next) {
+    const clamped = clampGensCount(next);
+    gensCount = clamped;
+    try {
+      localStorage.setItem(GENS_COUNT_KEY, JSON.stringify({ count: clamped, setAt: Date.now() }));
+    } catch {}
+    syncGensControlUI();
+  }
+
+  let gensCount = loadGensCountFromStorage();
+  function getGensCount() {
+    return gensCount;
   }
 
   function loadDurationOverrideFromStorage() {
@@ -516,6 +601,341 @@
     }
   }
 
+  let __sct_openGensControl = null;
+  let __sct_gensListenersInstalled = false;
+
+  function setGensControlOpen(control, open) {
+    if (!control) return;
+    try {
+      const panel = control.querySelector('[data-sct-gens-panel="1"]');
+      const button = control.querySelector('[data-sct-gens-button="1"]');
+      if (!panel || !button) return;
+      panel.hidden = !open;
+      panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+      panel.dataset.state = open ? 'open' : 'closed';
+      button.setAttribute('aria-expanded', open ? 'true' : 'false');
+      button.dataset.state = open ? 'open' : 'closed';
+      if (open) {
+        requestAnimationFrame(() => positionGensPanel(control));
+      }
+    } catch {}
+  }
+
+  function ensureGensControlListeners() {
+    if (__sct_gensListenersInstalled) return;
+    __sct_gensListenersInstalled = true;
+
+    document.addEventListener(
+      'pointerdown',
+      (ev) => {
+        try {
+          if (!__sct_openGensControl) return;
+          if (!document.contains(__sct_openGensControl)) {
+            __sct_openGensControl = null;
+            return;
+          }
+          if (__sct_openGensControl.contains(ev.target)) return;
+          setGensControlOpen(__sct_openGensControl, false);
+          __sct_openGensControl = null;
+        } catch {}
+      },
+      true
+    );
+
+    document.addEventListener(
+      'keydown',
+      (ev) => {
+        try {
+          if (!__sct_openGensControl) return;
+          const key = ev && (ev.key || ev.code);
+          if (key !== 'Escape' && key !== 'Esc') return;
+          setGensControlOpen(__sct_openGensControl, false);
+          __sct_openGensControl = null;
+        } catch {}
+      },
+      true
+    );
+
+    window.addEventListener(
+      'resize',
+      () => {
+        try {
+          if (!__sct_openGensControl) return;
+          positionGensPanel(__sct_openGensControl);
+        } catch {}
+      },
+      { passive: true }
+    );
+  }
+
+  function ensureGensControlStyles() {
+    if (document.getElementById('sct-gens-control-style')) return;
+    const st = document.createElement('style');
+    st.id = 'sct-gens-control-style';
+    st.textContent = `
+      [data-sct-gens-control="1"] input[type="range"] {
+        appearance: none;
+        -webkit-appearance: none;
+        background: transparent;
+        outline: none;
+      }
+      [data-sct-gens-control="1"] input[type="range"]::-webkit-slider-runnable-track {
+        height: 8px;
+        background: transparent;
+        border: none;
+      }
+      [data-sct-gens-control="1"] input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        border-radius: 9999px;
+        background: rgb(var(--bg-inverse));
+        border: 2px solid rgba(var(--bg-inverse), 0.85);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.24), 0 0 0 2px rgba(0, 0, 0, 0.08);
+        margin-top: -5px;
+      }
+      [data-sct-gens-control="1"] input[type="range"]::-moz-range-track {
+        height: 8px;
+        background: transparent;
+        border: none;
+      }
+      [data-sct-gens-control="1"] input[type="range"]::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
+        border-radius: 9999px;
+        background: rgb(var(--bg-inverse));
+        border: 2px solid rgba(var(--bg-inverse), 0.85);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.24), 0 0 0 2px rgba(0, 0, 0, 0.08);
+        cursor: pointer;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
+  function positionGensPanel(control) {
+    try {
+      const panel = control.querySelector('[data-sct-gens-panel="1"]');
+      if (!panel || panel.hidden) return;
+      panel.style.transform = 'translateX(0)';
+      panel.style.left = '0';
+      panel.style.right = 'auto';
+
+      const margin = 12;
+      const rect = panel.getBoundingClientRect();
+      let shift = 0;
+      if (rect.right > window.innerWidth - margin) {
+        shift -= rect.right - (window.innerWidth - margin);
+      }
+      if (rect.left + shift < margin) {
+        shift += margin - (rect.left + shift);
+      }
+      if (shift) panel.style.transform = `translateX(${shift}px)`;
+    } catch {}
+  }
+
+  function buildGensControl() {
+    ensureGensControlStyles();
+
+    const wrapper = document.createElement('div');
+    wrapper.dataset.sctGensControl = '1';
+    wrapper.className = 'relative flex items-center';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.sctGensButton = '1';
+    button.setAttribute('aria-label', 'Number of gens');
+    button.setAttribute('aria-haspopup', 'menu');
+    button.setAttribute('aria-expanded', 'false');
+    button.dataset.state = 'closed';
+    button.className =
+      'justify-center whitespace-nowrap text-sm font-semibold focus-visible:outline-none data-[disabled=true]:pointer-events-none data-[disabled=true]:cursor-default data-[disabled=true]:opacity-50 group/button relative bg-token-bg-composer-button data-[disabled=false]:hover:bg-token-bg-active disabled:opacity-50 disabled:text-token-text-primary/40 px-3 py-2 h-9 rounded-full flex shrink-0 items-center gap-1';
+
+    const label = document.createElement('span');
+    label.dataset.sctGensLabel = '1';
+    label.textContent = `Gens ${gensCount}`;
+    label.style.display = 'inline-block';
+    label.style.minWidth = '6ch';
+    label.style.textAlign = 'center';
+    button.appendChild(label);
+
+    const arrow = document.createElement('span');
+    arrow.className = 'flex items-center';
+    arrow.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>';
+    button.appendChild(arrow);
+
+    const panel = document.createElement('div');
+    panel.dataset.sctGensPanel = '1';
+    panel.className =
+      'absolute bottom-full left-0 z-popover mb-2 min-w-[236px] max-w-[calc(100vw-24px)] rounded-[20px] bg-token-bg-popover p-2 shadow-popover popover-blur-nested popover-ring space-y-2';
+    panel.style.width = '236px';
+    panel.style.maxWidth = 'calc(100vw - 24px)';
+    panel.hidden = true;
+    panel.setAttribute('aria-hidden', 'true');
+    panel.setAttribute('role', 'menu');
+    panel.setAttribute('aria-orientation', 'vertical');
+    panel.dataset.side = 'top';
+    panel.dataset.state = 'closed';
+
+    const header = document.createElement('div');
+    header.className = 'flex items-center justify-between text-base font-semibold text-token-text-primary px-3 pt-2 pb-1';
+    header.textContent = 'Gens';
+
+    const value = document.createElement('span');
+    value.dataset.sctGensValue = '1';
+    value.className = 'text-base font-semibold text-token-text-primary';
+    value.textContent = String(gensCount);
+    header.appendChild(value);
+
+    const sliderWrap = document.createElement('div');
+    sliderWrap.className = 'rounded-2xl px-3 pb-3 pt-2';
+
+    const track = document.createElement('div');
+    track.className = 'relative flex h-6 w-full items-center';
+
+    const trackBar = document.createElement('div');
+    trackBar.className = 'absolute left-0 right-0 h-2 rounded-full bg-token-bg-light';
+
+    const fillBar = document.createElement('div');
+    fillBar.dataset.sctGensFill = '1';
+    fillBar.className = 'absolute left-0 h-2 rounded-full bg-token-bg-inverse opacity-30';
+    fillBar.style.width = `${getGensFillPercent(gensCount)}%`;
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(GENS_COUNT_MIN);
+    slider.max = String(GENS_COUNT_MAX);
+    slider.step = '1';
+    slider.value = String(gensCount);
+    slider.dataset.sctGensSlider = '1';
+    slider.setAttribute('aria-label', 'Number of gens');
+    slider.className = 'relative z-10 h-6 w-full cursor-pointer';
+
+    const rangeLabels = document.createElement('div');
+    rangeLabels.className = 'mt-2 flex justify-between text-sm text-token-text-secondary';
+
+    const minLabel = document.createElement('span');
+    minLabel.className = 'font-medium';
+    minLabel.textContent = String(GENS_COUNT_MIN);
+    const maxLabel = document.createElement('span');
+    maxLabel.className = 'font-medium';
+    maxLabel.textContent = String(GENS_COUNT_MAX);
+    rangeLabels.appendChild(minLabel);
+    rangeLabels.appendChild(maxLabel);
+
+    panel.appendChild(header);
+    track.appendChild(trackBar);
+    track.appendChild(fillBar);
+    track.appendChild(slider);
+    sliderWrap.appendChild(track);
+    sliderWrap.appendChild(rangeLabels);
+    panel.appendChild(sliderWrap);
+
+    button.addEventListener('click', (ev) => {
+      try {
+        ev.preventDefault();
+        ev.stopPropagation();
+      } catch {}
+      const isOpen = __sct_openGensControl === wrapper;
+      if (__sct_openGensControl && __sct_openGensControl !== wrapper) {
+        setGensControlOpen(__sct_openGensControl, false);
+      }
+      if (isOpen) {
+        setGensControlOpen(wrapper, false);
+        __sct_openGensControl = null;
+      } else {
+        __sct_openGensControl = wrapper;
+        setGensControlOpen(wrapper, true);
+      }
+    });
+
+    slider.addEventListener('input', () => {
+      writeGensCount(slider.value);
+    });
+
+    wrapper.appendChild(button);
+    wrapper.appendChild(panel);
+    return wrapper;
+  }
+
+  function installGensCountControl() {
+    let processScheduled = false;
+    const scheduleProcess = () => {
+      if (processScheduled) return;
+      processScheduled = true;
+      requestAnimationFrame(() => {
+        processScheduled = false;
+        process();
+      });
+    };
+
+    const process = () => {
+      try {
+        const triggers = getSettingsTriggerButtons();
+        const targets = triggers.filter((btn) => isVisibleEl(btn));
+        const candidates = targets.length ? targets : triggers;
+        if (!candidates.length) return;
+
+        for (const trigger of candidates) {
+          const row = trigger.parentElement;
+          if (!row) continue;
+          if (row.querySelector('[data-sct-gens-control="1"]')) continue;
+          const control = buildGensControl();
+          if (trigger.nextSibling) row.insertBefore(control, trigger.nextSibling);
+          else row.appendChild(control);
+        }
+        syncGensControlUI();
+      } catch {}
+    };
+
+    const startObserver = () => {
+      try {
+        ensureGensControlListeners();
+        if (!document.body) return;
+        const isRelevantNode = (n) => {
+          try {
+            if (!n || n.nodeType !== 1) return false;
+            if (n.matches?.('[data-sct-gens-control="1"]') || n.querySelector?.('[data-sct-gens-control="1"]')) return true;
+            return (
+              n.matches?.('button[aria-label="Settings"][aria-haspopup="menu"]') ||
+              n.querySelector?.('button[aria-label="Settings"][aria-haspopup="menu"]')
+            );
+          } catch {
+            return false;
+          }
+        };
+
+        const obs = new MutationObserver((records) => {
+          for (const r of records) {
+            const added = r.addedNodes || [];
+            const removed = r.removedNodes || [];
+            for (const n of added) {
+              if (isRelevantNode(n)) {
+                scheduleProcess();
+                return;
+              }
+            }
+            for (const n of removed) {
+              if (isRelevantNode(n)) {
+                scheduleProcess();
+                return;
+              }
+            }
+          }
+        });
+        obs.observe(document.body, { childList: true, subtree: true });
+        scheduleProcess();
+      } catch {}
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+    } else {
+      startObserver();
+    }
+  }
+
   function patchFetch() {
     if (typeof window.fetch !== 'function') return;
     if (window.fetch.__sct_patched) return;
@@ -533,42 +953,102 @@
       const sourceDraftId = isCreate && isRemixRoute() ? getDraftIdFromDraftRoute() : null;
       const shouldCaptureTaskId = !!sourceDraftId;
 
-      let p = null;
-      try {
-        if (isCreate && durationOverride) {
-          const override = getDurationOverride();
-          if (override && Number.isFinite(override.frames) && init && typeof init === 'object') {
-            const nextInit = { ...init };
-            if (nextInit.body != null) {
-              nextInit.body = rewriteNFramesInBodyString(nextInit.body, override.frames);
-              dlog('fetch rewrite', { url, frames: override.frames });
-              p = origFetch.call(this, input, nextInit);
+      const ctx = this;
+      const attachTaskCapture = (promise) => {
+        if (!shouldCaptureTaskId || !promise) return;
+        try {
+          promise
+            .then((res) => {
+              try {
+                res
+                  .clone()
+                  .json()
+                  .then((json) => {
+                    const taskId = json?.id;
+                    if (taskId) saveTaskToSourceDraft(taskId, sourceDraftId);
+                  })
+                  .catch(() => {});
+              } catch {}
+              return res;
+            })
+            .catch(() => {});
+        } catch {}
+      };
+
+      const buildInit = () => {
+        let nextInit = init;
+        try {
+          if (isCreate && durationOverride) {
+            const override = getDurationOverride();
+            if (override && Number.isFinite(override.frames) && init && typeof init === 'object') {
+              nextInit = { ...init };
+              if (nextInit.body != null) {
+                nextInit.body = rewriteNFramesInBodyString(nextInit.body, override.frames);
+                dlog('fetch rewrite', { url, frames: override.frames });
+              }
             }
           }
-        }
-      } catch {}
-
-      if (!p) p = origFetch.apply(this, arguments);
-
-      if (shouldCaptureTaskId) {
-        try {
-          p.then((res) => {
-            try {
-              res
-                .clone()
-                .json()
-                .then((json) => {
-                  const taskId = json?.id;
-                  if (taskId) saveTaskToSourceDraft(taskId, sourceDraftId);
-                })
-                .catch(() => {});
-            } catch {}
-            return res;
-          }).catch(() => {});
         } catch {}
+        return nextInit;
+      };
+
+      const makeRequest = (reqInput) => origFetch.call(ctx, reqInput, buildInit());
+
+      const desiredGens = isCreate ? getGensCount() : 1;
+      if (!Number.isFinite(desiredGens) || desiredGens <= 1) {
+        const p = makeRequest(input);
+        attachTaskCapture(p);
+        return p;
       }
 
-      return p;
+      let effectiveGens = desiredGens;
+      let inputs = null;
+      if (input && typeof input === 'object' && typeof input.clone === 'function') {
+        inputs = [];
+        try {
+          for (let i = 0; i < desiredGens; i++) inputs.push(input.clone());
+        } catch {
+          inputs = null;
+          effectiveGens = 1;
+        }
+      }
+
+      if (effectiveGens <= 1) {
+        const p = makeRequest(input);
+        attachTaskCapture(p);
+        return p;
+      }
+
+      const getInputForIndex = (i) => {
+        if (inputs) return inputs[i];
+        return input;
+      };
+
+      const enqueue = typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn);
+      const firstPromise = new Promise((resolve, reject) => {
+        enqueue(() => {
+          let p = null;
+          try {
+            p = makeRequest(getInputForIndex(0));
+          } catch (err) {
+            reject(err);
+            return;
+          }
+          attachTaskCapture(p);
+          p.then(resolve, reject);
+        });
+      });
+
+      for (let i = 1; i < effectiveGens; i++) {
+        enqueue(() => {
+          try {
+            const p = makeRequest(getInputForIndex(i));
+            attachTaskCapture(p);
+          } catch {}
+        });
+      }
+
+      return firstPromise;
     }
 
     patchedFetch.__sct_patched = true;
@@ -1132,4 +1612,5 @@
   patchXHR();
   checkPendingRedoPrompt();
   installDurationDropdownEnhancer();
+  installGensCountControl();
 })();
